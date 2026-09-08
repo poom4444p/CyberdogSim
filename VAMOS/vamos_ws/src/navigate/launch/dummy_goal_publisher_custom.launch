@@ -1,0 +1,7 @@
+<launch>
+    <arg name="param_file" default="navigate_custom"/>
+
+    <node name="dummy_goal_publisher" pkg="navigate" type="dummy_goal_publisher.py" output="screen">
+        <rosparam file="$(find navigate)/config/$(arg param_file).yaml" command="load"/>
+    </node>
+</launch>

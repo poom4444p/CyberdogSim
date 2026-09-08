@@ -1,0 +1,12 @@
+numpy
+opencv-python
+transformers
+peft
+
+8 ramp
+2 stair
+5 fail
+
+5 stair
+5 ramp
+8 fail

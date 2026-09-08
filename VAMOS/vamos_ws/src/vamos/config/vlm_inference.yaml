@@ -1,0 +1,3 @@
+max_new_tokens: 10
+num_samples: 1
+temperature: 0.2

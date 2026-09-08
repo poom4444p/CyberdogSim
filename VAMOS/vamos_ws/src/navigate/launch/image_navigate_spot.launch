@@ -1,0 +1,14 @@
+<launch>
+    <arg name="param_file" default="navigate_spot"/>
+
+    <node pkg="image_transport" type="republish" name="zed_depth_republish"
+      args="compressedDepth in:=/zed2i/zed_node/depth/depth_registered_throttle raw out:=/zed2i/zed_node/depth/depth_registered/raw" />
+
+    <node pkg="image_transport" type="republish" name="zed_color_republish"
+      args="compressed in:=/zed2i/zed_node/left/image_rect_color_throttle raw out:=/zed2i/zed_node/left/image_rect_color/raw" />
+
+
+    <node name="navigate" pkg="navigate" type="navigate.py" output="screen">
+        <rosparam file="$(find navigate)/config/$(arg param_file).yaml" command="load"/>
+    </node>
+</launch>

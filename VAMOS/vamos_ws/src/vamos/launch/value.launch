@@ -1,0 +1,3 @@
+<launch>
+      <node name="value_function" pkg="vamos" type="value_publisher.py" output="screen"/>
+</launch>

@@ -1,0 +1,37 @@
+image_topic: "/camera/color/image_raw"
+depth_topic: "/camera/aligned_depth_to_color/image_raw"
+depth_camera_info_topic: "/camera/aligned_depth_to_color/camera_info"
+goal_topic: "/hound/goal"
+robot_frame: "base_link"
+global_frame: "map"
+predictor_type: "vlm"
+time_threshold: 10000 #1000
+debug_subscribers: false
+
+# Trajectory predictor parameters
+num_waypoints_to_complete: 5
+side_offset_for_turn_cam: 0.5
+behind_offset_for_turn_cam: 0.3
+post_rotation_delay: 2.0
+path_topic: "/global_planner/planned_path"
+waypoint_reached_topic: "/carrot_picker/waypoint_reached_index"
+mission_complete_topic: "/nav_manager/mission_complete"
+
+# VLM parameters
+model_name_or_path: "/home/rll/projects/spot_ws/src/research/vamos/models/paligemma2-3b-pt-224-sft-lora-vamos_10pct_gpt5_mini_cocoqa_localized_narratives_fixed"
+temperature: 0.1
+max_new_tokens: 10
+num_samples: 50
+top_k: 0
+num_beams: 1
+debug: true
+
+# VLM topic parameters
+debug_image_topic: "/vamos/image_predicted_trajectories"
+value_map_image_topic: "/vamos/value_map_trajectories"
+predicted_paths_2d_topic: "/vamos/predicted_paths_2d"
+predicted_paths_3d_topic: "/vamos/predicted_paths_3d"
+predicted_values_topic: "/vamos/predicted_values"
+
+# VLM frame parameters
+feet_center_frame: "feet_center"

@@ -1,0 +1,46 @@
+image_topic: "image"
+depth_topic: "image"
+depth_camera_info_topic: "image"
+goal_topic: image"
+robot_frame: "image"
+global_frame: "image"
+predictor_type: "vlm" # Different types only for testing
+time_threshold: 60 # Time in seconds before the VLM times out and replans
+debug_subscribers: false # Set true to debug topic subscribers
+
+# Trajectory predictor parameters
+num_waypoints_to_complete: 5
+side_offset_for_turn_cam: 0.5
+behind_offset_for_turn_cam: 0.3
+post_rotation_delay: 2.0
+path_topic: "/global_planner/planned_path"
+waypoint_reached_topic: "/carrot_picker/waypoint_reached_index"
+mission_complete_topic: "/nav_manager/mission_complete"
+
+# VLM parameters
+model_name_or_path: "/home/daniel/Github/vamos/vamos_ws/src/vamos/src/vamos/models/vamos_navigation_only"
+temperature: 0.1
+max_new_tokens: 10
+num_samples: 50
+top_k: 0
+num_beams: 1
+debug: true
+use_http_server: false
+http_server_url: "http://localhost:8009"
+
+# VLM topic parameters
+debug_image_topic: "/vamos/image_predicted_trajectories"
+value_map_image_topic_trajectories: "/vamos/value_map_trajectories"
+predicted_paths_2d_topic: "/vamos/predicted_paths_2d"
+predicted_paths_3d_topic: "/vamos/predicted_paths_3d"
+predicted_values_topic: "/vamos/predicted_values"
+
+# VLM frame parameters
+feet_center_frame: "feet_center"
+
+# Value publisher parameters
+imu_topic: "image"
+heightmap_topic: "image"
+nn_path: "image"
+value_map_topic: "/vamos/value_map"
+value_map_image_topic: "/vamos/value_map_image"

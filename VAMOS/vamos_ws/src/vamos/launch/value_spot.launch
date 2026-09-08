@@ -1,0 +1,4 @@
+<launch>
+      <node name="heightmap_processor" pkg="spot_locomotion" type="heightmap_processor.py" output="screen"/>
+      <node name="value_function" pkg="vamos" type="value_publisher.py" output="screen"/>
+</launch>

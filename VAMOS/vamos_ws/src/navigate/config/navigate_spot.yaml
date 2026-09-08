@@ -1,0 +1,37 @@
+image_topic: "/zed2i/zed_node/left/image_rect_color/raw"
+depth_topic: "/zed2i/zed_node/depth/depth_registered/raw"
+depth_camera_info_topic: "/zed2i/zed_node/depth/camera_info"
+goal_topic: "/spot/goal"
+robot_frame: "base_link"
+predictor_type: "vlm"
+global_frame: "vision"
+time_threshold: 40
+debug_subscribers: false
+
+# Trajectory predictor parameters
+num_waypoints_to_complete: 5
+side_offset_for_turn_cam: 0.5
+behind_offset_for_turn_cam: 0.3
+post_rotation_delay: 2.0
+path_topic: "/global_planner/planned_path"
+waypoint_reached_topic: "/carrot_picker/waypoint_reached_index"
+mission_complete_topic: "/nav_manager/mission_complete"
+
+# VLM parameters
+model_name_or_path: "/home/dgorbatov/vamos/vamos_ws/src/vamos/src/vamos/models/vamos_navigation_only"
+temperature: 0.1
+max_new_tokens: 10
+num_samples: 50
+top_k: 0
+num_beams: 1
+debug: true
+
+# VLM topic parameters
+debug_image_topic: "/vamos/image_predicted_trajectories"
+value_map_image_topic: "/vamos/value_map_trajectories"
+predicted_paths_2d_topic: "/vamos/predicted_paths_2d"
+predicted_paths_3d_topic: "/vamos/predicted_paths_3d"
+predicted_values_topic: "/vamos/predicted_values"
+
+# VLM frame parameters
+feet_center_frame: "feet_center"

@@ -1,0 +1,9 @@
+<launch>
+    <arg name="param_file" default="navigate_custom"/>
+
+    <include file="$(find vamos)/launch/value.launch"/>
+    
+    <node name="navigate" pkg="navigate" type="navigate.py" output="screen">
+        <rosparam file="$(find navigate)/config/$(arg param_file).yaml" command="load"/>
+    </node>
+</launch>

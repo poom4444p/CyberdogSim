@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLM Navigation Interface</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahomac Geneva, Verdana, sans-serif;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            border-radius: 10px;
+            padding: 30px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .section {
+            margin-bottom: 30px;
+            padding: 20px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            background-color: #fafafa;
+        }
+        .section h2 {
+            color: #555;
+            margin-top: 0;
+            margin-bottom: 15px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+            color: #333;
+        }
+        input[type="text"], input[type="number"], textarea, select {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 14px;
+            box-sizing: border-box;
+        }
+        textarea {
+            height: 80px;
+            resize: vertical;
+        }
+        button {
+            background-color: #007bff;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #6c757d;
+            cursor: not-allowed;
+        }
+        .success {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .error {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        .status {
+            margin-top: 10px;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .status.success {
+            background-color: #d4edda;
+            border: 1px solid #c3e6cb;
+        }
+        .status.error {
+            background-color: #f8d7da;
+            border: 1px solid #f5c6cb;
+        }
+        .image-container {
+            position: relative;
+            display: inline-block;
+            margin-top: 10px;
+        }
+        .upload-area {
+            border: 2px dashed #ddd;
+            border-radius: 8px;
+            padding: 40px;
+            text-align: center;
+            cursor: pointer;
+            transition: border-color 0.3s;
+        }
+        .upload-area:hover {
+            border-color: #007bff;
+        }
+        .upload-area.dragover {
+            border-color: #007bff;
+            background-color: #f0f8ff;
+        }
+        #imagePreview {
+            max-width: 100%;
+            max-height: 400px;
+            margin-top: 10px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            cursor: crosshair;
+        }
+        .coordinates {
+            margin-top: 10px;
+            font-family: monospace;
+            background-color: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            border: 1px solid #e9ecef;
+        }
+        .response-section {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border: 1px solid #e9ecef;
+        }
+        .trajectory-data {
+            background-color: white;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 10px;
+            font-family: monospace;
+            font-size: 12px;
+            overflow-x: auto;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .current-instructions {
+            background-color: #e3f2fd;
+            padding: 15px;
+            border-radius: 4px;
+            margin-top: 10px;
+            border-left: 4px solid #2196f3;
+        }
+        .parameters {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🧭 VLM Navigation Interface</h1>
+        
+        <!-- Server Configuration -->
+        <div class="section">
+            <h2>Server Configuration</h2>
+            <div class="form-group">
+                <label for="serverUrl">Server URL:</label>
+                <input type="text" id="serverUrl" value="" placeholder="http://localhost:8009">
+            </div>
+            <button onclick="checkServerHealth()">Check Server Health</button>
+            <div id="healthStatus"></div>
+        </div>
+
+        <!-- Steering Instructions -->
+        <div class="section">
+            <h2>Natural Language Steering Instructions</h2>
+            <p>Set global instructions that will be appended to all navigation prompts:</p>
+            <div class="form-group">
+                <label for="steeringInstructions">Instructions (e.g., "Take the shortest path", "Avoid obstacles", "Be cautious near edges"):</label>
+                <textarea id="steeringInstructions" placeholder="Enter natural language instructions to guide navigation behavior..."></textarea>
+            </div>
+            <button onclick="setSteeringInstructions()">Update Instructions</button>
+            <button onclick="getSteeringInstructions()">Get Current Instructions</button>
+            <button onclick="clearSteeringInstructions()">Clear Instructions</button>
+            <div id="steeringStatus"></div>
+            <div id="currentInstructions" class="current-instructions" style="display: none;">
+                <strong>Current Instructions:</strong> <span id="currentInstructionsText"></span>
+            </div>
+        </div>
+
+        <!-- Image Upload and Navigation -->
+        <div class="section">
+            <h2>Navigation Prediction</h2>
+            <div class="form-group">
+                <label>Upload Image:</label>
+                <div class="upload-area" id="uploadArea" onclick="document.getElementById('imageInput').click()">
+                    <input type="file" id="imageInput" accept="image/*" style="display: none;" onchange="handleImageUpload(event)">
+                    <p>Click to select an image or drag and drop</p>
+                </div>
+                <div style="position: relative; display: inline-block;">
+                    <img id="imagePreview" style="display: none;" onclick="handleImageClick(event)">
+                    <canvas id="trajectoryCanvas" style="position: absolute; top: 0; left: 0; pointer-events: none; display: none;"></canvas>
+                </div>
+            </div>
+            
+            <div class="coordinates" id="coordinates" style="display: none;">
+                <strong>Click coordinates:</strong> <span id="coordText"></span><br>
+                <strong>Navigation prompt:</strong> <span id="promptText"></span>
+            </div>
+
+            <!-- Generation Parameters -->
+            <div class="parameters">
+                <div class="form-group">
+                    <label for="maxTokens">Max Tokens:</label>
+                    <input type="number" id="maxTokens" value="10" min="2" max="100">
+                </div>
+                <div class="form-group">
+                    <label for="temperature">Temperature:</label>
+                    <input type="number" id="temperature" value="1.0" min="0" max="2" step="0.1">
+                </div>
+                <div class="form-group">
+                    <label for="topK">Top K:</label>
+                    <input type="number" id="topK" value="100" min="0" max="100">
+                </div>
+                <div class="form-group">
+                    <label for="numBeams">Num Beams:</label>
+                    <input type="number" id="numBeams" value="1" min="1" max="10">
+                </div>
+                <div class="form-group">
+                    <label for="numSamples">Num Samples:</label>
+                    <input type="number" id="numSamples" value="1" min="1" max="10">
+                </div>
+            </div>
+
+            <button id="predictButton" onclick="predictNavigation()" disabled>Predict Navigation</button>
+            <div id="predictionStatus"></div>
+            
+            <div id="responseSection" class="response-section" style="display: none;">
+                <h3>Prediction Results</h3>
+                <div id="trajectoryData" class="trajectory-data"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentImage = null;
+        let clickCoordinates = null;
+
+        // Drag and drop functionality
+        const uploadArea = document.getElementById('uploadArea');
+        
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+        
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+        
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleImageFile(files[0]);
+            }
+        });
+
+        function handleImageUpload(event) {
+            const file = event.target.files[0];
+            if (file) {
+                handleImageFile(file);
+            }
+        }
+
+        function handleImageFile(file) {
+            // Compress image if it's too large
+            if (file.size > 1024 * 1024) { // If larger than 1MB
+                document.getElementById('uploadArea').innerHTML = '<p>Compressing large image...</p>';
+                compressImage(file, (compressedDataUrl) => {
+                    currentImage = compressedDataUrl;
+                    const preview = document.getElementById('imagePreview');
+                    preview.src = currentImage;
+                    preview.style.display = 'block';
+                    document.getElementById('uploadArea').style.display = 'none';
+                    
+                    // Reset coordinates and clear visualization
+                    clickCoordinates = null;
+                    document.getElementById('coordinates').style.display = 'none';
+                    document.getElementById('predictButton').disabled = true;
+                    clearTrajectoryVisualization();
+                });
+            } else {
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    currentImage = e.target.result;
+                    const preview = document.getElementById('imagePreview');
+                    preview.src = currentImage;
+                    preview.style.display = 'block';
+                    document.getElementById('uploadArea').style.display = 'none';
+                    
+                    // Reset coordinates and clear visualization
+                    clickCoordinates = null;
+                    document.getElementById('coordinates').style.display = 'none';
+                    document.getElementById('predictButton').disabled = true;
+                    clearTrajectoryVisualization();
+                };
+                reader.readAsDataURL(file);
+            }
+        }
+
+        function drawTrajectoriesOnImage(trajectories, clickCoords) {
+            const img = document.getElementById('imagePreview');
+            const canvas = document.getElementById('trajectoryCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size to match image display size
+            canvas.width = img.clientWidth;
+            canvas.height = img.clientHeight;
+            canvas.style.display = 'block';
+            
+            // Clear canvas
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            // Calculate scaling factors
+            const scaleX = img.clientWidth / img.naturalWidth;
+            const scaleY = img.clientHeight / img.naturalHeight;
+            
+            // Generate colors for different trajectories
+            const colors = [
+                '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57',
+                '#FF9FF3', '#54A0FF', '#5F27CD', '#00D2D3', '#FF9F43'
+            ];
+            
+            // Draw ego motion point (bottom center of image)
+            const egoX = canvas.width / 2;
+            const egoY = canvas.height - 10;
+            
+            ctx.fillStyle = '#000000';
+            ctx.strokeStyle = '#FFFFFF';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(egoX, egoY, 8, 0, 2 * Math.PI);
+            ctx.fill();
+            ctx.stroke();
+            
+            // Draw click point (destination)
+            if (clickCoords) {
+                const clickX = clickCoords.x * scaleX;
+                const clickY = clickCoords.y * scaleY;
+                
+                // Draw red X for destination
+                ctx.strokeStyle = '#FF0000';
+                ctx.lineWidth = 4;
+                const crossSize = 12;
+                
+                ctx.beginPath();
+                ctx.moveTo(clickX - crossSize, clickY - crossSize);
+                ctx.lineTo(clickX + crossSize, clickY + crossSize);
+                ctx.moveTo(clickX - crossSize, clickY + crossSize);
+                ctx.lineTo(clickX + crossSize, clickY - crossSize);
+                ctx.stroke();
+            }
+            
+            // Draw trajectories
+            trajectories.forEach((trajectory, trajIndex) => {
+                if (!trajectory || trajectory.length === 0) return;
+                
+                const color = colors[trajIndex % colors.length];
+                
+                // Draw line from ego position to first waypoint
+                if (trajectory.length > 0) {
+                    const firstPoint = trajectory[0];
+                    const firstX = firstPoint[0] * scaleX;
+                    const firstY = firstPoint[1] * scaleY;
+                    
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 3;
+                    ctx.setLineDash([5, 5]); // Dashed line for ego motion
+                    ctx.beginPath();
+                    ctx.moveTo(egoX, egoY);
+                    ctx.lineTo(firstX, firstY);
+                    ctx.stroke();
+                    ctx.setLineDash([]); // Reset to solid line
+                }
+                
+                // Draw trajectory points and connections
+                trajectory.forEach((point, pointIndex) => {
+                    const x = point[0] * scaleX;
+                    const y = point[1] * scaleY;
+                    
+                    // Draw connections between points
+                    if (pointIndex > 0) {
+                        const prevPoint = trajectory[pointIndex - 1];
+                        const prevX = prevPoint[0] * scaleX;
+                        const prevY = prevPoint[1] * scaleY;
+                        
+                        ctx.strokeStyle = color;
+                        ctx.lineWidth = 3;
+                        ctx.beginPath();
+                        ctx.moveTo(prevX, prevY);
+                        ctx.lineTo(x, y);
+                        ctx.stroke();
+                    }
+                    
+                    // Draw waypoint circles
+                    ctx.fillStyle = color + 'CC'; // Semi-transparent
+                    ctx.strokeStyle = color;
+                    ctx.lineWidth = 2;
+                    ctx.beginPath();
+                    ctx.arc(x, y, 6, 0, 2 * Math.PI);
+                    ctx.fill();
+                    ctx.stroke();
+                });
+            });
+        }
+        
+        function clearTrajectoryVisualization() {
+            const canvas = document.getElementById('trajectoryCanvas');
+            const ctx = canvas.getContext('2d');
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            canvas.style.display = 'none';
+        }
+
+        function compressImage(file, callback) {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            const img = new Image();
+            
+            img.onload = () => {
+                // Calculate new dimensions (max 1920x1920)
+                let { width, height } = img;
+                const maxDimension = 1920;
+                
+                if (width > maxDimension || height > maxDimension) {
+                    if (width > height) {
+                        height = (height * maxDimension) / width;
+                        width = maxDimension;
+                    } else {
+                        width = (width * maxDimension) / height;
+                        height = maxDimension;
+                    }
+                }
+                
+                canvas.width = width;
+                canvas.height = height;
+                
+                // Draw and compress
+                ctx.drawImage(img, 0, 0, width, height);
+                
+                // Convert to base64 with compression
+                const compressedDataUrl = canvas.toDataURL('image/jpeg', 0.8);
+                callback(compressedDataUrl);
+            };
+            
+            const reader = new FileReader();
+            reader.onload = (e) => {
+                img.src = e.target.result;
+            };
+            reader.readAsDataURL(file);
+        }
+
+        function handleImageClick(event) {
+            const rect = event.target.getBoundingClientRect();
+            const x = event.clientX - rect.left;
+            const y = event.clientY - rect.top;
+            
+            // Convert to image coordinates
+            const img = event.target;
+            const imageX = (x / img.clientWidth) * img.naturalWidth;
+            const imageY = (y / img.clientHeight) * img.naturalHeight;
+            
+            clickCoordinates = { x: Math.round(imageX), y: Math.round(imageY) };
+            
+            // Calculate percentage coordinates for the navigation prompt
+            const xPercent = Math.round((imageX / img.naturalWidth) * 1024);
+            const yPercent = Math.round((imageY / img.naturalHeight) * 1024);
+            
+            const xToken = `<loc${xPercent.toString().padStart(4, '0')}>`;
+            const yToken = `<loc${yPercent.toString().padStart(4, '0')}>`;
+            const prompt = `Navigate to x=${xToken}, y=${yToken}`;
+            
+            document.getElementById('coordText').textContent = `(${imageX}, ${imageY})`;
+            document.getElementById('promptText').textContent = prompt;
+            document.getElementById('coordinates').style.display = 'block';
+            document.getElementById('predictButton').disabled = false;
+        }
+
+        async function checkServerHealth() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const statusDiv = document.getElementById('healthStatus');
+            
+            try {
+                const response = await fetch(`${serverUrl}/health`);
+                const data = await response.json();
+                
+                statusDiv.innerHTML = `
+                    <div class="status success">
+                        <strong>Server Status:</strong> ${data.status}<br>
+                        <strong>CUDA Available:</strong> ${data.cuda}<br>
+                        <strong>GPUs:</strong> ${data.gpus}<br>
+                        <strong>Model Loaded:</strong> ${data.model_loaded}<br>
+                        <strong>Device:</strong> ${data.device}
+                    </div>
+                `;
+            } catch (error) {
+                statusDiv.innerHTML = `
+                    <div class="status error">
+                        <strong>Error:</strong> Could not connect to server. ${error.message}
+                    </div>
+                `;
+            }
+        }
+
+        async function setSteeringInstructions() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const instructions = document.getElementById('steeringInstructions').value;
+            const statusDiv = document.getElementById('steeringStatus');
+            
+            try {
+                const response = await fetch(`${serverUrl}/steering_instructions`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ instructions: instructions })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    statusDiv.innerHTML = `<div class="status success">${data.message}</div>`;
+                    updateCurrentInstructions(data.current_instructions);
+                } else {
+                    statusDiv.innerHTML = `<div class="status error">Error: ${data.message}</div>`;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="status error">Error: ${error.message}</div>`;
+            }
+        }
+
+        async function getSteeringInstructions() {
+            const serverUrl = document.getElementById('serverUrl').value;
+            const statusDiv = document.getElementById('steeringStatus');
+            
+            try {
+                const response = await fetch(`${serverUrl}/steering_instructions`);
+                const data = await response.json();
+                
+                document.getElementById('steeringInstructions').value = data.current_instructions;
+                statusDiv.innerHTML = `<div class="status success">${data.message}</div>`;
+                updateCurrentInstructions(data.current_instructions);
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="status error">Error: ${error.message}</div>`;
+            }
+        }
+
+        function clearSteeringInstructions() {
+            document.getElementById('steeringInstructions').value = '';
+            setSteeringInstructions();
+        }
+
+        function updateCurrentInstructions(instructions) {
+            const currentDiv = document.getElementById('currentInstructions');
+            const textSpan = document.getElementById('currentInstructionsText');
+            
+            if (instructions.trim()) {
+                textSpan.textContent = instructions;
+                currentDiv.style.display = 'block';
+            } else {
+                currentDiv.style.display = 'none';
+            }
+        }
+
+        async function predictNavigation() {
+            if (!currentImage || !clickCoordinates) {
+                alert('Please upload an image and click on a destination point first.');
+                return;
+            }
+            
+            const serverUrl = document.getElementById('serverUrl').value;
+            const statusDiv = document.getElementById('predictionStatus');
+            const button = document.getElementById('predictButton');
+            
+            button.disabled = true;
+            button.textContent = 'Predicting...';
+            
+            try {
+                // Convert image to base64 (remove data URL prefix)
+                const base64Image = currentImage.split(',')[1];
+                
+                // Get click coordinates and create navigation prompt
+                const img = document.getElementById('imagePreview');
+                const xPercent = Math.round((clickCoordinates.x / img.naturalWidth) * 1024);
+                const yPercent = Math.round((clickCoordinates.y / img.naturalHeight) * 1024);
+                const xToken = `<loc${xPercent.toString().padStart(4, '0')}>`;
+                const yToken = `<loc${yPercent.toString().padStart(4, '0')}>`;
+                const textPrompt = `Navigate to x=${xToken}, y=${yToken}`;
+                
+                // Prepare form data
+                const formData = new FormData();
+                formData.append('image_base64', base64Image);
+                formData.append('text_prompt', textPrompt);
+                formData.append('max_tokens', document.getElementById('maxTokens').value);
+                formData.append('temperature', document.getElementById('temperature').value);
+                formData.append('top_k', document.getElementById('topK').value);
+                formData.append('num_beams', document.getElementById('numBeams').value);
+                formData.append('num_samples', document.getElementById('numSamples').value);
+                
+                const response = await fetch(`${serverUrl}/predict_json`, {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                console.log('API Response:', data); // Debug logging
+                
+                if (data.success) {
+                    statusDiv.innerHTML = `
+                        <div class="status success">
+                            <strong>Success!</strong> Generated ${data.trajectories.length} trajectory(ies) in ${data.processing_time ? data.processing_time.toFixed(2) : 'N/A'}s
+                        </div>
+                    `;
+                    
+                    // Draw trajectories on image
+                    drawTrajectoriesOnImage(data.trajectories, clickCoordinates);
+                    
+                    // Display results
+                    document.getElementById('responseSection').style.display = 'block';
+                    document.getElementById('trajectoryData').innerHTML = `
+                        <strong>Generated Texts:</strong><br>
+                        ${data.generated_texts.map(text => `<div style="margin-bottom: 10px; padding: 5px; background-color: #f8f9fa; border-left: 3px solid #007bff;">${text}</div>`).join('')}
+                        <br>
+                        <strong>Trajectories:</strong><br>
+                        <pre>${JSON.stringify(data.trajectories, null, 2)}</pre>
+                    `;
+                } else {
+                    const errorMsg = data.error_message || data.message || data.detail || 'Unknown error occurred';
+                    const processingTime = data.processing_time ? data.processing_time.toFixed(2) : 'N/A';
+                    statusDiv.innerHTML = `
+                        <div class="status error">
+                            <strong>Error:</strong> ${errorMsg}<br>
+                            <strong>Processing time:</strong> ${processingTime}s<br>
+                            <strong>Response:</strong> <pre style="font-size: 11px; margin-top: 5px;">${JSON.stringify(data, null, 2)}</pre>
+                        </div>
+                    `;
+                }
+            } catch (error) {
+                statusDiv.innerHTML = `<div class="status error">Network Error: ${error.message}</div>`;
+            } finally {
+                button.disabled = false;
+                button.textContent = 'Predict Navigation';
+            }
+        }
+
+        // Initialize by checking server health and getting current instructions
+        window.onload = () => {
+            // Auto-detect server URL from current location
+            const serverUrlInput = document.getElementById('serverUrl');
+            if (!serverUrlInput.value) {
+                // Use the same protocol and host as the current page
+                const currentUrl = window.location;
+                serverUrlInput.value = `${currentUrl.protocol}//${currentUrl.host}`;
+            }
+            
+            checkServerHealth();
+            getSteeringInstructions();
+        };
+    </script>
+</body>
+</html>

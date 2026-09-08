@@ -1,0 +1,4 @@
+<launch>
+    <node pkg="image_transport" type="republish" name="hound_color_republish"
+      args="raw in:=/camera/color/image_raw compressed out:=/image" />
+</launch>

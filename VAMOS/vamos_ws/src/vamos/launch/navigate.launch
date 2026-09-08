@@ -1,0 +1,9 @@
+<launch>
+  <!-- Load parameters from YAML -->
+  <rosparam command="load" file="$(find vamos)/config/navigate.yaml" />
+  
+  <!-- Launch the VLM navigation node -->
+  <node name="vlm_navigation_node" pkg="vamos" type="navigate.py" output="screen" respawn="true">
+    <!-- All parameters are loaded from the YAML file -->
+  </node>
+</launch>

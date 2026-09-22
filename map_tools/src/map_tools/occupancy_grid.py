@@ -239,6 +239,26 @@ class OccupancyGrid:
     #  Modification
     # ──────────────────────────────────────────────
 
+    def inflate(self, radius_m: float) -> 'OccupancyGrid':
+        """Grow obstacles by the robot's radius, for planning.
+
+        A* on the raw grid happily routes a point robot 5 cm from a wall.
+        Planning on an inflated copy keeps real routes down the middle of
+        corridors. Doors here are 0.9 m wide, so radius must stay under
+        0.3 m or the dilation seals them shut.
+        """
+        from scipy import ndimage
+
+        cells = int(np.ceil(radius_m / self.resolution))
+        if cells < 1:
+            return self
+        occupied = self.grid == 100
+        grown = ndimage.binary_dilation(
+            occupied, ndimage.generate_binary_structure(2, 2), iterations=cells)
+        grid = np.where(grown, np.int8(100), self.grid.copy())
+        return OccupancyGrid(grid, self.resolution, self.origin,
+                             self.occupied_thresh, self.free_thresh)
+
     def set_occupied(self, row: int, col: int) -> None:
         """Mark a cell as occupied."""
         if self.is_in_bounds(row, col):

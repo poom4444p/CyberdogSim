@@ -19,6 +19,8 @@ import math
 import os
 import sys
 
+import yaml
+
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
 sys.path.insert(0, os.path.join(ROOT, "map_tools", "src"))
 
@@ -39,6 +41,11 @@ class BuildingRouter:
             n: OccupancyGrid.load(os.path.join(building_dir, "maps", f"floor{n}", "room_map"))
             for n in self.floors
         }
+        # Plan on inflated copies so routes leave room for the robot's width;
+        # self.grids stays raw for drawing and for test_locations.py.
+        with open(config_path, encoding="utf-8") as f:
+            radius = yaml.safe_load(f)["map"].get("robot_radius", 0.0)
+        self.plan_grids = {n: g.inflate(radius) for n, g in self.grids.items()}
         self.behavior = BehaviorLayer.from_config(config_path)  # no zones inside the building
         self.planner = AStarPlanner.from_config(config_path)
 
@@ -72,14 +79,14 @@ class BuildingRouter:
         floor, xy = start_floor, tuple(start_xy)
         if target["floor"] != floor:
             stairs = self.resolve("stairs", floor, xy)
-            leg = self.planner.plan_with_checkpoints(self.grids[floor], self.behavior, xy, tuple(stairs["xy"]))
+            leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy, tuple(stairs["xy"]))
             if leg is None:
                 return None
             leg.checkpoints[-1].announcements = [f"Take the stairs to floor {target['floor']}"]
             legs.append((floor, leg))
             floor, xy = target["floor"], tuple(stairs["xy"])
 
-        leg = self.planner.plan_with_checkpoints(self.grids[floor], self.behavior, xy, tuple(target["xy"]))
+        leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy, tuple(target["xy"]))
         if leg is None:
             return None
         legs.append((floor, leg))

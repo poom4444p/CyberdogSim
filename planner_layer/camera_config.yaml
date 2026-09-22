@@ -6,5 +6,6 @@ fx: 380.0        # focal length in pixels
 fy: 380.0
 cx: 320.0        # image center
 cy: 240.0
-camera_height: 0.5   # meters above the floor
+camera_height: 0.32  # meters above the floor (Go2 body sits at z~0.27-0.32;
+                     # MEASURE this on the real Cyberdog before hardware trials)
 fov_margin: 20       # pixels to keep away from the image edge

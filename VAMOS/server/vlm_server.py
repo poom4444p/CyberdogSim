@@ -54,7 +54,9 @@ if hasattr(torch, "compile"):
 # Global variables for model and processor
 model = None
 processor = None
-device = "cuda" if torch.cuda.is_available() else "cpu"
+device = ("cuda" if torch.cuda.is_available()
+          else "mps" if torch.backends.mps.is_available()
+          else "cpu")   # Apple Silicon: use the GPU instead of falling back to CPU
 # Global variable for natural language steering instructions
 steering_instructions = ""
 return_trajectories = False

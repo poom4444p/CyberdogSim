@@ -26,3 +26,4 @@ input_treating_layer/archive/
 # Point clouds (large; regenerate with map_tools/scripts/mesh_to_grid.py)
 *.pcd
 input_treating_layer/mac_lora_final_backup/
+sim/scene_cache/

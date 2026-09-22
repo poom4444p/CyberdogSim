@@ -356,6 +356,7 @@ class AStarPlanner:
         checkpoints = []
         accumulated_dist = 0.0
         last_checkpoint_dist = 0.0
+        last_checkpoint_pos = polyline[0]
         prev_zones: List[str] = []
 
         # Always add start point
@@ -430,13 +431,17 @@ class AStarPlanner:
 
                 prev_zones = current_zones
 
-            # Check spacing — force checkpoint if too far from last
+            # Check spacing — force checkpoint if too far from last (path length)
             dist_since_last = accumulated_dist - last_checkpoint_dist
             if dist_since_last >= self.max_checkpoint_spacing:
                 is_checkpoint = True
 
-            # Skip if too close to last checkpoint
-            if is_checkpoint and dist_since_last < self.min_checkpoint_spacing:
+            # Skip if too close to last checkpoint (straight-line distance,
+            # since closely-spaced checkpoints matter in world-frame terms
+            # even when the path between them zigzags)
+            cx, cy = polyline[i][0] - last_checkpoint_pos[0], polyline[i][1] - last_checkpoint_pos[1]
+            straight_dist = math.sqrt(cx * cx + cy * cy)
+            if is_checkpoint and straight_dist < self.min_checkpoint_spacing:
                 # Only skip if not the last point
                 if i < len(polyline) - 1:
                     is_checkpoint = False
@@ -451,6 +456,7 @@ class AStarPlanner:
                     announcements=announcements,
                 ))
                 last_checkpoint_dist = accumulated_dist
+                last_checkpoint_pos = polyline[i]
 
         # Always add end point (if not already a checkpoint)
         if checkpoints[-1].index != len(polyline) - 1:
@@ -468,6 +474,10 @@ class AStarPlanner:
                 zone_types=end_zones,
                 announcements=end_announcements,
             ))
+        elif "Destination reached" not in checkpoints[-1].announcements:
+            # End point was already added (e.g. by max_checkpoint_spacing),
+            # which skipped the arrival announcement above.
+            checkpoints[-1].announcements.insert(0, "Destination reached")
 
         return checkpoints
 

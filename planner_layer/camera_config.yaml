@@ -1,0 +1,10 @@
+# Placeholder camera intrinsics (no real camera yet). Same file on Linux/macOS.
+# On a Linux robot with ROS: `rostopic echo /<camera>/camera_info`, K = [fx,0,cx, 0,fy,cy, 0,0,1].
+width: 640
+height: 480
+fx: 380.0        # focal length in pixels
+fy: 380.0
+cx: 320.0        # image center
+cy: 240.0
+camera_height: 0.5   # meters above the floor
+fov_margin: 20       # pixels to keep away from the image edge

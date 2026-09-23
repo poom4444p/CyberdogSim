@@ -1,29 +1,26 @@
-.env
-.python-version
-
 # Python
 __pycache__/
 *.pyc
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.env
+.python-version
 
-# macOS
+# macOS / IDE
 .DS_Store
-
-# Generated route drawings (planner_layer/visualize_route.py)
-planner_layer/route_images/
-
-# IDE
 .idea/
 
-# Input Treating Layer: model weights (share separately, e.g. shared drive / Hugging Face)
-input_treating_layer/mac_lora_final/
-input_treating_layer/mac_lora_outputs/
+# --- generated output: nothing here is an input to anything -----------------
+# Built MuJoCo scenes and recorded videos (rebuild: python -m cyberdog.sim.scene.build_scene --building)
+output/
+MUJOCO_LOG.TXT
 
-# Input Treating Layer: datasets (regenerate with generate_dataset.py + prepare_dataset.py)
-input_treating_layer/raw_dataset_english.json
-input_treating_layer/gemma_training_data.jsonl
-input_treating_layer/archive/
+# --- trained weights: share separately (shared drive / Hugging Face) --------
+models/
+# --- datasets: regenerate with cyberdog.language.generate_dataset + prepare_dataset
+datasets/
 
-# Point clouds (large; regenerate with map_tools/scripts/mesh_to_grid.py)
+# Point clouds are large; regenerate with scripts/mapping/mesh_to_grid.py
 *.pcd
-input_treating_layer/mac_lora_final_backup/
-sim/scene_cache/

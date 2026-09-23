@@ -1,0 +1,82 @@
+{
+  "zones": [
+    {
+      "zone_id": "stairs_f1",
+      "zone_type": "stairs",
+      "polygon": [
+        [
+          0.0,
+          8.3
+        ],
+        [
+          2.5,
+          8.3
+        ],
+        [
+          2.5,
+          10.7
+        ],
+        [
+          0.0,
+          10.7
+        ]
+      ],
+      "metadata": {
+        "name": "Floor 1 stairwell",
+        "floor": 1
+      }
+    },
+    {
+      "zone_id": "stairs_f2",
+      "zone_type": "stairs",
+      "polygon": [
+        [
+          0.0,
+          8.3
+        ],
+        [
+          2.5,
+          8.3
+        ],
+        [
+          2.5,
+          10.7
+        ],
+        [
+          0.0,
+          10.7
+        ]
+      ],
+      "metadata": {
+        "name": "Floor 2 stairwell",
+        "floor": 2
+      }
+    },
+    {
+      "zone_id": "stairs_f3",
+      "zone_type": "stairs",
+      "polygon": [
+        [
+          0.0,
+          8.3
+        ],
+        [
+          2.5,
+          8.3
+        ],
+        [
+          2.5,
+          10.7
+        ],
+        [
+          0.0,
+          10.7
+        ]
+      ],
+      "metadata": {
+        "name": "Floor 3 stairwell",
+        "floor": 3
+      }
+    }
+  ]
+}

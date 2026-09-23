@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cyberdog"
+version = "0.1.0"
+description = "Map-grounded VAMOS blind-navigation PoC for a Xiaomi Cyberdog, in a MuJoCo digital twin"
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+
+# The four layers of the runtime path. The LoRA fine-tune (torch, transformers,
+# peft, trl) and the VAMOS VLM server are deliberately NOT here: they are a
+# separate, heavier install, and the twin runs without them. See requirements.txt.
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "PyYAML>=6.0",
+    "Pillow>=9.5.0",
+    "matplotlib>=3.7.0",
+    "requests>=2.28.0",
+    "mujoco>=3.0.0",
+    "imageio[ffmpeg]>=2.25.0",
+]
+
+[project.optional-dependencies]
+# Training and running the gemma-2b-it command parser.
+language = [
+    "torch>=2.0.0",
+    "transformers>=4.40.0",
+    "peft>=0.10.0",
+    "trl>=0.8.0",
+    "datasets>=2.18.0",
+]
+# Rebuilding occupancy grids from point clouds.
+mapping = ["open3d>=0.17.0", "trimesh>=4.0.0"]
+dev = ["pytest>=7.0.0"]
+
+[project.scripts]
+# The three entry points worth having on the PATH.
+cyberdog-building = "cyberdog.sim.run_building:main"   # full stack, 3 floors
+cyberdog-demo = "cyberdog.sim.run_demo:main"           # one floor, headless
+cyberdog-record = "cyberdog.sim.record_demo:main"      # one floor, to MP4
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# selftest.py is an integration harness with its own PASS/FAIL reporting and a
+# MuJoCo scene as a prerequisite, not a pytest module. Run it directly.
+addopts = "--ignore=tests/selftest.py"

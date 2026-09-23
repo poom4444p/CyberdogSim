@@ -1,0 +1,72 @@
+# map_tools configuration
+# Ground Truth Map + Behavior Layer parameters
+
+map:
+  # Occupancy grid parameters
+  resolution: 0.05          # meters per cell
+  origin: [0.0, 0.0, 0.0]  # [x, y, yaw] of bottom-left corner in world frame
+  occupied_thresh: 0.65     # probability above this = occupied
+  free_thresh: 0.196        # probability below this = free
+
+  # Robot footprint, used to inflate obstacles before planning.
+  robot_radius: 0.25        # meters
+  # How much of that the stored grids already carry: they are built with
+  # mesh_to_grid.py --inflate 0.25, which also fills the hollow walls. The
+  # router only inflates by what is left (robot_radius - grid_inflation), so
+  # the clearance is not applied twice. Doors are 1.2 m wide; the baked
+  # inflation leaves ~0.55 m of them, so the remainder must stay under ~0.25 m.
+  grid_inflation: 0.25      # meters
+
+  # Ground plane extraction
+  ground_z_min: -0.3        # meters, points below this are ground
+  ground_z_max: 0.1         # meters, points above this are obstacles
+  obstacle_z_max: 2.5       # meters, ignore points above this (trees, sky)
+
+  # Grid dimensions (for synthetic map generation)
+  width_m: 100.0            # meters
+  height_m: 80.0            # meters
+
+behavior_layer:
+  # Zone types and their default actions
+  zone_actions:
+    grass:
+      speed_modifier: 0.5   # 50% speed
+      announce: true
+      announcement: "Grass area ahead"
+    stairs:
+      # Not a slow zone and not a confirm-and-continue zone: this robot leads
+      # someone who cannot see the steps, so a staircase is a hard stop and a
+      # handover to the person. Floor changes go through the lift instead.
+      speed_modifier: 0.0   # full stop, and no route may contain one
+      announce: true
+      announcement: "Stairs detected — I do not take stairs; the lift is at the east end of the corridor"
+      requires_confirmation: false  # a halt, not confirm-and-continue: nothing resumes
+    crosswalk:
+      speed_modifier: 0.7
+      announce: true
+      announcement: "Crosswalk ahead — checking for traffic"
+    entrance_zone:
+      speed_modifier: 0.6
+      announce: true
+      announcement: "Building entrance ahead"
+    sidewalk:
+      speed_modifier: 1.0
+      announce: false
+    road:
+      speed_modifier: 0.0   # do not enter
+      announce: true
+      announcement: "Road detected — finding safe crossing"
+
+astar:
+  # A* planner parameters
+  diagonal_movement: true
+  diagonal_cost: 1.414      # sqrt(2)
+  cardinal_cost: 1.0
+
+  # Ramer-Douglas-Peucker simplification
+  rdp_epsilon: 0.3          # meters, simplification tolerance
+
+  # Checkpoint generation
+  min_checkpoint_spacing: 2.0   # meters between checkpoints
+  max_checkpoint_spacing: 8.0   # meters
+  turn_angle_threshold: 30.0    # degrees, turns sharper than this become checkpoints

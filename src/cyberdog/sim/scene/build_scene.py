@@ -27,7 +27,7 @@ import numpy as np
 from PIL import Image
 
 from cyberdog.sim.scene import lift
-from cyberdog.sim.scene import obstacles
+from cyberdog.sim.scene import obstacles, pedestrians
 from cyberdog.sim.scene import stairs
 from cyberdog import paths
 from cyberdog.paths import (BUILDING_MAPS as BUILDING, GO2_XML, MENAGERIE,
@@ -234,6 +234,9 @@ def build(floor=1):
     # Not from the grid -- see obstacles.py. This scene builds every storey at
     # z=0, so the boxes stand on the ground rather than on their own floor.
     geoms += obstacles.geoms(floor, z0=0.0)
+    # Parked underground until run_building puts them somewhere -- see
+    # pedestrians.py. Emitted always: a mocap body cannot be added at runtime.
+    geoms += pedestrians.bodies(floor)
 
     H, W = occ.shape
     cx, cy = (W * res) / 2, (H * res) / 2
@@ -296,6 +299,7 @@ def build_building(floors=(1, 2, 3)):
         parts += slab_geoms(n, extent)
         parts += rects_to_geoms(find_rects(occ), res, ox, oy, H, z0=z, prefix=f"f{n}w")
         parts += obstacles.geoms(n)
+        parts += pedestrians.bodies(n)
         if n != floors[-1]:
             parts += stair_geoms(n)
 
@@ -356,6 +360,9 @@ if __name__ == "__main__":
     import sys
 
     args = sys.argv[1:]
+    # Before writing, not after: the path goes into the XML as text, so a
+    # wrong one builds a file that fails much later somewhere else.
+    paths.require_menagerie()
     out_dir = paths.ensure_output() and paths.SCENE_CACHE
 
     if args and args[0] == "--building":

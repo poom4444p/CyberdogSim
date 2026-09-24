@@ -2,8 +2,8 @@
 
 A robotic guide dog: a navigation stack that takes a spoken command
 ("take me to room 201"), plans a route across a three-storey building, and walks
-a quadruped there — announcing turns, refusing the stairs, and stepping around
-obstacles that are not on any map.
+a quadruped there — announcing turns, refusing the stairs, stepping around
+obstacles that are not on any map, and stopping to let people past.
 
 Runs entirely in a MuJoCo digital twin. **No robot hardware required.**
 
@@ -44,10 +44,20 @@ and make the setting permanent for this environment only:
 
 ```bash
 conda env config vars set MENAGERIE_PATH=~/Learn/mujoco_menagerie -n cyberdog_sim
-conda activate cyberdog_sim     # re-activate for it to take effect
+conda activate cyberdog_sim     # REQUIRED: see below
 ```
 
 `paths.py` reads `MENAGERIE_PATH` and falls back to `~/mujoco_menagerie`.
+
+> **That second line is not decoration.** `conda env config vars set` writes the
+> variable into the *environment's config*; it reaches a shell only when that
+> environment is activated. Set it and carry on in the shell you are already
+> in, and the variable is configured and still absent — `echo $MENAGERIE_PATH`
+> prints nothing, and every command you run uses the fallback. Re-activate even
+> if the prompt already says `(cyberdog_sim)`.
+
+`echo $MENAGERIE_PATH` is the check. If it prints nothing, the next section is
+about to bite.
 
 ### 2. Build the scene, then walk the dog
 
@@ -60,10 +70,28 @@ That second command is the whole stack in one line: routing, the lift, voice
 announcements, LiDAR, obstacle avoidance, and an MP4 written to
 `output/scene_cache/building.mp4`.
 
-> **Order matters.** `build_scene` writes the Go2's location into
-> `building.xml` as an absolute path, so it must run *after* `MENAGERIE_PATH`
-> is set. Move the menagerie later and you must rebuild the scene — changing
-> the variable alone will not update the cached XML.
+> **The scene caches the path, so order matters.** `build_scene` writes the
+> Go2's location into `building.xml` as an absolute path. It must therefore run
+> *after* `MENAGERIE_PATH` is in the shell, and if you move the menagerie later
+> you must rebuild the scene — changing the variable alone will not touch the
+> cached XML.
+>
+> This used to fail in the most confusing way available. The builder wrote
+> whatever path it had and reported success; the complaint arrived later, from
+> MuJoCo, out of whichever run first loaded the file, naming a path you never
+> typed on a line you never wrote. Rebuilding the scene is the obvious
+> response and silently re-bakes the same wrong path, so the identical error
+> comes back and the fix appears not to work.
+>
+> `build_scene` now checks before it writes, so the failure lands where the
+> mistake is and says what to do about it:
+>
+> ```
+> cannot find the Go2 model at /Users/you/mujoco_menagerie/unitree_go2/go2.xml
+>   looked there because of the default, because MENAGERIE_PATH is not set in this shell
+>   fix: conda env config vars set MENAGERIE_PATH=/path/to/mujoco_menagerie -n cyberdog_sim
+>        then `conda activate cyberdog_sim` again -- the variable only reaches a shell on activation
+> ```
 
 ### 3. The VLM server — `vamos_mac` (optional)
 
@@ -128,6 +156,8 @@ All commands run in `cyberdog_sim`, from the repo root.
 | `python -m cyberdog.sim.run_building "room 201"` | Full stack, three floors, with video |
 | `python -m cyberdog.sim.run_building "room 201" --no-video` | Same, faster — no rendering |
 | `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
+| `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog stops for them |
+| `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
 | `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer |
 | `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
 | `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |
@@ -151,8 +181,22 @@ import path never starts with `src` — `pyproject.toml` declares
 `cyberdog`.
 
 **`XML Error: Error opening file '.../mujoco_menagerie/unitree_go2/go2.xml'`**
-The Go2 model isn't where the scene expects. Set `MENAGERIE_PATH` as in step 1,
-then **rebuild the scene** — the stale path is baked into `building.xml`.
+A stale absolute path baked into `building.xml`, which is a cached build
+artifact, not code. Two causes, and the second is the one that wastes an
+afternoon:
+
+- The menagerie moved. Rebuild the scene.
+- `MENAGERIE_PATH` is set in the environment's config but not in *this shell*,
+  because the shell has not been activated since. Then rebuilding does not help
+  — it writes the same wrong path again, and the same error returns unchanged.
+  `echo $MENAGERIE_PATH`; if it is empty, `conda activate cyberdog_sim` and
+  rebuild. Building now refuses outright in this case rather than writing a
+  broken scene, so a fresh checkout gets the explanation instead of the
+  traceback.
+
+Note the path in the message is the one that was *looked for*, which is the
+fallback `~/mujoco_menagerie` when the variable is missing — it is not where
+your copy is, and chasing it is the wrong trail.
 
 **`can't open file '.../vlm_server.py'`**
 `start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`
@@ -239,6 +283,19 @@ runs by comparing the dog's pose to those crates' footprints — data the robot 
 never shown. Current results: 1741 unexplained LiDAR returns over the corridor
 with **zero false positives**, and 4 of 5 routes arrive with no collision.
 
+The same is true of the people in `sim/scene/pedestrians.py`, who are on no map
+either and who additionally move, so a single scan cannot describe them.
+`sensing/tracking.py` gives a thing a velocity, and the dog stops for anything
+walking whose path meets its own inside the next 2.5 s. Scored the same way:
+six seeds of three people on the floor-2 route, **6 of 6 arrive**, 2–4 stops
+each, and nothing closer than **0.55 m** to a person. With the yielding
+disabled and everything else identical, the same seeds produce contact — which
+is what says the stopping is doing the work rather than the crowd happening to
+miss. In an empty building the same logic yields **zero** times, which took two
+shape filters to reach: a crate's visible face slides along itself at 0.6 m/s
+as the dog walks past, which is a walking pace, so speed alone cannot tell them
+apart.
+
 **Known limits, deliberately not yet closed:**
 
 - The `room 101` route **stops short.** The floor-1 trolley blocks the same wall
@@ -258,6 +315,15 @@ with **zero false positives**, and 4 of 5 routes arrive with no collision.
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
-  at 12 m, wrong the moment something is occluded.
+  at 12 m, wrong the moment something is occluded. Tracking adds half a second
+  of it, enough for a velocity and not enough to survive an occlusion: someone
+  who steps behind a crate is a lost track.
+- The dog **stops** for a person rather than flowing around one. Spec L6 wants a
+  pedestrian avoided without a full stop, which needs a planner that can commit
+  to a curve; until CE-RRT\* exists, stopping is the honest version, and every
+  run counts its stops.
+- The pedestrians are capsules on scripted legs, not a pedestrian model. They
+  know one thing about the dog — do not walk into what is in front of you — and
+  making them cleverer would quietly solve the robot's problem for it.
 - An obstacle parked against a wall is **invisible**: it falls inside the wall's
   own inflation radius and is discarded as already-explained.

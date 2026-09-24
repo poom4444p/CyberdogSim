@@ -147,6 +147,32 @@ class MujocoRobot(RobotInterface):
         self.data.mocap_pos[self.model.body_mocapid[bid]] = pos
         mujoco.mj_forward(self.model, self.data)
 
+    def has_body(self, name):
+        """Is this body in the loaded model? Scenes differ -- the single-floor
+        ones have no lift car, and a scene built before pedestrians existed has
+        no people."""
+        return mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name) >= 0
+
+    def move_mocaps(self, items):
+        """Several mocap bodies at once -- the crowd, every control tick.
+
+        The same thing as calling move_mocap in a loop, minus the loop's
+        mj_forward per body. That matters: with a dozen people in the building
+        the per-body version spends more time re-solving the scene than the
+        control loop spends on everything else put together.
+        """
+        ids = getattr(self, "_mocap_ids", None)
+        if ids is None:
+            ids = self._mocap_ids = {}
+        for name, pos in items:
+            mid = ids.get(name)
+            if mid is None:
+                bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, name)
+                mid = ids[name] = -1 if bid < 0 else int(self.model.body_mocapid[bid])
+            if mid >= 0:
+                self.data.mocap_pos[mid] = pos
+        mujoco.mj_forward(self.model, self.data)
+
     def _place_camera(self, x, y, yaw):
         """Point the onboard camera along the body heading.
 

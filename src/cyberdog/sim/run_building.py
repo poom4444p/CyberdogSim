@@ -42,12 +42,14 @@ from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
 from cyberdog.sim.overlay import (draw_marker, draw_path, draw_points,
                                   safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-from cyberdog.sim.scene import levels, lift, obstacles
+from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
 from cyberdog.sim.sensing.perception import (LiveClearance, free_carrot,
                                              line_clear)
+from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
+                                           closest_approach, conflict)
 
 START_LOCATION = "main entrance"
 START_FLOOR = 1
@@ -84,6 +86,36 @@ BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the carrot's 2-4
+
+# People, who are not crates. A crate is gone round; a person is waited for --
+# a guide dog that threads a moving gap is towing someone through it. The
+# decision is tracking.conflict(), which asks whether the two paths meet
+# rather than whether anyone is near; this is only what happens afterwards.
+PATIENCE = 3.0            # seconds a person may stand still before the dog
+                          # stops waiting for them and treats them as the
+                          # obstacle they have become. Long enough to cover
+                          # somebody breaking stride to let the dog past --
+                          # that pause is about a second -- and short enough
+                          # that a person who has genuinely stopped does not
+                          # end the run.
+YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
+                          # this long, creep and keep asking. Reachable only
+                          # by a queue of people arriving one after another.
+PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
+                          # as a contact. Scoring only, never shown the robot.
+
+# Backing out of a graze. The proximity stop below sets the speed to zero, and
+# that used to be all it did -- which is a deadlock, because clearance cannot
+# improve while the dog does not move, so every graze ran the full BLOCKED_S
+# and ended the leg. Squeezing past the floor-2 cart leaves 0.18 m against a
+# 0.16 m threshold, so which side of that a run lands on is decided by two
+# centimetres: the empty building cleared it, the same route with people in it
+# did not, and the people were nowhere near -- they had simply perturbed the
+# dog's line. A two-centimetre difference should cost a step backwards, not a
+# failed run.
+BACK_V = 0.15             # m/s, backwards -- slow enough to feel deliberate on
+                          # the handle rather than like a flinch
+BACK_STEP = 0.45          # how far behind is checked before reversing into it
 
 
 def resolve_stops(router, text, use_nlu=False):
@@ -207,7 +239,7 @@ class Run:
     """One drive through the building, with the video panels attached."""
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
-                 auto_confirm=False, speed=1):
+                 auto_confirm=False, speed=1, crowd=0, seed=0):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -232,6 +264,23 @@ class Run:
         # finds these with the LiDAR or not at all; this is how we check.
         self.hits = {"ticks": 0, "boxes": set()}
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0}
+        # People. Not in any grid either, and unlike the crates they move, so
+        # one scan cannot describe them -- `tracker` is what two scans give.
+        self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
+        if crowd and not self.robot.has_body("ped_f1_0"):
+            # A mocap body cannot be added to a loaded model, so people only
+            # exist if the scene was built with them. Silently walking an
+            # empty building instead is the worst of both: the run looks fine
+            # and proves nothing.
+            raise SystemExit("this scene has no pedestrian bodies -- rebuild it: "
+                             "python -m cyberdog.sim.scene.build_scene --building")
+        self.tracker = Tracker(self.robot.CONTROL_DT)
+        self.waiting_for = None        # the track being yielded to, if any
+        self.waited = 0                # ticks spent yielding to it
+        self.held_still = 0            # ...of which it has not moved at all
+        self.movers = np.empty((0, 2))  # this tick's moving things, for the video
+        self.ped = {"yields": 0, "waited": 0, "near": 0, "min_d": 99.0}
+        self.place_crowd()
 
         if out is not None:
             import imageio
@@ -256,6 +305,12 @@ class Run:
         # swerving for nothing visible reads as a bug, not as avoidance.
         if len(self.seen):
             draw_points(dog, self.seen, pose, self.cam)
+        # And which of them are walking, in a colour of their own. A dog that
+        # stops dead in an empty-looking corridor reads as a fault; these are
+        # the reason, and they are the only thing on screen that tells the
+        # difference between the crate it went round and the person it did not.
+        if len(self.movers):
+            draw_points(dog, self.movers, pose, self.cam, colour=(70, 160, 255), r=3)
         for c in candidates:
             draw_path(dog, c, pose, self.cam, (120, 120, 130))
         if chosen:
@@ -376,6 +431,107 @@ class Run:
                 self.hits["ticks"] += 1
                 self.hits["boxes"].add(f"floor {floor} {name}")
 
+    # -- the crowd ------------------------------------------------------
+    def place_crowd(self):
+        """Put every pedestrian body where its walker is, this tick.
+
+        Every floor's, not just this one's: the dog can see up a stairwell and
+        out of the lift, and a person who only exists while the dog is on
+        their storey pops into being mid-corridor.
+        """
+        poses = [p for crowd in self.crowds.values() for p in crowd.poses()]
+        self.robot.move_mocaps(poses)
+
+    def step_crowd(self):
+        """One control tick of walking, for everyone.
+
+        Called once per tick from every loop that also steps the robot --
+        follow, and the scripted lift moves. A crowd that freezes while the
+        dog rides the lift would have the whole building hold still for it.
+        """
+        dog = self.robot.get_pose()[:2]
+        for floor, crowd in self.crowds.items():
+            crowd.step(self.robot.CONTROL_DT, dog if floor == self.floor else None)
+        self.place_crowd()
+
+    def score_people(self, floor, x, y):
+        """Ground truth again: how near the dog actually got to a person.
+
+        Same rule as score_collision -- never fed back into the robot. The
+        dog stops for people because it tracked them, or it does not stop.
+        """
+        for px, py in self.crowds[floor].positions():
+            d = math.hypot(px - x, py - y)
+            self.ped["min_d"] = min(self.ped["min_d"], d)
+            if d < PED_NEAR:
+                self.ped["near"] += 1
+
+    def yield_to(self, tracks, xy, yaw, speed):
+        """The person to wait for, or None. Holds the decision between ticks.
+
+        Two thresholds, not one. Starting to wait asks MISS_R; carrying on
+        waiting asks CLEAR_R, which is wider. With a single number the dog
+        moves off the instant it is a millimetre clear, immediately conflicts
+        again, and shuffles its way past somebody in a series of twitches.
+        The gap between the two is what makes it one stop and one start.
+
+        And once it is waiting for somebody it keeps waiting for *them*, not
+        for whoever happens to look threatening this tick. That fixes a nasty
+        little deadlock: a person who has stopped -- because the dog is in
+        front of them, which is why they stopped -- has no velocity, so the
+        moving test calls them a crate, so the dog drives at them, so they
+        stay stopped. Measured without the latch: 43 stop-starts in one run
+        and an ending nose-first against the floor-2 cart.
+
+        PATIENCE is the other end of it, and it is not a tidy-up. Waiting is
+        only the right answer while they are actually going somewhere. Someone
+        who has stopped and stayed stopped -- reading a noticeboard, holding a
+        door -- is furniture now, and furniture is `free_carrot`'s job: go
+        round it. Without the release the dog waits out the whole run for a
+        person who has no intention of moving, which it did, for 267 seconds,
+        four metres from a lift it never reached.
+        """
+        vel = (speed * math.cos(yaw), speed * math.sin(yaw))
+
+        held = self.waiting_for if self.waiting_for in tracks else None
+        if held is not None:
+            d = closest_approach(xy, vel, (held.x, held.y), (held.vx, held.vy))
+            self.held_still = 0 if held.moving else self.held_still + 1
+            if d - min(held.r, 0.4) < CLEAR_R and self.held_still < PATIENCE * FPS:
+                self.waited += 1
+                self.ped["waited"] += 1
+                return held
+            if self.held_still >= PATIENCE * FPS:
+                self.say("They have stopped. I will go around them.")
+                self.waiting_for, self.waited, self.held_still = None, 0, 0
+                return None
+
+        person = conflict(xy, vel, tracks, radius=MISS_R)
+
+        if person is None:
+            if self.waiting_for is not None:
+                self.say("Thank you. Carrying on.")
+            self.waiting_for, self.waited, self.held_still = None, 0, 0
+            return None
+
+        if self.waiting_for is None:
+            self.ped["yields"] += 1
+            if os.environ.get("CYBERDOG_TRACE"):
+                # Every yield in a building with nobody in it is a crate being
+                # mistaken for a person. This is how to see which crate.
+                print(f"    [trace] yield to ({person.x:.1f},{person.y:.1f}) "
+                      f"v=({person.vx:.2f},{person.vy:.2f}) |v|={person.speed:.2f} "
+                      f"r={person.r:.2f} from ({xy[0]:.1f},{xy[1]:.1f})")
+            # Which way they are going, because the person on the handle can
+            # hear that and cannot see it.
+            side = "right" if (person.vx * -math.sin(yaw)
+                               + person.vy * math.cos(yaw)) < 0 else "left"
+            self.say(f"Someone crossing from the {side}. Waiting.")
+        self.waiting_for = person
+        self.waited += 1
+        self.ped["waited"] += 1
+        return person
+
     def follow(self, waypoints, floor, announcements=None, verbose=True):
         """Walk one floor's leg. Same controller as run_demo, plus the frames."""
         self.floor = floor
@@ -411,12 +567,22 @@ class Run:
             # What the sensor found, folded into the field the gate and the
             # imagined rollouts read. Everything below that reacts to a crate
             # on no map reacts because of this one call.
+            self.step_crowd()
             live = self.clearance(floor)
             live.update(self.lidar.scan((x, y), self.robot.z), self.robot.z,
                         (x, y), origin=(x, y, self.robot.z + MOUNT_H))
             self.seen = live.points
             self.obs["seen"] = max(self.obs["seen"], len(live.points))
+            # Same returns, asked a different question: which of them moved
+            # since last tick. A crate answers "none of me".
+            tracks = self.tracker.update(live.points)
+            walking = self.tracker.movers()
+            # Out of the planning field, still in the safety one. A person is
+            # waited for; only a crate is gone round. See LiveClearance.exclude.
+            live.exclude([(t.x, t.y, t.r) for t in walking])
+            self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
+            self.score_people(floor, x, y)
 
             state = project_route(self.robot.camera_pose(), waypoints[i:], self.cam)
 
@@ -511,6 +677,11 @@ class Run:
             # Zones slow the dog down as well as stopping it: "grass ahead" is
             # a speed modifier, not just a sentence.
             speed = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
+            # People first, and before every other speed rule below: none of
+            # them can see that the thing ahead is walking. free_carrot would
+            # happily route the dog through the gap behind somebody, and the
+            # gap moves.
+            person = self.yield_to(tracks, (x, y), yaw, speed)
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
             if not len(live.points):
@@ -536,6 +707,23 @@ class Run:
                 if not halted:
                     halted = True
                     self.say("Stopping. That is too close.")
+                    if os.environ.get("CYBERDOG_TRACE"):
+                        peeps = [(round(math.hypot(px - x, py - y), 2), round(px, 1), round(py, 1))
+                                 for px, py in self.crowds[floor].positions()]
+                        print(f"    [trace] too close at ({x:.2f},{y:.2f}) "
+                              f"detected={live.detected_at(x, y):.2f} "
+                              f"all={live(x, y):.2f} offset={offset:.2f} aim={aim} "
+                              f"people={sorted(peeps)[:2]}")
+                # Then get out of it. Standing still is not a recovery from
+                # being too close to something -- see BACK_V -- so back off
+                # the way the dog came, which is the one direction it has
+                # already been. Only if that is still clear: reversing blind
+                # into a corridor is how a guide dog trips somebody up.
+                behind = (x - BACK_STEP * math.cos(yaw),
+                          y - BACK_STEP * math.sin(yaw))
+                if (live.detected_at(*behind) > ROBOT_R
+                        and live.static_at(*behind) > perception.STATIC_MIN):
+                    speed, err = -BACK_V, 0.0
                 if stalled > BLOCKED_S * FPS:
                     self.say("I cannot find a way past this. Stopping here.")
                     return False, n
@@ -564,6 +752,23 @@ class Run:
                         return False, n
                 else:
                     stalled, halted = 0, False
+            if person is not None:
+                # Waiting is not being stuck, and the give-up timer must not
+                # think it is. Without this the dog announces that it cannot
+                # find a way past a corridor it is standing in politely.
+                stalled = 0
+                # Stopped, and not turning either: swinging round to track
+                # somebody walking past is what a dog does and is not what a
+                # handle attached to a person's arm should do.
+                if self.waited < YIELD_MAX * FPS:
+                    speed, err = 0.0, 0.0
+                else:
+                    # They are not going anywhere. Neither can the dog stand
+                    # here for ever, so creep and keep asking.
+                    if self.waited == int(YIELD_MAX * FPS):
+                        self.say("They are not moving. Going slowly.")
+                    speed *= CRAWL
+
             self.robot.set_velocity(
                 0.0 if abs(err) > TURN_ONLY else speed * math.cos(err),
                 0.0, K_W * err)
@@ -590,6 +795,7 @@ class Run:
         self.say(prompt)
         if self.auto_confirm or not sys.stdin.isatty():
             for _ in range(int(WAIT_S * FPS)):
+                self.step_crowd()
                 self.frame()
             print("    (auto-confirmed)")
             return
@@ -608,6 +814,7 @@ class Run:
         for k in range(1, ticks + 1):
             t = k / ticks
             self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t), yaw, z=z)
+            self.step_crowd()
             self.frame()
 
     def pivot(self, from_yaw, to_yaw, z, seconds=1.0):
@@ -616,12 +823,14 @@ class Run:
         xy = self.robot.get_pose()[:2]
         for k in range(1, int(seconds / self.robot.CONTROL_DT) + 1):
             self.robot.place(xy, from_yaw + d * k / (seconds / self.robot.CONTROL_DT), z=z)
+            self.step_crowd()
             self.frame()
 
     def hold(self, seconds):
         """Stand still, still filming."""
         for _ in range(int(seconds / self.robot.CONTROL_DT)):
             self.robot.place(self.robot.get_pose()[:2], self.robot.get_pose()[2])
+            self.step_crowd()
             self.frame()
 
     def face(self, point):
@@ -685,6 +894,11 @@ def main():
     ap.add_argument("--vamos", action="store_true", help="VLM in the steering loop")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
+    ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
+                    help=f"people walking the corridors on each floor (0-{pedestrians.POOL}); "
+                         "they are on no map, and the dog stops for them")
+    ap.add_argument("--seed", type=int, default=0,
+                    help="which crowd -- the same seed is the same people every run")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -713,7 +927,8 @@ def main():
     yaw0 = math.atan2(first[1][1] - first[0][1], first[1][0] - first[0][0]) \
         if len(first) > 1 else 0.0
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
-              vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed)
+              vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
+              crowd=args.pedestrians, seed=args.seed)
 
     ok, halted = True, None
     try:
@@ -763,6 +978,17 @@ def main():
         print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s inside {', '.join(sorted(h['boxes']))}")
     else:
         print("collisions: none -- the dog never entered an obstacle's footprint")
+    # Also when there are none: a yield in an empty building is a false
+    # positive, and it should be as visible as a collision is.
+    if args.pedestrians or run.ped["yields"]:
+        pd = run.ped
+        print(f"people: {pd['yields']} times it stopped to let someone past, "
+              f"{pd['waited'] / FPS:.1f}s waiting in total")
+        if pd["near"]:
+            print(f"CONTACT: {pd['near'] / FPS:.1f}s within {PED_NEAR} m of a person "
+                  f"(closest {pd['min_d']:.2f} m)")
+        else:
+            print(f"contact: none -- closest it came to anybody was {pd['min_d']:.2f} m")
     if not args.no_video:
         pace = "real time" if args.speed == 1 else f"{args.speed}x real time"
         print(f"video -> {args.out}  ({run.robot.sim_time / args.speed:.0f}s, {pace})")

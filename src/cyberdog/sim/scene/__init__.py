@@ -6,7 +6,10 @@
     stairs.py       the stairwells (which the router refuses to route down)
     obstacles.py    crates deliberately ABSENT from the map, so the
                     perception layer has something real to find
+    pedestrians.py  ...and people, absent from it as well, who also move,
+                    which is a different problem and a different answer
 
-That last one is the experiment: everything else in the scene is also in the
-occupancy grid, which would make perception decorative.
+The last two are the experiment: everything else in the scene is also in the
+occupancy grid, which would make perception decorative. A crate is gone round.
+A person is waited for.
 """

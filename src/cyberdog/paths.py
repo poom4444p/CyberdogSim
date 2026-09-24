@@ -52,9 +52,43 @@ BUILDING_SCENE = SCENE_CACHE / "building.xml"    # all three storeys and the lif
 FLOOR1_SCENE = SCENE_CACHE / "floor1.xml"        # one storey, for run_demo
 
 # --- the Go2 model, which lives outside the repo ---------------------------
-MENAGERIE = Path(os.environ.get("MENAGERIE_PATH",
-                                os.path.expanduser("~/mujoco_menagerie")))
+# expanduser on the environment variable too, not just the default. The README
+# sets it with `conda env config vars set MENAGERIE_PATH=~/...`, and conda
+# stores that string literally -- no shell ever expands the tilde -- so without
+# this the path is a directory called "~" and MuJoCo's error names a file that
+# looks perfectly reasonable.
+MENAGERIE = Path(os.path.expanduser(
+    os.environ.get("MENAGERIE_PATH") or "~/mujoco_menagerie"))
 GO2_XML = MENAGERIE / "unitree_go2" / "go2.xml"
+
+
+def require_menagerie():
+    """Check the Go2 model is where we think, and say so plainly if not.
+
+    Worth a function because of *when* the failure otherwise lands. The scene
+    builder writes this path into the XML as text and exits happily; the
+    complaint arrives later, from MuJoCo, out of whichever run first loads the
+    file -- naming a path nobody typed, on a line nobody wrote, in a file that
+    was just reported as written successfully. Rebuilding the scene looks like
+    the obvious fix and silently re-bakes the same wrong path.
+
+    The usual cause is a shell that has not been re-activated since
+    `conda env config vars set`, so the variable is configured and not yet in
+    the environment. Checking here means the build refuses, and says which
+    path it looked at and where that path came from.
+    """
+    if GO2_XML.exists():
+        return
+    src = ("MENAGERIE_PATH=" + os.environ["MENAGERIE_PATH"]
+           if os.environ.get("MENAGERIE_PATH")
+           else "the default, because MENAGERIE_PATH is not set in this shell")
+    raise SystemExit(
+        f"cannot find the Go2 model at {GO2_XML}\n"
+        f"  looked there because of {src}\n"
+        f"  fix: conda env config vars set MENAGERIE_PATH=/path/to/mujoco_menagerie "
+        f"-n cyberdog_sim\n"
+        f"       then `conda activate cyberdog_sim` again -- the variable only "
+        f"reaches a shell on activation")
 
 WALL_HEIGHT = 2.0       # metres, for the scene builder
 

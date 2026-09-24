@@ -23,9 +23,9 @@ Subpackages:
 
 | dir | what is in it |
 |---|---|
-| `scene/` | building the MuJoCo XML: `levels`, `build_scene`, `lift`, `stairs`, `obstacles` |
+| `scene/` | building the MuJoCo XML: `levels`, `build_scene`, `lift`, `stairs`, `obstacles`, `pedestrians` |
 | `robot/` | the Go2 itself: `mujoco_robot`, `gait`, `robot_interface` |
-| `sensing/` | what the dog perceives: `lidar` -> `perception` -> `dreaming` |
+| `sensing/` | what the dog perceives: `lidar` -> `perception`/`tracking` -> `dreaming` |
 
 Entry points: `run_building.py` (the full stack), `run_demo.py` (one floor,
 headless), `record_demo.py` (one floor, to MP4).
@@ -269,12 +269,98 @@ so they pass the gate and still walk the dog into the thing -- the gate cannot
 reject a path that is fine for 2 m and leads nowhere at 4 m. Spec L4 step 5,
 the LoRA fine-tune, is what would let the model make this turn itself.
 
+### People, who are not crates
+
+`pedestrians.py` adds the other half of the experiment, and it is deliberately
+the opposite of the crates in every way that matters. They are on no map
+either, but they *move*, so a scan that stands alone cannot describe them --
+and the right answer is not to squeeze past. A guide dog that threads a moving
+gap is towing a blind person through it.
+
+```
+python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1
+```
+
+Capsule people walk the corridors of every floor, randomly but reproducibly
+per seed: some crossing wall to wall, some walking its length in a side lane.
+Each one walks its leg and then goes somewhere else -- deliberately *not*
+back and forth, because a crosser pacing the same two metres is a moving wall
+and a dog that waits politely for one never gets down the corridor. Nothing
+about them is told to the robot; they are geoms, and the LiDAR finds them like
+anything else.
+
+`tracking.py` is what makes them different from a post. It clusters the
+unexplained returns, matches the clusters to last tick's, and measures
+velocity **across a half-second window rather than between two ticks** -- which
+is the whole reason it works. A stationary crate is not a stable object to a
+range sensor: its visible face grows, shrinks and occasionally breaks into two
+clusters, and the centroid jumps half a metre in a tick when it does. As a
+tick-to-tick difference that is 10 m/s, and smoothing it just spreads one jump
+across the walking range. What a crate cannot do is *travel*, so half a second
+of rattle nets out to nothing while half a second of walking is over half a
+metre.
+
+Two shape filters do the rest, and between them they took the false stops in
+an empty building from 19 to zero:
+
+- a cluster of one or two returns is a ray grazing a corner, and its position
+  is wherever that ray landed;
+- a cluster wider than 0.5 m is not one person. The crates come back at
+  0.55-0.90 m and their centroid slides along that face at 0.6 m/s as the dog
+  walks past, which is a walking pace -- a speed threshold alone cannot
+  separate them, but shape can.
+
+The decision is then **closest approach**, not proximity: do the two straight
+lines meet inside the next 2.5 s. Near is the wrong test in both directions --
+someone walking away two metres ahead is near and irrelevant, someone crossing
+four metres ahead at 1.4 m/s is far and about to be exactly where the dog will
+be. A crossing four metres out is correctly *not* a stop: 2.1 m of corridor at
+walking pace takes under two seconds, by which time they are at the far wall.
+
+Two things keep it from dithering. Starting to wait asks 0.95 m; carrying on
+waiting asks 1.30 m, so the dog makes one clean stop and one clean start
+instead of shuffling past somebody. And it waits for *that person* until they
+are clear, moving or not -- a person who has stopped because the dog is in
+front of them has no velocity, so a moving-only test calls them a crate and
+drives at them, and they stay stopped. After three seconds of genuine
+stillness the latch releases and they become `free_carrot`'s problem, to be
+gone round like any other obstacle.
+
+The two are kept apart in the costmap as well: a walking person is taken out
+of the field `free_carrot` plans detours around, while staying in the one the
+safety gate and the proximity stop read. The gap beside somebody is a gap that
+is leaving, and a route committed to it is committed to where they were.
+
+Scored on ground truth the robot never sees, six seeds of three people on the
+floor-2 route:
+
+```
+python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1 --no-video
+  ARRIVED on floor 2 after 94s
+  people: 4 times it stopped to let someone past, 9.8s waiting in total
+  contact: none -- closest it came to anybody was 0.69 m
+```
+
+6/6 arrive, 2-4 stops each, and nothing closer than 0.55 m to a person in any
+of them. With the yielding disabled and everything else identical, the same
+seeds produce contact -- which is the measurement that says the stopping is
+doing the work, rather than the crowd happening to miss.
+
 ### When there is no way past
 
 Three steps, not one rule. Crawl at 30% while re-asking VAMOS sooner than the
 usual 1 Hz; stop when the dog is touching distance from something with nothing
 approved; and after 8 s of that, say so and end the leg rather than grinding on
-in silence. Announcements come *before* the lean, not during -- the person's
+in silence.
+
+Stopping is not on its own a recovery, and for a long time it was treated as
+one: clearance cannot improve while the dog does not move, so every graze ran
+the full 8 s and ended the leg. Squeezing past the floor-2 cart leaves 0.18 m
+against a 0.16 m threshold -- the empty building clears it and the same route
+with people somewhere else in it did not, purely because they perturbed the
+dog's line by two centimetres. So the proximity stop now backs off at 0.15 m/s
+the way the dog came, after checking that it is still clear back there. Two
+centimetres should cost a step backwards, not a failed run. Announcements come *before* the lean, not during -- the person's
 arm is on the handle and which way it is about to go is the one thing they
 cannot see coming.
 
@@ -308,8 +394,18 @@ python -m cyberdog.sim.run_building "room 201" --vamos --auto-confirm --speed 2
 - The obstacles are seen, but there is no memory: each scan stands alone, which
   is fine for a 360-degree sensor and wrong the moment something is occluded.
   Beyond LiDAR range an imagined rollout is still scored on the static map.
-- People and anything that moves are not in the scene at all (spec L2 step 5),
-  and CE-RRT* (L6 §2) does not exist -- VAMOS proposes and the gate disposes.
+- CE-RRT* (L6 §2) does not exist -- VAMOS proposes and the gate disposes.
+- The people are capsules on scripted legs, not a pedestrian model. They know
+  exactly one thing about the dog -- do not walk into the thing in front of
+  you -- and making them any cleverer would quietly solve the robot's problem
+  for it. They do not step around it, and they will walk into its side.
+- The dog stops for a person rather than flowing around one. The spec (L6
+  acceptance) wants a pedestrian avoided *without* a full stop, which needs a
+  planner that can commit to a curve; until CE-RRT* exists, stopping is the
+  honest version and the full stops are counted in every run's summary.
+- Tracking has no occlusion model and matches by nearest centroid, so someone
+  who steps behind a crate is a lost track that has to earn `moving` again,
+  and two people passing each other can swap identities.
 - The lift has no doors and no call delay: the car is always where the dog is.
 - The Gemma layer was fine-tuned before the lift existed, so `--nlu` cannot
   parse "take me to the lift" as a destination -- it maps unknown words onto

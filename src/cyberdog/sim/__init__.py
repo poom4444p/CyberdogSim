@@ -12,7 +12,7 @@ Subpackages:
 
     scene/    building the MuJoCo XML: storeys, lift, stairs, obstacles
     robot/    the Go2 itself -- kinematics, gait, pose interface
-    sensing/  what the dog perceives: lidar -> perception -> dreaming
+    sensing/  what the dog perceives: lidar -> perception/tracking -> dreaming
 
 Entry points:
 

@@ -19,32 +19,152 @@ deterministic.
 
 ---
 
-## Quick start
+## Setup (macOS, Apple Silicon)
+
+Two conda environments, on purpose — the same split the real robot has, where
+the VLM is a service rather than an import. The twin runs without torch; only
+the VLM server needs it. **The twin is the first environment and it is enough to
+see the whole thing work.** The second is optional, and only for `--vamos`.
+
+### 1. The twin — `cyberdog_sim`
 
 ```bash
-# 1. The Go2 model (lives outside the repo)
+conda create -n cyberdog_sim python=3.11 -y
+conda activate cyberdog_sim
+
 git clone https://github.com/google-deepmind/mujoco_menagerie ~/mujoco_menagerie
-
-# 2. The stack
 pip install -e .
+```
 
-# 3. Build the MuJoCo scene (three storeys, lift, stairwells, obstacles)
+`mujoco_menagerie` supplies the Go2 robot model and deliberately lives outside
+the repo — it is a large third-party asset, not this project's code.
+
+**If you already have it somewhere else**, don't move it. Point at it instead,
+and make the setting permanent for this environment only:
+
+```bash
+conda env config vars set MENAGERIE_PATH=~/Learn/mujoco_menagerie -n cyberdog_sim
+conda activate cyberdog_sim     # re-activate for it to take effect
+```
+
+`paths.py` reads `MENAGERIE_PATH` and falls back to `~/mujoco_menagerie`.
+
+### 2. Build the scene, then walk the dog
+
+```bash
 python -m cyberdog.sim.scene.build_scene --building
-
-# 4. Walk the dog to a room on another floor, via the lift
 python -m cyberdog.sim.run_building "room 201"
 ```
 
-That last command is the whole stack in one line: routing, the lift, voice
-announcements, LiDAR, obstacle avoidance, and an MP4 in `output/scene_cache/`.
+That second command is the whole stack in one line: routing, the lift, voice
+announcements, LiDAR, obstacle avoidance, and an MP4 written to
+`output/scene_cache/building.mp4`.
 
-Check everything works, layer by layer:
+> **Order matters.** `build_scene` writes the Go2's location into
+> `building.xml` as an absolute path, so it must run *after* `MENAGERIE_PATH`
+> is set. Move the menagerie later and you must rebuild the scene — changing
+> the variable alone will not update the cached XML.
+
+### 3. The VLM server — `vamos_mac` (optional)
+
+Only needed for `--vamos`. Skip it on a first run; the dog navigates and avoids
+obstacles without it (see [What is and isn't verified](#what-is-and-isnt-verified)).
+
+```bash
+conda env create -f vendor/VAMOS/environment_mac.yml
+conda activate vamos_mac
+pip install fastapi uvicorn pydantic python-multipart
+```
+
+That `pip install` line is not redundant: `vlm_server.py` imports FastAPI,
+Uvicorn and Pydantic, and the upstream `environment_mac.yml` does not list them.
+
+On macOS, conda's OpenMP runtime and the one bundled inside pip's torch collide
+and abort the process on `import torch`. Set the documented escape hatch for
+this environment:
+
+```bash
+conda env config vars set KMP_DUPLICATE_LIB_OK=TRUE -n vamos_mac
+conda activate vamos_mac
+```
+
+Start the server **from its own directory** — the script calls
+`python vlm_server.py` by relative name and has no way to find itself:
+
+```bash
+cd vendor/VAMOS/server
+bash start_server.sh
+```
+
+First run downloads the `mateoguaman/vamos` weights (several GB), so expect a
+long pause before the port opens. Check it from another terminal:
+
+```bash
+curl -s http://127.0.0.1:8009/health && echo " — server up"
+```
+
+Then, back in `cyberdog_sim`:
+
+```bash
+python -m cyberdog.sim.run_building "room 201" --vamos
+```
+
+### 4. Check everything works, layer by layer
 
 ```bash
 python tests/selftest.py          # every stage, ~2 min
 python tests/selftest.py lidar    # or just one
 pytest                            # the mapping layer's unit tests
 ```
+
+---
+
+## Running it
+
+All commands run in `cyberdog_sim`, from the repo root.
+
+| Command | What it does |
+|---|---|
+| `python -m cyberdog.sim.run_building "room 201"` | Full stack, three floors, with video |
+| `python -m cyberdog.sim.run_building "room 201" --no-video` | Same, faster — no rendering |
+| `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
+| `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer |
+| `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
+| `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |
+| `python -m cyberdog.sim.scene.build_scene 2` | Rebuild one floor only |
+
+Three of these are also on your `PATH` after `pip install -e .`:
+`cyberdog-building`, `cyberdog-demo`, `cyberdog-record`.
+
+---
+
+## Troubleshooting
+
+Four failures are common on a fresh Mac. Each one's **last** traceback line is
+the diagnosis — the `File "..."` lines above it are only the call chain.
+
+**`No module named 'cyberdog'`**
+The package isn't installed in the active environment. Run `pip install -e .`,
+and check you are in `cyberdog_sim` (`conda activate cyberdog_sim`). Note the
+import path never starts with `src` — `pyproject.toml` declares
+`where = ["src"]`, which makes `src/` the search root, so names begin at
+`cyberdog`.
+
+**`XML Error: Error opening file '.../mujoco_menagerie/unitree_go2/go2.xml'`**
+The Go2 model isn't where the scene expects. Set `MENAGERIE_PATH` as in step 1,
+then **rebuild the scene** — the stale path is baked into `building.xml`.
+
+**`can't open file '.../vlm_server.py'`**
+`start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`
+first, or use `(cd vendor/VAMOS/server && bash start_server.sh)` to leave your
+shell where it is.
+
+**`OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized`**
+Two OpenMP runtimes in one process: conda's and the copy bundled in pip's torch.
+Set `KMP_DUPLICATE_LIB_OK=TRUE` as in step 3. OpenMP calls this unsupported, and
+it is — the realistic cost is thread contention, not wrong arithmetic, which is
+an acceptable trade for a PoC inference server. The clean fix is installing
+torch from conda-forge so one runtime serves everything.
 
 ---
 
@@ -101,28 +221,10 @@ Nothing the repo tracks is ever written into the source tree: built scenes and
 recorded video go to `output/`, weights to `models/`, generated datasets to
 `datasets/`.
 
----
-
-## Environments
-
-The stack is split across two Python environments on purpose — the same split
-the real robot has, where the VLM is a service rather than an import.
-
-| | Install | Runs |
-|---|---|---|
-| **Twin** | `pip install -e .` | Everything in `sim/`, `mapping/`, `planning/`. No torch. |
-| **Language** | `pip install -e ".[language]"` | `language/`, `main_planner.py`. Needs torch, transformers, peft. |
-| **VAMOS server** | `vendor/VAMOS/environment_mac.yml` | The VLM itself, as an HTTP service on `:8009`. |
-
-To put VAMOS in the steering loop, start the server first, then pass `--vamos`:
-
-```bash
-bash vendor/VAMOS/server/start_server.sh
-python -m cyberdog.sim.run_building "room 201" --vamos
-```
-
-Without `--vamos`, obstacle avoidance still runs — it comes from the LiDAR and
-the clearance field, not from the VLM. See "What is and isn't verified" below.
+A third environment exists for the command parser —
+`pip install -e ".[language]"` adds torch, transformers and peft, and is what
+`language/`, `main_planner.py` and the `--nlu` flag need. It can share
+`cyberdog_sim` or stand alone.
 
 ---
 
@@ -148,6 +250,10 @@ with **zero false positives**, and 4 of 5 routes arrive with no collision.
   takes about 0.65 m. So its paths are safe over their own length, pass the
   safety gate, and still lead into the obstacle. The map makes that turn instead
   (`perception.free_carrot`) until the LoRA fine-tune of spec L4 s5 exists.
+  **This is why `--vamos` can perform worse than without it** on a floor the map
+  already describes well: it replaces a globally-correct A* line with a 2 m
+  horizon, and throttles speed by its own confidence. VAMOS earns its place
+  where the map is wrong or missing, not where it is right.
 - The collision counter is a **point test** on the dog's centre, not its body, so
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.
@@ -155,9 +261,3 @@ with **zero false positives**, and 4 of 5 routes arrive with no collision.
   at 12 m, wrong the moment something is occluded.
 - An obstacle parked against a wall is **invisible**: it falls inside the wall's
   own inflation radius and is discarded as already-explained.
-
----
-
-## License
-
-MIT

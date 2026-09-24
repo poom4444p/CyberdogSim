@@ -108,11 +108,11 @@ class VamosPolicy:
                     return False
         return True
 
-    def progress(self, path, carrot):
-        """How much closer to the map's carrot this path's end would get us."""
-        return -math.hypot(path[-1][0] - carrot[0], path[-1][1] - carrot[1])
+    def progress(self, path, destination):
+        """How much closer to the map's destination this path's end would get us."""
+        return -math.hypot(path[-1][0] - destination[0], path[-1][1] - destination[1])
 
-    def plan(self, image, prompt, cam_pose, carrot, pose=None):
+    def plan(self, image, prompt, cam_pose, destination, pose=None):
         """Returns (chosen_path, all_paths, safety) in map coordinates.
 
         `pose` is the body pose the imagined rollouts start from; it defaults
@@ -159,7 +159,7 @@ class VamosPolicy:
         # Safest first, progress second -- banded, so a hundredth of safety
         # does not outrank getting somewhere.
         factor, best, _ = max(scored, key=lambda t: (round(t[0] / BAND),
-                                                     self.progress(t[1], carrot)))
+                                                     self.progress(t[1], destination)))
         self.last, self.safety = best, factor
         self.stats["safety_sum"] += factor
         self.stats["chosen"] += 1

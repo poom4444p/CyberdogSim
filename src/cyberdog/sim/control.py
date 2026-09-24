@@ -57,7 +57,7 @@ def advance(i, x, y, waypoints):
 
 
 def path_target(path, xy, d=FOLLOW_D):
-    """The point `d` metres along `path` to steer at -- pure pursuit's carrot.
+    """The point `d` metres along `path` to steer at -- pure pursuit's lookahead point.
 
     Used for the paths VAMOS proposes, which arrive as a handful of points a
     metre or two apart rather than as a waypoint list.

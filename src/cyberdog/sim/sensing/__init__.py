@@ -6,7 +6,7 @@ The three read in order, and the order is the point:
                    meaning -- it reports surfaces.
     perception.py  throws away every return the static map already explains,
                    and offers the rest as clearance. Also moves the goal when
-                   the goal is inside a crate (`free_carrot`), which is what
+                   the goal is inside a crate (`free_destination`), which is what
                    actually makes the dog go round.
     tracking.py    clusters those returns and matches them to last tick's, so
                    that a thing has a velocity. Without it a walking person

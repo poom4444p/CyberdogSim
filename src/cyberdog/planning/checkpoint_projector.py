@@ -2,7 +2,7 @@
 
 Takes A* checkpoints (map frame, meters), the robot pose, and camera
 intrinsics, and returns the pixel VAMOS should aim for -- or ALIGN when the
-carrot point isn't visible. Hardware-free: uses the same pinhole math as
+destination point isn't visible. Hardware-free: uses the same pinhole math as
 VAMOS/vamos_ws/src/vamos/nodes/navigate.py:project_point_to_image, but with
 a level camera assumed and the pose passed in instead of read from ROS tf.
 
@@ -24,12 +24,12 @@ def load_camera_config(path=DEFAULT_CONFIG):
         return yaml.safe_load(f)
 
 
-def pick_carrot(robot_xy, waypoints, min_d=2.0, max_d=4.0):
+def pick_destination(robot_xy, waypoints, min_d=2.0, max_d=4.0):
     """Pick a point 2-4 m ahead along the route.
 
     Returns the first waypoint in [min_d, max_d]. If the route jumps from
     closer than min_d to farther than max_d, interpolate along that segment
-    so the carrot lands at max_d. If the whole remaining route is within
+    so the destination lands at max_d. If the whole remaining route is within
     min_d, return the last waypoint (we're nearly there).
     """
     rx, ry = robot_xy
@@ -95,12 +95,12 @@ def project_to_pixel(point_xy, robot_pose, cam):
 
 
 def project_route(robot_pose, waypoints, cam, min_d=2.0, max_d=4.0):
-    """Convenience wrapper: pick the carrot, then project it."""
-    carrot = pick_carrot(robot_pose[:2], waypoints, min_d, max_d)
-    if carrot is None:
+    """Convenience wrapper: pick the destination, then project it."""
+    destination = pick_destination(robot_pose[:2], waypoints, min_d, max_d)
+    if destination is None:
         return {"state": "ARRIVED"}
-    result = project_to_pixel(carrot, robot_pose, cam)
-    result["carrot"] = carrot
+    result = project_to_pixel(destination, robot_pose, cam)
+    result["destination"] = destination
     return result
 
 
@@ -138,9 +138,9 @@ if __name__ == "__main__":
     check("slightly right", r, "TRACK")
     assert r["pixel"][0] > cam["cx"]
 
-    # 6. Carrot picking: interpolate onto the 4 m circle
-    c = pick_carrot((0, 0), [(1, 0), (10, 0)])
-    print(f"[{'PASS' if abs(c[0] - 4.0) < 1e-3 else 'FAIL'}] carrot interpolation: {c}")
+    # 6. Destination picking: interpolate onto the 4 m circle
+    c = pick_destination((0, 0), [(1, 0), (10, 0)])
+    print(f"[{'PASS' if abs(c[0] - 4.0) < 1e-3 else 'FAIL'}] destination interpolation: {c}")
 
     # 7. <loc> tokens round-trip through VAMOS's decoding (loc * size / 1024)
     r = project_to_pixel((4, 1.2), (0, 0, 0), cam)

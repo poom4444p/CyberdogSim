@@ -306,7 +306,7 @@ apart.
   spread about ±0.25 m over a 2 m path; getting round a crate in this corridor
   takes about 0.65 m. So its paths are safe over their own length, pass the
   safety gate, and still lead into the obstacle. The map makes that turn instead
-  (`perception.free_carrot`) until the LoRA fine-tune of spec L4 s5 exists.
+  (`perception.free_destination`) until the LoRA fine-tune of spec L4 s5 exists.
   **This is why `--vamos` can perform worse than without it** on a floor the map
   already describes well: it replaces a globally-correct A* line with a 2 m
   horizon, and throttles speed by its own confidence. VAMOS earns its place

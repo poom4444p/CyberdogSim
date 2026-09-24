@@ -212,7 +212,7 @@ class Tracker:
         walking.
 
         Without the half-second, the tracker is still deciding what a person
-        is while free_carrot is already choosing which side of them to pass,
+        is while free_destination is already choosing which side of them to pass,
         and the side it picks is chosen around somebody who will not be there.
         Measured: four runs in six ended against the floor-2 cart, having
         dodged a pedestrian into it.
@@ -237,7 +237,7 @@ HORIZON = 2.5           # seconds of future looked at
 NEAR_R = 1.2            # and the range inside which this stops asking.
                         # Not a blind spot: something already this close is
                         # the emergency stop's business (run_building's
-                        # `touching`) and free_carrot's, both of which act on
+                        # `touching`) and free_destination's, both of which act on
                         # it without caring whether it walks. What it is not
                         # is a yield -- deciding to wait for someone when they
                         # are half a metre away is not courtesy, it is a near
@@ -271,7 +271,7 @@ def conflict(xy, vel, tracks, radius=MISS_R, horizon=HORIZON):
     """The moving thing the dog is about to meet, or None.
 
     Only moving ones. A stationary cluster is a crate and belongs to
-    free_carrot, which will go round it; handing it to the stopping logic as
+    free_destination, which will go round it; handing it to the stopping logic as
     well is how a dog ends up halted in a gap it was successfully using.
     """
     worst, wd = None, radius

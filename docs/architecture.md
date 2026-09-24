@@ -36,7 +36,7 @@ built against, see [`spec.md`](spec.md).
   |     lidar.scan()            -> ~2000 world points            |
   |     perception.update()     -> which of them the map cannot  |
   |                                explain                       |
-  |     perception.free_carrot()-> the goal to actually aim at    |
+  |     perception.free_destination()-> the goal to actually aim at    |
   |     control.advance()       -> which checkpoint we are on     |
   |                                                              |
   |   every 20 ticks (1 Hz), if --vamos:                         |
@@ -62,7 +62,7 @@ frame. VAMOS is handed the image and that pixel, and answers with five candidate
 paths *drawn on the image* — its job is the local manoeuvre, never the
 destination.
 
-This is why `free_carrot` exists. VAMOS drives at whatever goal pixel it is
+This is why `free_destination` exists. VAMOS drives at whatever goal pixel it is
 given. A* plans on a map with no crate in it, so the pixel can land *on* a
 crate — and the model obligingly draws five paths into it (measured: at 0.8 m the
 crate fills 60% of the frame and all five candidates still go straight through).
@@ -195,7 +195,7 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 | Stage | Cost | Budget |
 |---|---|---|
 | LiDAR scan (~2000 rays) | 1.3 ms | — |
-| Perception + `free_carrot` | 2.4 ms | 50 ms (one 20 Hz tick) — 5% |
+| Perception + `free_destination` | 2.4 ms | 50 ms (one 20 Hz tick) — 5% |
 | `Dream.factor()` × 5 candidates | 7.4 ms | ~1.8 s (a VLM call) |
 | Static clearance field (once per floor) | ~125 ms | cached — cannot be rebuilt per tick |
 

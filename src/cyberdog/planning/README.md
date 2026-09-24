@@ -13,7 +13,7 @@ pick the right copy of the place (requested floor / same floor / nearest floor)
 A* on each floor's grid, split at the lift
         │  legs: [(floor 1, Route), (floor 3, Route)]
         ▼ checkpoint_projector.py
-carrot point 2-4 m ahead → camera pixel (u, v) → PaliGemma <loc> tokens
+destination point 2-4 m ahead → camera pixel (u, v) → PaliGemma <loc> tokens
         │
         ▼
 "Navigate to x=<loc0511>, y=<loc0612>."   or   [ALIGN] turn left   or   [ARRIVED]
@@ -28,7 +28,7 @@ pipeline (command → model → this layer).
 | File | What it is |
 |---|---|
 | `building_router.py` | Loads the building (per-floor grids + `locations.json`), resolves place names, plans multi-floor routes |
-| `checkpoint_projector.py` | Carrot-point selection + pinhole projection to a pixel; self-test when run directly |
+| `checkpoint_projector.py` | Destination-point selection + pinhole projection to a pixel; self-test when run directly |
 | `camera_config.yaml` | Camera intrinsics — **placeholder values** until the real camera is known |
 | `test_locations.py` | Checks the building matches the model's training locations (optionally runs the model too) |
 | `visualize_route.py` | Draws a planned trip on the floor maps (PNG) to check routes by eye |
@@ -121,7 +121,7 @@ Uses the same pinhole math as VAMOS's
 pose as an argument instead of reading ROS tf, and projects a point *ahead
 on the route* instead of the final goal.
 
-1. **`pick_carrot`** — first checkpoint 2-4 m from the robot; if the route
+1. **`pick_destination`** — first checkpoint 2-4 m from the robot; if the route
    jumps past 4 m, the point on that segment at exactly 4 m.
 2. **`project_to_pixel`** — map → robot frame (rotate by yaw) → camera frame
    (OpenCV: z forward, x right, y down; goal on the floor `camera_height`
@@ -185,7 +185,7 @@ Reading `main_planner.py` output:
 - `Split into N stops` — from `command_splitter.py`
 - `Floor phrase found: floor N` — from `floor_parser.py`
 - `Route: A (floor x) -> B (floor y)` — each stop starts where the previous ended
-- `Step k: Navigate to x=<loc…>, y=<loc…>.` — carrot visible, VAMOS prompt
+- `Step k: Navigate to x=<loc…>, y=<loc…>.` — destination visible, VAMOS prompt
 - `[ALIGN] turn left/right` — rotate first; `[ARRIVED]` — end of a leg
 - Errors (and the run stops) for an unknown place, a nonexistent floor, or a
   place that isn't on the requested floor
@@ -226,7 +226,7 @@ first on purpose — keep that order if you write another entry point.
 ## Known limitations
 
 - **Simulated pose.** The demo places the robot on each checkpoint facing the
-  next one, so the carrot is almost always dead ahead and most prompts are
+  next one, so the destination is almost always dead ahead and most prompts are
   the same `<loc0511>, <loc0612>`. Real prompts vary once the pose comes
   from localization (FAST-LIO).
 - **Level camera assumed** — no tilt. Add a pitch rotation in

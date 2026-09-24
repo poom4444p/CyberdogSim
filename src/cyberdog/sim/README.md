@@ -245,7 +245,7 @@ Two details that are not fine-tuning:
 
 ### Who actually does the avoiding, and why
 
-VAMOS drives at whatever goal pixel it is handed, and the carrot comes from A*
+VAMOS drives at whatever goal pixel it is handed, and the destination comes from A*
 on a map with no crate in it -- so the pixel lands *on* the crate. Measured
 before any of this was built: at 0.8 m the crate fills 60% of the frame and all
 five candidates still go straight through it. That is not a model that cannot
@@ -253,11 +253,11 @@ avoid obstacles, it is a model being told to walk into one, and rejecting all
 five leaves nothing to follow.
 
 So the map's half of "map decides WHERE, VLM decides HOW" uses the sensor:
-`free_carrot` moves the goal sideways into the gap. Which side is decided at
-the *pinch* -- the tightest point on the way -- because judged at the carrot
+`free_destination` moves the goal sideways into the gap. Which side is decided at
+the *pinch* -- the tightest point on the way -- because judged at the destination
 nothing looks blocked until the dog is level with the crate, and judged beyond
-it the roomiest direction is "straight on". How far is decided at the carrot,
-because the shift that centres the pinch puts a carrot that is already past the
+it the roomiest direction is "straight on". How far is decided at the destination,
+because the shift that centres the pinch puts a destination that is already past the
 crate into the corner it just cleared.
 
 While a detour is on, that displaced goal steers and VAMOS keeps proposing and
@@ -323,11 +323,11 @@ instead of shuffling past somebody. And it waits for *that person* until they
 are clear, moving or not -- a person who has stopped because the dog is in
 front of them has no velocity, so a moving-only test calls them a crate and
 drives at them, and they stay stopped. After three seconds of genuine
-stillness the latch releases and they become `free_carrot`'s problem, to be
+stillness the latch releases and they become `free_destination`'s problem, to be
 gone round like any other obstacle.
 
 The two are kept apart in the costmap as well: a walking person is taken out
-of the field `free_carrot` plans detours around, while staying in the one the
+of the field `free_destination` plans detours around, while staying in the one the
 safety gate and the proximity stop read. The gap beside somebody is a gap that
 is leaving, and a route committed to it is committed to where they were.
 

@@ -9,7 +9,7 @@ command and a few seconds.
     python tests/selftest.py            # every stage
     python tests/selftest.py lidar      # just one
 
-Stages run bottom-up: scene, lidar, perception, carrot, crowd, latency,
+Stages run bottom-up: scene, lidar, perception, destination, crowd, latency,
 run. The
 first failure is usually the real one -- a bad scene fails everything above it.
 """
@@ -152,12 +152,12 @@ def perception():
           f"would read it as open floor)")
 
 
-def carrot():
+def destination():
     """Does a goal inside a crate get moved out of it, and only then?"""
     from cyberdog.sim.scene import levels
     from cyberdog.sim.sensing import lidar as L
     from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-    from cyberdog.sim.sensing.perception import LiveClearance, free_carrot
+    from cyberdog.sim.sensing.perception import LiveClearance, free_destination
 
     fz = levels.floor_z(2)
     r = MujocoRobot(SCENE, start_xy=(20.0, 9.5), start_yaw=math.pi, start_z=fz)
@@ -165,13 +165,13 @@ def carrot():
     live.update(sensor.scan((20.0, 9.5), fz), fz, (20.0, 9.5),
                 origin=(20.0, 9.5, fz + L.MOUNT_H))
 
-    moved, off = free_carrot((16.0, 9.5), (20.0, 9.5), live, probe=(12.0, 9.5))
+    moved, off = free_destination((16.0, 9.5), (20.0, 9.5), live, probe=(12.0, 9.5))
     check("blocked goal moves", moved is not None and abs(off) > 0.2,
           f"(16.0, 9.5) -> {None if moved is None else tuple(round(v, 2) for v in moved)}, "
           f"offset {off:+.2f} m")
 
     clean = LiveClearance(1)       # never updated: nothing detected anywhere
-    same, off2 = free_carrot((24.0, 9.5), (30.0, 9.5), clean)
+    same, off2 = free_destination((24.0, 9.5), (30.0, 9.5), clean)
     check("clear goal stays put", same == (24.0, 9.5) and off2 == 0.0,
           f"with nothing detected the planner's route is left alone ({off2:+.2f} m)")
 
@@ -182,7 +182,7 @@ def latency():
     from cyberdog.sim.sensing import lidar as L
     from cyberdog.sim.sensing.dreaming import Dream
     from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-    from cyberdog.sim.sensing.perception import LiveClearance, free_carrot
+    from cyberdog.sim.sensing.perception import LiveClearance, free_destination
 
     fz = levels.floor_z(2)
     r = MujocoRobot(SCENE, start_xy=(20.0, 9.2), start_yaw=math.pi, start_z=fz)
@@ -191,7 +191,7 @@ def latency():
     def tick():
         live.update(sensor.scan((20.0, 9.2), fz), fz, (20.0, 9.2),
                     origin=(20.0, 9.2, fz + L.MOUNT_H))
-        free_carrot((16.0, 9.4), (20.0, 9.2), live, probe=(14.0, 9.5))
+        free_destination((16.0, 9.4), (20.0, 9.2), live, probe=(14.0, 9.5))
 
     for _ in range(5):
         tick()
@@ -326,7 +326,7 @@ def run():
 
 
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
-          "carrot": carrot, "crowd": crowd, "latency": latency, "run": run}
+          "destination": destination, "crowd": crowd, "latency": latency, "run": run}
 
 
 if __name__ == "__main__":

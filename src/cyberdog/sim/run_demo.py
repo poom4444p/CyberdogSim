@@ -1,6 +1,6 @@
 """Drive the dog along a planned route -- the closed loop, no video yet.
 
-Pure pursuit standing in for VAMOS: the projector picks a carrot 2-4 m ahead,
+Pure pursuit standing in for VAMOS: the projector picks a destination 2-4 m ahead,
 we steer at it. VAMOS replaces the steering later; everything around it stays.
 """
 import argparse
@@ -86,7 +86,7 @@ def drive(robot, waypoints, cam, max_steps=4000, verbose=True):
         if math.hypot(goal[0] - x, goal[1] - y) < GOAL_R:
             return True, n
 
-        # Steer at the checkpoint itself, not at a carrot beyond it. A carrot
+        # Steer at the checkpoint itself, not at a destination beyond it. A
         # lookahead cuts corners, and a corner here is a 0.9 m doorway.
         goal_i = waypoints[i]
         err = wrap(math.atan2(goal_i[1] - y, goal_i[0] - x) - yaw)

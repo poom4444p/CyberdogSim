@@ -34,19 +34,19 @@ import numpy as np
 from cyberdog import paths
 from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute
 from cyberdog.planning.checkpoint_projector import (load_camera_config,
-                                                    pick_carrot, project_route,
+                                                    pick_destination, project_route,
                                                     project_to_pixel,
                                                     vamos_prompt)
 from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
                                   wrap)
-from cyberdog.sim.overlay import (draw_marker, draw_path, draw_points,
-                                  safety_bar)
+from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
+                                  draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
-from cyberdog.sim.sensing.perception import (LiveClearance, free_carrot,
+from cyberdog.sim.sensing.perception import (LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
                                            closest_approach, conflict)
@@ -63,6 +63,11 @@ REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacl
 # over it, and the old -28 degree chase camera sat inside the ceiling, which
 # rendered as solid grey.
 CHASE_D, CHASE_EL = 3.2, -11
+# How far a door sign sits off the corridor centreline, towards its own room.
+# The corridor is 2.7 m wide, so this puts it essentially on that room's wall --
+# and, more to the point, on the correct side of a corridor whose two facing
+# rooms share a single door_xy in locations.json.
+SIGN_OFF = 1.25
 # Azimuth, distance, elevation for the lift -- see frame(). Azimuth is the
 # direction the camera looks along, so 0 puts it west of the shaft looking in
 # through the open face.
@@ -76,7 +81,7 @@ MAX_TICKS = 6000          # per leg
 # stops (L6 acceptance); a full stop is what is left when avoidance has failed.
 CRAWL = 0.30              # fraction of top speed while looking for a way round
 DETOUR = 0.70             # ...and while actually stepping around something
-# There is deliberately no "clearance ahead" stop threshold. free_carrot is
+# There is deliberately no "clearance ahead" stop threshold. free_destination is
 # the single authority on whether a way past exists -- it validates the line to
 # the goal itself -- and a second test of the same line against a different
 # number is how the dog ended up halting in gaps it was successfully using.
@@ -85,7 +90,7 @@ DETOUR = 0.70             # ...and while actually stepping around something
 BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
-PROBE_D = 6.0             # metres ahead the blockage is judged at, not the carrot's 2-4
+PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
 
 # People, who are not crates. A crate is gone round; a person is waited for --
 # a guide dog that threads a moving gap is towing someone through it. The
@@ -244,6 +249,7 @@ class Run:
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
         self.router = router
+        self._doors = {}          # floor -> [(name, door_xy)], for the captions
         self.floor = START_FLOOR
         self.in_lift = False
         self.behind = False
@@ -338,7 +344,70 @@ class Run:
         self.outside.update_scene(self.robot.data, self.chase)
         left = np.ascontiguousarray(self.outside.render())
         self.floor_tag(left)
+        self.name_tag(left, x, y)
         self.writer.append_data(np.hstack([left, dog]))
+
+    def doors(self, floor):
+        """(name, sign_xy) for every named place on one floor, cached.
+
+        Doors rather than room centres: the door is what the dog walks past,
+        and a room centre is behind a wall. `hallway` is skipped -- it is the
+        corridor itself, so its label would sit on top of every other one.
+
+        Two collisions have to be undone first, and both come from
+        `locations.json` being a routing table rather than a signboard:
+
+        `door_xy` is the corridor centreline, so the room on the north side
+        and the room on the south share one to the centimetre -- `room 101`
+        and `room 106` are both [3.0, 9.5]. Signed as-is, one of every pair is
+        dropped as an overlap and half the building is unlabelled. So the sign
+        slides SIGN_OFF off the centreline towards its own room, which puts it
+        on that room's wall, which is where signage lives anyway.
+
+        And a place can have several names for the parser's benefit -- stairs,
+        staircase, stairway and stairwell are one stairwell at [1.0, 9.5].
+        A door has one sign, so the shortest name wins and the synonyms go.
+        """
+        if floor not in self._doors:
+            seen, out = {}, []
+            for name, entries in self.router.locations.items():
+                if name == "hallway":
+                    continue
+                for e in entries:
+                    if e["floor"] != floor:
+                        continue
+                    door = tuple(e.get("door_xy") or e["xy"])
+                    room = tuple(e["xy"])
+                    key = (round(door[0], 2), round(door[1], 2),
+                           round(room[0], 2), round(room[1], 2))
+                    if key in seen and len(seen[key]) <= len(name):
+                        continue        # a synonym of something already signed
+                    seen[key] = name
+            for (dx, dy, rx, ry), name in seen.items():
+                vx, vy = rx - dx, ry - dy
+                n = math.hypot(vx, vy)
+                if n:
+                    dx, dy = dx + vx / n * SIGN_OFF, dy + vy / n * SIGN_OFF
+                out.append((name, (dx, dy)))
+            self._doors[floor] = out
+        return self._doors[floor]
+
+    def name_tag(self, img, x, y):
+        """Room names on the chase panel, for the rooms the dog is passing.
+
+        The same complaint `floor_tag` answers, one level finer: the pips say
+        which storey, and nothing said where along it. Every doorway in this
+        building renders identically, so a run to `room 201` and a run to
+        `room 206` are the same video.
+
+        Caption only. These are drawn onto the rendered chase frame, not built
+        into the scene, so the dog's camera -- the one VAMOS is handed -- has
+        no text in it. That boundary is the same one `obstacles.py` and
+        `pedestrians.py` keep: the robot is not told anything here.
+        """
+        cam = ChaseCam(self.outside.scene, img.shape[1], img.shape[0])
+        label_places(img, cam, self.doors(self.floor), (x, y),
+                     levels.floor_z(self.floor))
 
     def floor_tag(self, img, n=3):
         """Three stacked pips down the left edge, the current floor lit.
@@ -486,7 +555,7 @@ class Run:
         PATIENCE is the other end of it, and it is not a tidy-up. Waiting is
         only the right answer while they are actually going somewhere. Someone
         who has stopped and stayed stopped -- reading a noticeboard, holding a
-        door -- is furniture now, and furniture is `free_carrot`'s job: go
+        door -- is furniture now, and furniture is `free_destination`'s job: go
         round it. Without the release the dog waits out the whole run for a
         person who has no intention of moving, which it did, for 267 seconds,
         four metres from a lift it never reached.
@@ -586,15 +655,15 @@ class Run:
 
             state = project_route(self.robot.camera_pose(), waypoints[i:], self.cam)
 
-            # "Map decides WHERE": the same carrot, moved sideways when it or
+            # "Map decides WHERE": the same destination, moved sideways when it or
             # the line to it is blocked by something the map never had. VAMOS
-            # drives at whatever goal pixel it is given, so a carrot inside a
+            # drives at whatever goal pixel it is given, so a destination inside a
             # crate is five candidate paths into the crate -- measured, before
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
             if state["state"] == "TRACK":
-                # Judge the blockage further out than the carrot -- see
-                # free_carrot. PROBE_D is far enough to start moving across
+                # Judge the blockage further out than the destination -- see
+                # free_destination. PROBE_D is far enough to start moving across
                 # while there is still open corridor to do it in.
                 #
                 # But not around a corner. Arc length along the route runs on
@@ -606,11 +675,11 @@ class Run:
                 # nearer one at a turn.
                 probe = None
                 for reach in (PROBE_D, 4.5, 3.0):
-                    q = pick_carrot((x, y), waypoints[i:], reach, reach + 2.0)
+                    q = pick_destination((x, y), waypoints[i:], reach, reach + 2.0)
                     if q is not None and line_clear((x, y), q, live.static_at, ROBOT_R):
                         probe = q
                         break
-                aim, offset = free_carrot(state["carrot"], (x, y), live, probe=probe)
+                aim, offset = free_destination(state["destination"], (x, y), live, probe=probe)
                 # One tick with no clear goal is noise -- the scan is rebuilt
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
@@ -619,7 +688,7 @@ class Run:
                 if aim is not None and offset:
                     moved = project_to_pixel(aim, self.robot.camera_pose(), self.cam)
                     if moved["state"] == "TRACK":
-                        moved["carrot"] = aim
+                        moved["destination"] = aim
                         state = moved
 
             # Ask again sooner while nothing has cleared: the view changes as
@@ -629,7 +698,7 @@ class Run:
             if self.vamos and state["state"] == "TRACK" and due:
                 chosen, candidates, safety = self.policy(floor).plan(
                     self.robot.get_image(), vamos_prompt(state),
-                    self.robot.camera_pose(), state["carrot"], pose=(x, y, yaw))
+                    self.robot.camera_pose(), state["destination"], pose=(x, y, yaw))
 
             self.frame(state, chosen, candidates, safety if chosen else None)
 
@@ -663,7 +732,7 @@ class Run:
             else:
                 tx, ty = waypoints[i]
 
-            # Reported, not acted on: free_carrot already decided whether
+            # Reported, not acted on: free_destination already decided whether
             # there is a way through, and this is how much room it left.
             self.obs["min_clear"] = min(self.obs["min_clear"],
                                         self.clear_ahead(live, (x, y), (tx, ty)))
@@ -678,7 +747,7 @@ class Run:
             # a speed modifier, not just a sentence.
             speed = self.robot.MAX_V * self.router.behavior.query_actions(x, y)["speed_modifier"]
             # People first, and before every other speed rule below: none of
-            # them can see that the thing ahead is walking. free_carrot would
+            # them can see that the thing ahead is walking. free_destination would
             # happily route the dog through the gap behind somebody, and the
             # gap moves.
             person = self.yield_to(tracks, (x, y), yaw, speed)

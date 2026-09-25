@@ -28,6 +28,20 @@ Two kinds, because they fail differently:
               four seconds later, which is exactly the case a single scan
               cannot call.
 
+Reaching the end of a leg is not an exit. They turn and carry on down the
+corridor, because a person who walks into a wall and evaporates is not a
+person -- and because the tracker reads a body that disappears from four
+metres away exactly as it reads one that appears there: as something moving
+very fast. So a walker is only ever recycled somewhere else while the dog
+cannot see it; in view, it always has somewhere to walk to, and every frame
+puts it somewhere it could plausibly have walked from.
+
+They are not allowed to stop and stay stopped, either. A stopped person is a
+permanent 0.44 m obstacle, and in a 2.7 m corridor whose route hugs one wall
+that is something the dog can only squeeze past -- measured, at 0.09 m, which
+is through them. Walking people can be waited for; parked ones just make the
+corridor narrower.
+
 Random, with a seed. `Crowd(floor, n, seed)` gives the same people every time
 for the same seed, so a run that ends in a collision can be replayed, and a
 different seed is a different day in the same building.
@@ -75,6 +89,17 @@ NOTICE = 0.75           # they stop if the dog is this close, ahead of them
 # materialises three metres in front of it is a teleport, and the tracker --
 # correctly -- reads a teleport as something moving very fast indeed.
 RESPAWN_CLEAR = 9.0     # metres from the dog, minimum
+# ...and *when*. The same argument applies to the disappearing end of the
+# move: a walker that vanishes off the end of its leg in full view is the same
+# teleport seen from the other side.
+SEEN_R = 12.0           # lidar.MAX_R: past this the dog reports nothing at
+                        # all. Not imported, to keep this module free of
+                        # mujoco -- build_scene runs it before there is a
+                        # model to scan. Distance is the whole test: the
+                        # Mid-360 is a 360-degree sensor, so "behind the dog"
+                        # is not unseen.
+TURN = (0.3, 1.2)       # seconds spent turning round at the end of a leg
+ONWARD = (8.0, 20.0)    # metres of corridor walked after turning
 
 
 class Walker:
@@ -121,11 +146,11 @@ class Walker:
 
         self.t += self.speed * dt / (self.length or 1.0)
         if self.t >= 1.0:
-            # Walked it. Crucially they do NOT turn round and walk back: a
-            # crosser pacing the same two metres for ever is a moving wall,
-            # and the dog waiting politely for it never gets down the
-            # corridor. Real people cross and are gone; `Crowd` gives this one
-            # somewhere else to be.
+            # Walked it. They do NOT turn round and walk back down the same
+            # line: a crosser pacing the same two metres for ever is a moving
+            # wall, and the dog waiting politely for it never gets down the
+            # corridor. `Crowd` either sends them on along the corridor or,
+            # if the dog cannot see them, gives them somewhere else to be.
             self.t, self.done = 1.0, True
         self._place()
 
@@ -179,11 +204,58 @@ class Crowd:
     def step(self, dt, dog=None):
         for w in self.walkers:
             w.step(dt, dog)
-            if w.done:
+            if not w.done:
+                continue
+            if self._unseen(w, dog):
                 self._respawn(w, dog)
+            else:
+                self._onward(w)
+
+    @staticmethod
+    def _unseen(w, dog):
+        """Is this walker out of the dog's sight right now?
+
+        It has to be the walker's *current* position that is far away, not the
+        new leg's start: RESPAWN_CLEAR already covers where they arrive, and
+        what was missing was where they left from.
+        """
+        return dog is None or math.dist((w.x, w.y), dog) > SEEN_R
+
+    def _onward(self, w):
+        """Turn and carry on, from exactly where the last leg ended.
+
+        The alternative to vanishing while watched, and the alternative to
+        standing there: both put a body somewhere it could not have walked to.
+        This starts the new leg at the walker's own feet, so there is no frame
+        in which it jumps -- it just turns a corner, which is what somebody who
+        has reached a wall does.
+        """
+        rng = self._rng
+        lane = min(SIDE_LANES, key=lambda y: abs(y - w.y))
+        span = rng.uniform(*ONWARD)
+
+        # Carry on the way they were already headed. Sending them at the
+        # middle of the corridor instead -- which is what picking the
+        # direction from their position does -- walks the whole crowd into
+        # the centre and leaves them pacing there, which is the moving wall
+        # this module exists not to build. A crossing leg has no x direction
+        # of its own, so that one tosses a coin.
+        dx = w.b[0] - w.a[0]
+        way = 1.0 if dx > 0 else -1.0 if dx < 0 else rng.choice((-1.0, 1.0))
+        x = w.x + way * span
+        if not LANE_X[0] <= x <= LANE_X[1]:     # out of corridor: turn round
+            x = w.x - way * span
+        x = max(LANE_X[0], min(LANE_X[1], x))
+
+        w.reset((w.x, w.y), (x, lane), rng.uniform(*SPEED),
+                rng.uniform(*PAUSE), "along")
+        w.waiting = rng.uniform(*TURN)
 
     def _respawn(self, w, dog, tries=30):
         """Somewhere else in the building, after a pause.
+
+        Only ever called for a walker the dog cannot see, so the move itself
+        is never witnessed -- by the camera or by the tracker.
 
         The pause is what makes the corridor breathe: without it every walker
         is always walking and the dog meets a continuous wall of people, which
@@ -199,11 +271,11 @@ class Crowd:
             w.reset(fresh.a, fresh.b, fresh.speed, fresh.pause, fresh.kind)
             w.waiting = self._rng.uniform(*PAUSE)
             return
-        # Nowhere far enough away this tick -- wait and ask again, rather than
-        # appearing in the dog's lap.
-        w.done = False
-        w.t = 0.0
-        w.waiting = 1.0
+        # Nowhere far enough away this tick. Send them on down the corridor
+        # instead and ask again at the end of that -- rather than appearing in
+        # the dog's lap, or snapping back to the start of the leg they have
+        # just walked, which is the same teleport in the other direction.
+        self._onward(w)
 
     def poses(self):
         """(body name, (x, y, z)) for every body in this floor's pool.

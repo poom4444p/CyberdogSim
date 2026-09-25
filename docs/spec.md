@@ -28,7 +28,7 @@
 0. **Stairs are never traversed.** The user cannot see the steps and has one hand on the handle, so a staircase is a hazard to be announced and refused, not a way up. Stairwells are full-stop zones in the Behavior Layer, stamped into the planning grids so **no A\* route can contain one**, and any drift into one is a hard stop with no resume. All vertical movement is by **lift**, and boarding it is gated on human confirmation — the robot cannot press a call button and does not pretend to. A floor the lift does not serve is unreachable, and the honest answer is to say so.
    *Refusing to move is not the answer either.* Asked for a place inside a no-go zone, the robot walks to the nearest safe point outside it — the corridor by the stairs — and the arrival announcement says plainly that this is as close as it goes. Answer the question that was asked; decline only the part that is unsafe.
 1. **Map decides WHERE** (3D map + Behavior Layer + A*), **VLM decides HOW** (VAMOS local paths), **rules decide WHEN TO STOP**.
-2. **VAMOS requires a goal pixel pointer** → solved by the **Checkpoint Projector** (pinhole projection of a "carrot" 2–4 m ahead on the map route). Pure geometry, zero AI.
+2. **VAMOS requires a goal pixel pointer** → solved by the **Checkpoint Projector** (pinhole projection of an intermediate destination 2–4 m ahead on the map route). Pure geometry, zero AI.
 3. **One PaliGemma 2 3B backbone, multiple LoRA adapters:** `nav` (VAMOS paths), `goal` (instruction → endpoint pixel), `intent` (free-form voice → slots), `describe` (optional terrain captions).
 4. **Affordance MLP** trained in Isaac Lab (elevation + position + heading → traversability prob); **confidence gate rejects < 0.5**. The gate is fed by a **safety factor**, not a raw traversability score: the robot imagines driving each candidate with its own controller and noise, and the factor is P(no collision) × clearance margin. Judge the plan the robot would execute, not the line the VLM drew.
 5. **CE-RRT\*** (chance-constrained, P_coll < 0.01, warm-started) for dynamic obstacle avoidance.
@@ -104,7 +104,7 @@ Cyberdog Executes → haptic/audio feedback loop
 **Sub-modules:**
 1. **Intent parser:** lookup/fuzzy match of destination against Behavior Layer node list. (PaliGemma `intent` adapter optional later.)
 2. **Route consumer:** reads A* polyline + checkpoints from L1.
-3. **Checkpoint Projector:** sample carrot 2–4 m ahead; project:
+3. **Checkpoint Projector:** sample destination 2–4 m ahead; project:
    `P_cam = T_body→cam⁻¹ · T_map→body⁻¹ · P_map` ; `(u,v) = project(K, P_cam)`;
    valid if depth > 0 and inside FOV margin; else enter `ALIGN` (rotate until visible).
    **Fallback:** PaliGemma `goal` adapter for unmapped targets ("find a bench").
@@ -127,7 +127,7 @@ Cyberdog Executes → haptic/audio feedback loop
 6. Add `goal` adapter (instruction → endpoint pixel) as second LoRA on same backbone.
 
 **PoC stub:** zero-shot checkpoint is acceptable for first closed-loop test; fine-tune is the upgrade.
-**Acceptance:** end-to-end image+pixel → 5 paths at ≥0.5 Hz; paths track the moving carrot.
+**Acceptance:** end-to-end image+pixel → 5 paths at ≥0.5 Hz; paths track the moving destination.
 **Feeds:** Affordance (L5).
 
 ### LAYER 5 — Affordance Module (Isaac Lab)

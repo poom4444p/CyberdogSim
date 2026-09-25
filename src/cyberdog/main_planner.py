@@ -11,7 +11,7 @@ START_FLOOR = 1
 
 
 def print_vamos_steps(legs, cam, project_route, vamos_prompt, step):
-    """For each checkpoint, project the carrot point ahead into the camera
+    """For each checkpoint, project the destination point ahead into the camera
     image and build the VAMOS prompt. No real robot yet, so we assume it
     stands on each checkpoint facing along the route. Returns the last step number."""
     for floor, route in legs:

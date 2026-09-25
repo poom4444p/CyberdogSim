@@ -17,9 +17,9 @@ Two jobs, and the second one is the one that actually makes the dog go round.
 1. `LiveClearance` -- fused clearance, for the gate and the imagined rollouts.
    This is what makes a candidate path through a crate score 0.00.
 
-2. `free_carrot` -- move the goal, when the goal is inside a crate. This is the
+2. `free_destination` -- move the goal, when the goal is inside a crate. This is the
    half that was missing, and it is worth being precise about why. VAMOS drives
-   at whatever goal pixel it is given. The carrot comes from A* on a map with no
+   at whatever goal pixel it is given. The destination comes from A* on a map with no
    crate in it, so the pixel lands *on* the crate, and the model obligingly
    draws five paths into it -- measured: at 0.8 m the crate fills 60% of the
    frame and all five candidates still go straight through. That is not a model
@@ -60,7 +60,7 @@ SHADOW = 1.0            # how far behind a return to treat as unknown, metres
 # crate *and* 0.25 m from the wall leaves a 0.27 m window that any small change
 # empties -- which reads as "no way past" in a corridor that plainly has one.
 # Wide commitment comes from picking the roomiest offset, not from the floor.
-CARROT_CLEAR = 0.35     # room a displaced goal must keep from a detected thing
+DESTINATION_CLEAR = 0.35     # room a displaced goal must keep from a detected thing
 LINE_NEED = 0.20        # ...and the room the way there merely has to survive.
                         # Above ROBOT_R (0.16) so it is still a margin, but not
                         # so far above that rounding an obstacle's corner --
@@ -143,7 +143,7 @@ class LiveClearance:
         safety field -- __call__, which the VAMOS gate and the imagined
         rollouts read, still sees every return, and the proximity stop still
         fires on them. What changes is `detected_at`, which is what
-        `free_carrot` plans detours around, and a person should not be planned
+        `free_destination` plans detours around, and a person should not be planned
         around: the gap beside them is a gap that is leaving, and a route
         committed to it is committed to where they were.
 
@@ -204,7 +204,7 @@ class LiveClearance:
         The two sources have to be asked separately when deciding whether to
         move a goal. A doorway is tight in the static field and A* routed
         through it anyway -- that is not an obstruction, it is the building,
-        and a carrot pushed sideways out of a doorway ends up in a wall.
+        and a destination pushed sideways out of a doorway ends up in a wall.
         Only something the map has no record of is a reason to move the goal.
 
         And only something that is standing still: this reads the field
@@ -244,7 +244,7 @@ class LiveClearance:
         return s
 
 
-def line_clear(a, b, clearance, need=CARROT_CLEAR, step=0.1, skip=SKIP):
+def line_clear(a, b, clearance, need=DESTINATION_CLEAR, step=0.1, skip=SKIP):
     """Does the straight line from a to b keep `need` metres of room?
 
     The first `skip` metres are not tested. Where the dog is standing is a
@@ -264,9 +264,9 @@ def line_clear(a, b, clearance, need=CARROT_CLEAR, step=0.1, skip=SKIP):
     return True
 
 
-def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
+def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
                 max_offset=MAX_OFFSET, step=OFFSET_STEP):
-    """The goal to actually aim at: `carrot`, or a point beside it with room.
+    """The goal to actually aim at: `destination`, or a point beside it with room.
 
     Returns (point, offset). Offset is signed and 0.0 when nothing moved, and
     the point is None when there is no way past at all -- the caller's cue to
@@ -285,11 +285,11 @@ def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
     2.15 m corridor: getting past needs a curve, and demanding a clear straight
     line to the far side just reports "no way past" in a corridor that plainly
     has one. Judging it out there is also what makes the dog start easing
-    across while it still has open floor to do it in; judged at the carrot,
+    across while it still has open floor to do it in; judged at the destination,
     nothing looks blocked until the dog is level with the crate and every
     diagonal into the gap shaves the corner.
 
-    *Where to aim now* is answered at the carrot, 2-4 m out, where a straight
+    *Where to aim now* is answered at the destination, 2-4 m out, where a straight
     line is a fair description of the next few seconds. The sideways shift
     found above is applied there and backed off until the line to it is clear.
     The dog eases over a little each tick and arrives at the gap lined up,
@@ -307,9 +307,9 @@ def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
     # person walking across it is not a reason to re-route, it is a reason to
     # wait, and that decision is made in run_building.
     if live.still is None:
-        return carrot, 0.0
+        return destination, 0.0
 
-    far = probe if probe is not None else carrot
+    far = probe if probe is not None else destination
 
     def point_ok(p):
         """Room enough to stand, and still inside the building."""
@@ -318,8 +318,8 @@ def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
     def reachable(p):
         return point_ok(p) and line_clear(xy, p, live.detected_at, LINE_NEED)
 
-    if reachable(far) and reachable(carrot):
-        return carrot, 0.0
+    if reachable(far) and reachable(destination):
+        return destination, 0.0
 
     dx, dy = far[0] - xy[0], far[1] - xy[1]
     d = math.hypot(dx, dy)
@@ -332,7 +332,7 @@ def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
     # remaining offset reads 0.3 m smaller, and the dog converges on a course
     # that grazes the obstacle instead of one that clears it. Across the route
     # the target is a fixed place in the corridor and the crossing finishes.
-    rdx, rdy = far[0] - carrot[0], far[1] - carrot[1]
+    rdx, rdy = far[0] - destination[0], far[1] - destination[1]
     rd = math.hypot(rdx, rdy)
     if rd < 1e-6:
         rdx, rdy, rd = dx, dy, d
@@ -365,22 +365,22 @@ def free_carrot(carrot, xy, live, probe=None, need=CARROT_CLEAR,
     if side is None:
         return None, 0.0
 
-    # The carrot goes as near that crossing as it can be reached from here.
-    # Re-optimising "roomiest" at the carrot instead is what made earlier
-    # versions creep back: once the carrot is clear of the obstacle the
+    # The destination goes as near that crossing as it can be reached from here.
+    # Re-optimising "roomiest" at the destination instead is what made earlier
+    # versions creep back: once the destination is clear of the obstacle the
     # roomiest place is the middle of the corridor, so the dog would aim for
     # the centreline, undo the crossing it had started, and arrive at the
     # obstacle exactly where it began. What matters is being across by the time
-    # it reaches the pinch, so the pinch sets the distance and the carrot only
+    # it reaches the pinch, so the pinch sets the distance and the destination only
     # says whether it can be got to.
     tries = sorted((k * step for k in range(1, int(max_offset / step) + 1)),
                    key=lambda o: abs(o - want))
     for o in tries:
-        p = (carrot[0] + nx * o * side, carrot[1] + ny * o * side)
+        p = (destination[0] + nx * o * side, destination[1] + ny * o * side)
         if reachable(p):
             return p, o * side
 
-    # Nothing on that side fits yet but the carrot itself is still reachable:
+    # Nothing on that side fits yet but the destination itself is still reachable:
     # keep going and ask again a metre later, rather than stopping on a
     # geometry that is about to change.
-    return (carrot, 0.0) if reachable(carrot) else (None, 0.0)
+    return (destination, 0.0) if reachable(destination) else (None, 0.0)

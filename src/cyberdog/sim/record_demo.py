@@ -85,7 +85,7 @@ def main():
         # Ask the VLM on a slow clock; a call costs seconds, control runs at 20 Hz.
         if policy is not None and state["state"] == "TRACK" and n % REPLAN_EVERY == 0:
             chosen, candidates, safety = policy.plan(
-                dog, vamos_prompt(state), robot.camera_pose(), state["carrot"],
+                dog, vamos_prompt(state), robot.camera_pose(), state["destination"],
                 pose=(x, y, yaw))
 
         cpose = robot.camera_pose()

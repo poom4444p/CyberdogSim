@@ -26,6 +26,10 @@ the VLM is a service rather than an import. The twin runs without torch; only
 the VLM server needs it. **The twin is the first environment and it is enough to
 see the whole thing work.** The second is optional, and only for `--vamos`.
 
+`--nlu` is the exception to the split: the Gemma command parser is small enough
+to run in-process, so it wants torch inside the twin rather than a server of its
+own. It is an optional extra on the same environment — step 1 has it.
+
 ### 1. The twin — `cyberdog_sim`
 
 ```bash
@@ -58,6 +62,19 @@ conda activate cyberdog_sim     # REQUIRED: see below
 
 `echo $MENAGERIE_PATH` is the check. If it prints nothing, the next section is
 about to bite.
+
+**For `--nlu` only**, add the command parser's dependencies. Without them the
+twin still runs; you just have to name a place the map knows, because matching
+is done against `locations.json` by name rather than by model:
+
+```bash
+pip install -e ".[language]"
+```
+
+That pulls torch, transformers and peft into `cyberdog_sim`. The LoRA adapter is
+already in `models/lora`, and the base model (`unsloth/gemma-2b-it`, not gated)
+is fetched once on first use. No `KMP_DUPLICATE_LIB_OK` is needed here —
+`language/infer.py` sets it for you.
 
 ### 2. Build the scene, then walk the dog
 
@@ -158,7 +175,7 @@ All commands run in `cyberdog_sim`, from the repo root.
 | `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog stops for them |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
-| `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer |
+| `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer (needs `.[language]`) |
 | `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
 | `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |
 | `python -m cyberdog.sim.scene.build_scene 2` | Rebuild one floor only |
@@ -166,11 +183,64 @@ All commands run in `cyberdog_sim`, from the repo root.
 Three of these are also on your `PATH` after `pip install -e .`:
 `cyberdog-building`, `cyberdog-demo`, `cyberdog-record`.
 
+### Saying it in plain English — `--nlu`
+
+Without `--nlu` the destination is matched against `locations.json` by name, so
+it has to *be* one of the names: `restroom`, `cafeteria`, `room 201`. Ask for
+`"pee"` and you get `no destination found` — the rule matcher has never heard of
+it, and is not supposed to have. Slang is the fine-tune's job, and `--nlu` is
+what puts it in the loop.
+
+| Command | What the parser does with it |
+|---|---|
+| `python -m cyberdog.sim.run_building "I need to pee" --nlu` | slang → `restroom` |
+| `python -m cyberdog.sim.run_building "I need to pee on the 2nd floor" --nlu` | slang → `restroom`, floor rules → floor 2 |
+| `python -m cyberdog.sim.run_building "I need to pee, then take me to the cafeteria" --nlu` | splitter → two stops, `restroom` then `cafeteria` |
+| `python -m cyberdog.sim.run_building "I'm starving" --nlu` | slang → `cafeteria` |
+
+Only the destination needs the model. Splitting multi-stop commands and reading
+floor phrases are rules either way — that is where they live in the pipeline —
+so `"on the 2nd floor"` is handled the same with `--nlu` or without it.
+
+### All three at once
+
+The flags compose, and this is the one worth watching: a spoken command, a
+corridor with people in it, and the VLM steering.
+
+```bash
+# slang + a crowd — no server needed
+python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1
+
+# ...and with VAMOS in the steering loop (start the server first, step 3)
+python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1 --vamos
+
+# the same, rendered 4× faster, for a quick look
+python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1 --speed 4
+```
+
+Each prints its own scoring at the end — whether it arrived, how near it came to
+a crate, how often it stopped for somebody, and how close it got to them:
+
+```
+ARRIVED on floor 1 at (33.1, 4.5) after 32s of sim time
+obstacles: up to 20 returns the map could not explain, 0.0s crawling, ...
+collisions: none -- the dog never entered an obstacle's footprint
+people: 1 times it stopped to let someone past, 1.1s waiting in total
+contact: none -- closest it came to anybody was 3.31 m
+```
+
+Read `collisions` and `contact` first: they are scored against ground truth the
+robot is never shown. A run that arrives but reports `CONTACT` is not a pass.
+
+**`--vamos` can score worse than without it** on a floor the map already solves
+— see [What is and isn't verified](#what-is-and-isnt-verified) before reading a
+bad run as a bug.
+
 ---
 
 ## Troubleshooting
 
-Four failures are common on a fresh Mac. Each one's **last** traceback line is
+Six failures are common on a fresh Mac. Each one's **last** traceback line is
 the diagnosis — the `File "..."` lines above it are only the call chain.
 
 **`No module named 'cyberdog'`**
@@ -197,6 +267,14 @@ afternoon:
 Note the path in the message is the one that was *looked for*, which is the
 fallback `~/mujoco_menagerie` when the variable is missing — it is not where
 your copy is, and chasing it is the wrong trail.
+
+**`no destination found in '...' (try --nlu, or name a place from locations.json)`**
+You asked for somewhere by a name the map does not carry — `"pee"` rather than
+`"restroom"`. Without `--nlu` the destination is a literal match against
+`locations.json`, which has no slang in it by design. Either name the place, or
+add `--nlu` to put the fine-tune in the loop. If `--nlu` then fails on
+`No module named 'torch'`, the command parser's extra is not installed: see
+step 1, `pip install -e ".[language]"`.
 
 **`can't open file '.../vlm_server.py'`**
 `start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`
@@ -281,20 +359,25 @@ deliberately absent from the occupancy grid, so A* routes straight through them
 and the perception layer has something real to find. `tests/selftest.py` scores
 runs by comparing the dog's pose to those crates' footprints — data the robot is
 never shown. Current results: 1741 unexplained LiDAR returns over the corridor
-with **zero false positives**, and 4 of 5 routes arrive with no collision.
+with **zero false positives**, and all six scored routes end as intended — five
+arrive with no collision, and `room 101` stops short, which is the known limit
+below rather than a failure.
 
 The same is true of the people in `sim/scene/pedestrians.py`, who are on no map
 either and who additionally move, so a single scan cannot describe them.
 `sensing/tracking.py` gives a thing a velocity, and the dog stops for anything
 walking whose path meets its own inside the next 2.5 s. Scored the same way:
-six seeds of three people on the floor-2 route, **6 of 6 arrive**, 2–4 stops
-each, and nothing closer than **0.55 m** to a person. With the yielding
-disabled and everything else identical, the same seeds produce contact — which
-is what says the stopping is doing the work rather than the crowd happening to
-miss. In an empty building the same logic yields **zero** times, which took two
-shape filters to reach: a crate's visible face slides along itself at 0.6 m/s
-as the dog walks past, which is a walking pace, so speed alone cannot tell them
-apart.
+six seeds of three people on the floor-2 route, **6 of 6 arrive** with no
+collision, 2–6 stops each. Four of the six keep everybody at arm's length
+(closest 0.69 m); **two of the six dip inside the 0.55 m contact threshold**, to
+0.52 m and 0.45 m — a graze past somebody in a corridor the route already hugs
+one wall of, not a collision, and the honest number until the planner can commit
+to a curve. With the yielding disabled and everything else identical, the same
+seeds produce contact throughout — which is what says the stopping is doing the
+work rather than the crowd happening to miss. In an empty building the same logic
+yields **zero** times, which took two shape filters to reach: a crate's visible
+face slides along itself at 0.6 m/s as the dog walks past, which is a walking
+pace, so speed alone cannot tell them apart.
 
 **Known limits, deliberately not yet closed:**
 
@@ -306,11 +389,20 @@ apart.
   spread about ±0.25 m over a 2 m path; getting round a crate in this corridor
   takes about 0.65 m. So its paths are safe over their own length, pass the
   safety gate, and still lead into the obstacle. The map makes that turn instead
-  (`perception.free_carrot`) until the LoRA fine-tune of spec L4 s5 exists.
+  (`perception.free_destination`) until the LoRA fine-tune of spec L4 s5 exists.
   **This is why `--vamos` can perform worse than without it** on a floor the map
   already describes well: it replaces a globally-correct A* line with a 2 m
   horizon, and throttles speed by its own confidence. VAMOS earns its place
-  where the map is wrong or missing, not where it is right.
+  where the map is wrong or missing, not where it is right. Measured: `room 201`
+  arrives in 84 s map-only and **does not finish at all under `--vamos`** — four
+  consecutive runs end at the floor-2 cart, with no collision and no failed VLM
+  call, the safety gate rejecting 113 of 149 candidates on that floor. It fails
+  safe, which is the gate working as designed; it is not a route that works.
+- `--vamos` is **not reproducible.** The VLM server samples at `temperature=1.0`
+  and the client sends neither a temperature nor a seed, so two identical
+  commands give different paths. `--seed` pins the crowd, not the model. Three of
+  those four runs gave up after ~69 s of sim time and ~66 calls; the fourth
+  crawled at the cart for 100 s and spent 560 calls before ending the same way.
 - The collision counter is a **point test** on the dog's centre, not its body, so
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.

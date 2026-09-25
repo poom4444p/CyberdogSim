@@ -39,8 +39,8 @@ from cyberdog.planning.checkpoint_projector import (load_camera_config,
                                                     vamos_prompt)
 from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
                                   wrap)
-from cyberdog.sim.overlay import (draw_marker, draw_path, draw_points,
-                                  safety_bar)
+from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
+                                  draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
@@ -63,6 +63,11 @@ REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacl
 # over it, and the old -28 degree chase camera sat inside the ceiling, which
 # rendered as solid grey.
 CHASE_D, CHASE_EL = 3.2, -11
+# How far a door sign sits off the corridor centreline, towards its own room.
+# The corridor is 2.7 m wide, so this puts it essentially on that room's wall --
+# and, more to the point, on the correct side of a corridor whose two facing
+# rooms share a single door_xy in locations.json.
+SIGN_OFF = 1.25
 # Azimuth, distance, elevation for the lift -- see frame(). Azimuth is the
 # direction the camera looks along, so 0 puts it west of the shaft looking in
 # through the open face.
@@ -244,6 +249,7 @@ class Run:
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
         self.router = router
+        self._doors = {}          # floor -> [(name, door_xy)], for the captions
         self.floor = START_FLOOR
         self.in_lift = False
         self.behind = False
@@ -338,7 +344,70 @@ class Run:
         self.outside.update_scene(self.robot.data, self.chase)
         left = np.ascontiguousarray(self.outside.render())
         self.floor_tag(left)
+        self.name_tag(left, x, y)
         self.writer.append_data(np.hstack([left, dog]))
+
+    def doors(self, floor):
+        """(name, sign_xy) for every named place on one floor, cached.
+
+        Doors rather than room centres: the door is what the dog walks past,
+        and a room centre is behind a wall. `hallway` is skipped -- it is the
+        corridor itself, so its label would sit on top of every other one.
+
+        Two collisions have to be undone first, and both come from
+        `locations.json` being a routing table rather than a signboard:
+
+        `door_xy` is the corridor centreline, so the room on the north side
+        and the room on the south share one to the centimetre -- `room 101`
+        and `room 106` are both [3.0, 9.5]. Signed as-is, one of every pair is
+        dropped as an overlap and half the building is unlabelled. So the sign
+        slides SIGN_OFF off the centreline towards its own room, which puts it
+        on that room's wall, which is where signage lives anyway.
+
+        And a place can have several names for the parser's benefit -- stairs,
+        staircase, stairway and stairwell are one stairwell at [1.0, 9.5].
+        A door has one sign, so the shortest name wins and the synonyms go.
+        """
+        if floor not in self._doors:
+            seen, out = {}, []
+            for name, entries in self.router.locations.items():
+                if name == "hallway":
+                    continue
+                for e in entries:
+                    if e["floor"] != floor:
+                        continue
+                    door = tuple(e.get("door_xy") or e["xy"])
+                    room = tuple(e["xy"])
+                    key = (round(door[0], 2), round(door[1], 2),
+                           round(room[0], 2), round(room[1], 2))
+                    if key in seen and len(seen[key]) <= len(name):
+                        continue        # a synonym of something already signed
+                    seen[key] = name
+            for (dx, dy, rx, ry), name in seen.items():
+                vx, vy = rx - dx, ry - dy
+                n = math.hypot(vx, vy)
+                if n:
+                    dx, dy = dx + vx / n * SIGN_OFF, dy + vy / n * SIGN_OFF
+                out.append((name, (dx, dy)))
+            self._doors[floor] = out
+        return self._doors[floor]
+
+    def name_tag(self, img, x, y):
+        """Room names on the chase panel, for the rooms the dog is passing.
+
+        The same complaint `floor_tag` answers, one level finer: the pips say
+        which storey, and nothing said where along it. Every doorway in this
+        building renders identically, so a run to `room 201` and a run to
+        `room 206` are the same video.
+
+        Caption only. These are drawn onto the rendered chase frame, not built
+        into the scene, so the dog's camera -- the one VAMOS is handed -- has
+        no text in it. That boundary is the same one `obstacles.py` and
+        `pedestrians.py` keep: the robot is not told anything here.
+        """
+        cam = ChaseCam(self.outside.scene, img.shape[1], img.shape[0])
+        label_places(img, cam, self.doors(self.floor), (x, y),
+                     levels.floor_z(self.floor))
 
     def floor_tag(self, img, n=3):
         """Three stacked pips down the left edge, the current floor lit.

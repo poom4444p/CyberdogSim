@@ -10,8 +10,8 @@ command and a few seconds.
     python tests/selftest.py lidar      # just one
 
 Stages run bottom-up: scene, lidar, perception, destination, crowd, latency,
-run. The
-first failure is usually the real one -- a bad scene fails everything above it.
+run. The first failure is usually the real one -- a bad scene fails everything
+above it.
 """
 import math
 import os

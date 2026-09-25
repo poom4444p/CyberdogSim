@@ -13,7 +13,7 @@ built against, see [`spec.md`](spec.md).
               |
               v
   +-------------------------------------------------------------+
-  |  language/                                                  |
+  |  language/                                                   |
   |    command_splitter  "A, then B" -> ["A", "B"]   (rules)     |
   |    floor_parser      "upstairs"  -> floor + 1    (rules)     |
   |    infer             text -> {destination, floor}  (LoRA)    |
@@ -21,7 +21,7 @@ built against, see [`spec.md`](spec.md).
               |  destination name + floor
               v
   +-------------------------------------------------------------+
-  |  planning/building_router                                   |
+  |  planning/building_router                                    |
   |    locations.json -> where is it, on which floor             |
   |    per-floor A* (mapping/) -> checkpoints                    |
   |    across floors -> legs joined by the lift                  |
@@ -36,8 +36,8 @@ built against, see [`spec.md`](spec.md).
   |     lidar.scan()            -> ~2000 world points            |
   |     perception.update()     -> which of them the map cannot  |
   |                                explain                       |
-  |     perception.free_destination()-> the goal to actually aim at    |
-  |     control.advance()       -> which checkpoint we are on     |
+  |     perception.free_destination() -> the goal to aim at      |
+  |     control.advance()       -> which checkpoint we are on    |
   |                                                              |
   |   every 20 ticks (1 Hz), if --vamos:                         |
   |     checkpoint_projector.project_route()  -> goal PIXEL      |

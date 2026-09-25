@@ -38,7 +38,7 @@ are kept apart so that the day a real Mid-360 arrives, only `lidar.py` changes.
 ## Whole building
 
 ```bash
-python -m cyberdog.sim.scene.build_scene --building            # once; 552 geoms, floors 1-3
+python -m cyberdog.sim.scene.build_scene --building            # once; 390 geoms, floors 1-3
 python -m cyberdog.sim.run_building "go to the server room"
 python -m cyberdog.sim.run_building "library on the 2nd floor, then the server room"
 python -m cyberdog.sim.run_building "restroom on floor 3" --no-video    # fast, headless
@@ -46,6 +46,7 @@ python -m cyberdog.sim.run_building "server room" --nlu                 # throug
 python -m cyberdog.sim.run_building "server room" --vamos               # VLM steering
 python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 python -m cyberdog.sim.run_building "server room" --speed 2            # play back 2x faster
+python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1  # people in the corridors
 ```
 
 ### The one that shows everything
@@ -73,24 +74,71 @@ continuous run -- `output/scene_cache/building.mp4`, about 90 seconds at 2x:
 the two 43 m corridor transits are what it is there for. The stairwell is at
 the west end and the lift at the east, so visiting both is a round trip.
 
-Not in this video: the Gemma layer (`--nlu`). torch is deliberately not in the
-sim environment -- the VLM is a service, not an import -- so the NLU layer is
-demonstrated by `main_planner.py` in its own process. The stop splitting and
-floor parsing in the video are the same rules that path uses.
+Not in this video: the Gemma layer (`--nlu`), though `run_building.py` can drive
+it. The VLM stays a service rather than an import, but the command parser is
+small enough to run in-process, so it is an optional extra on this same
+environment (`pip install -e ".[language]"`) rather than a server of its own.
+The stop splitting and floor parsing in the video are rules either way.
 
 `--vamos` needs `VAMOS/server/vlm_server.py` running on 127.0.0.1:8009.
 
 The command is split into stops and stripped of floor phrases by the same
 rules `main_planner.py` uses. `--nlu` sends each stop through the fine-tuned
-Gemma layer; without it the destination is matched against `locations.json`
-by name, which keeps torch out of the process.
+Gemma layer; without it the destination is matched against `locations.json` by
+name, which keeps torch out of the process -- and means slang like "I need to
+pee" only resolves with `--nlu`.
 
 `BuildingRouter` returns one leg per floor with a "take the lift" handover --
 `run_building.py` is what actually drives it: A* leg, ride, A* leg, ride, A*
 leg, in one continuous run. Video is `output/scene_cache/building.mp4`: chase view on
-the left with a three-pip floor indicator, the dog's own 640x480 camera on the
-right with the projected goal pixel (and VAMOS's candidate paths under
-`--vamos`).
+the left with a three-pip floor indicator and the names of the rooms being
+passed, the dog's own 640x480 camera on the right with the projected goal pixel
+(and VAMOS's candidate paths under `--vamos`). See [Reading the
+video](#reading-the-video) for why the names are on the left panel only.
+
+### Reading the video
+
+Two captions are drawn on the chase panel, and both exist because the building
+renders as one grey corridor repeated 48 m and three times over:
+
+- **three pips down the left edge**, the current storey lit. Without them the
+  video cannot tell you which floor you are on.
+- **a door sign on each room the dog is passing**, from `locations.json`, out
+  to 8 m and fading in at the edge of that. Without them the video cannot tell
+  you *where along* the floor you are: a run to `room 201` and a run to
+  `room 206` are otherwise the same footage.
+
+  Drawn as a bordered placard at 1.55 m and **sized by distance** -- nearer is
+  bigger, the way a real sign is. Both of those were corrections: at the 1.95 m
+  the first version used, the sign sits at the wall/ceiling junction (walls are
+  2.0 m) and reads as a caption floating over the corridor rather than
+  something mounted by the door, and at a fixed size a name 8 m away competes
+  with the one you are actually trying to read.
+
+Both are drawn onto the rendered frame by `overlay.ChaseCam` / `label_places`,
+**not built into the scene**. That boundary is the same one `obstacles.py` and
+`pedestrians.py` keep. Door signage as geoms would look identical on the left
+panel and would also appear in the right one -- the dog's camera, which is what
+VAMOS is handed -- and VAMOS is a VLM, so it can read. That would hand the model
+a text cue it does not have today and quietly change the experiment. The names
+are a caption for the viewer; the robot is told nothing.
+
+Names collide constantly down a corridor seen nearly end-on, so the nearest one
+wins and the rest are dropped for that frame rather than drawn underneath:
+overprinting turns "main entrance" and "library" into "mai library nce".
+
+`locations.json` needs two corrections before it can be signage, because it is
+a routing table: facing rooms share one `door_xy` on the centreline (`room 101`
+and `room 106` are both [3.0, 9.5]), and one place carries several names for
+the parser (`stairs` / `staircase` / `stairway` / `stairwell`). So a sign slides
+1.25 m off the centreline towards its own room -- onto that room's wall, which
+is where signage lives -- and synonyms collapse to the shortest name. Without
+the first, one room of every facing pair is dropped as an overlap and half the
+corridor goes unlabelled.
+
+They are overlays, so they do not occlude: a sign 8 m ahead draws over the wall
+between, rather than being hidden by it. Down a straight corridor that reads
+correctly enough, and depth-testing a caption is not worth a depth buffer.
 
 ## The lift, and the stairs it refuses
 
@@ -283,11 +331,47 @@ python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1
 
 Capsule people walk the corridors of every floor, randomly but reproducibly
 per seed: some crossing wall to wall, some walking its length in a side lane.
-Each one walks its leg and then goes somewhere else -- deliberately *not*
-back and forth, because a crosser pacing the same two metres is a moving wall
-and a dog that waits politely for one never gets down the corridor. Nothing
-about them is told to the robot; they are geoms, and the LiDAR finds them like
-anything else.
+Nothing about them is told to the robot; they are geoms, and the LiDAR finds
+them like anything else.
+
+Reaching the end of a leg is a corner, not an exit. They turn and carry on down
+the corridor from where they stopped, in the direction they were already
+headed, and are only ever recycled somewhere else while the dog cannot see them
+-- which is a distance test (12 m, the LiDAR's range), because the Mid-360 is a
+360-degree sensor and "behind the dog" is not unseen. A body that vanishes off
+the end of its line four metres away reads to `tracking.py` exactly as one that
+appears there: as something moving very fast. Over 12 seeds x 60 s that is 165
+relocations with 0 of them visible.
+
+Three things they deliberately do not do, each of which was tried:
+
+- *walk back down the same line.* A crosser pacing the same two metres is a
+  moving wall, and a dog that waits politely for one never gets down the
+  corridor.
+- *stand still at the end of a leg.* A stopped person is a permanent 0.44 m
+  obstacle, and in a 2.7 m corridor whose route hugs one wall the dog can only
+  squeeze past -- measured at 0.09 m, which is through them, the capsules being
+  `contype=0`. It also silences the yielding: a standing person is not a mover,
+  so `conflict()` stops firing and the dog waits for nobody.
+- *turn towards the middle of the corridor* -- which is what picking the new
+  direction from their position rather than their heading does. It funnels the
+  whole crowd into the centre to pace there, the moving wall this module exists
+  not to build, and it livelocked the floor-2 restroom route for 12 minutes of
+  wall clock against 41 seconds of sim time.
+
+Five seeds of the floor-1 restroom route, three people, scored on ground truth:
+
+```
+                contacts   seeds that waited
+    vanishing     0/5            4/5
+    turning       0/5            4/5
+```
+
+Turning costs nothing measurable against the version that vanished -- same clean
+contact record, same yielding -- and buys a crowd that no longer teleports on
+camera. The standing variant, measured when it was tried, scored 2 contacts in
+those five seeds (worst 0.09 m) and waited in 1, and spent 65% of walker-ticks
+stationary against 19% for turning.
 
 `tracking.py` is what makes them different from a post. It clusters the
 unexplained returns, matches the clusters to last tick's, and measures
@@ -336,15 +420,32 @@ floor-2 route:
 
 ```
 python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1 --no-video
-  ARRIVED on floor 2 after 94s
-  people: 4 times it stopped to let someone past, 9.8s waiting in total
-  contact: none -- closest it came to anybody was 0.69 m
+  ARRIVED on floor 2 at (3.1, 4.5) after 109s of sim time
+  collisions: none -- the dog never entered an obstacle's footprint
+  people: 6 times it stopped to let someone past, 24.7s waiting in total
+  contact: none -- closest it came to anybody was 0.70 m
 ```
 
-6/6 arrive, 2-4 stops each, and nothing closer than 0.55 m to a person in any
-of them. With the yielding disabled and everything else identical, the same
-seeds produce contact -- which is the measurement that says the stopping is
-doing the work, rather than the crowd happening to miss.
+6/6 arrive, none of them touching a crate, 2-6 stops each. Four of the six keep
+everybody outside the 0.55 m contact threshold, the closest of those at 0.69 m;
+seeds 4 and 5 cross it, at 0.52 m and 0.45 m, for half a second each. That is a
+graze past somebody rather than a collision -- the capsules are `contype=0`, and
+0.45 m from the dog's centre is still outside a 0.22 m shoulder -- but it is
+counted and reported as a miss, because in a 2.7 m corridor whose route hugs one
+wall, passing that close is exactly what the full stop is meant to replace and
+what CE-RRT* (L6 s2) is meant to make unnecessary.
+
+With the yielding disabled and everything else identical, the same seeds produce
+contact throughout -- which is the measurement that says the stopping is doing
+the work, rather than the crowd happening to miss.
+
+One route/seed does not arrive: `restroom` (floor 1) with `--seed 5` times out at
+(41.0, 8.6). A walker stops in the pinch beside the floor-1 trolley, the latch
+releases it after three seconds of stillness, and there is no gap either side
+wide enough to approve -- so the leg ends with "I cannot find a way past this."
+It is the same known limit as `room 101`: getting past needs a planned curve, and
+it reproduces identically on the pre-turning walkers, so it is not something the
+corner-turning change introduced.
 
 ### When there is no way past
 
@@ -376,17 +477,56 @@ cannot see coming.
 
 `run_building.py` compares the dog's pose each tick against `obstacles.boxes()`
 -- ground truth, never shown to the robot, which finds these with the LiDAR or
-not at all -- and prints the result. Every run below ends `collisions: none`:
+not at all -- and prints the result.
+
+Map-only, no `--vamos`:
 
 ```
-python -m cyberdog.sim.run_building "room 201" --vamos --auto-confirm --speed 2
-  ARRIVED on floor 2 after 102s
-  VAMOS floor 2: 87 calls, 0 failed, 177 candidates rejected (40 by the safety gate)
+python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video
+  ARRIVED on floor 2 at (3.1, 4.5) after 84s of sim time
+  obstacles: up to 290 returns the map could not explain, 0.0s crawling, 0.0s stopped, least clearance ahead 0.05 m
   collisions: none -- the dog never entered an obstacle's footprint
 ```
 
-`room 101` (floor 1), `room 201` (floor 2), `chemistry lab` (floor 3) and
-`cafeteria` all arrive with zero collisions and zero stops.
+**With `--vamos`, this route does not finish.** Four consecutive runs all end at
+the floor-2 cart (x 16.0-17.2), between (16.7, 9.2) and (17.1, 9.2):
+
+```
+python -m cyberdog.sim.run_building "room 201" --vamos --auto-confirm --no-video
+  FAILED on floor 2 at (17.0, 9.2) after 69s of sim time
+  VAMOS floor 1: 12 calls, 0 failed, 55 candidates rejected (17 of them by the safety gate), mean safety of the paths it followed 0.87
+  VAMOS floor 2: 66 calls, 0 failed, 149 candidates rejected (113 of them by the safety gate), mean safety of the paths it followed 0.95
+  collisions: none -- the dog never entered an obstacle's footprint
+```
+
+Nothing is broken in the service: **0 failed calls in all four runs**, mean
+safety 0.95 on the paths it followed. What the numbers say is that the gate is
+doing almost all the work -- 113 of 149 candidates rejected on floor 2 -- and
+that the model keeps proposing the same unusable manoeuvre. This is the +/-0.25 m
+spread against a 0.65 m turn, measured end to end: the dog walks up to the cart,
+every candidate is either rejected or leads nowhere, and the leg ends. It ends
+*safe* -- no collision in any run -- which is the gate working as designed, not
+a route that works.
+
+How long it grinds first varies a lot, because the VLM samples at
+`temperature=1.0` with no seed (`vlm_server.py`, and `vamos_client.py` sends no
+temperature), so `--vamos` is the one part of this project that is not
+reproducible from a seed. Three runs gave up after ~69 s of sim time and 65-67
+calls; the fourth crawled at the cart for 100 s and spent **560 calls and 2612
+rejected candidates** over 316 s before ending the same way. The *outcome* is
+consistent; only the length of the attempt is not.
+
+`room 201` (floor 2), `chemistry lab` (floor 3) and `cafeteria` (floor 1) all
+arrive with zero collisions and zero stops. `room 101` (floor 1) is the
+exception, and a deliberate one: it crawls, stops and ends the leg at (26.4,
+9.3) with 0.00 m of clearance ahead -- also with no collision. The trolley
+blocks the wall its route hugs, so getting past needs a full-corridor crossing.
+Stopping is the correct answer until CE-RRT* exists; `selftest.py` scores this
+route as "stopped short as expected".
+
+Those three are map-only runs. `selftest.py` does not use `--vamos` either, so
+`ALL PASS` says nothing about the VLM path -- the block above is the only score
+it has.
 
 ## Known limits
 
@@ -395,6 +535,15 @@ python -m cyberdog.sim.run_building "room 201" --vamos --auto-confirm --speed 2
   is fine for a 360-degree sensor and wrong the moment something is occluded.
   Beyond LiDAR range an imagined rollout is still scored on the static map.
 - CE-RRT* (L6 §2) does not exist -- VAMOS proposes and the gate disposes.
+- **`--vamos` does not complete the `room 201` route**, which the map-only path
+  walks in 84 s. It reaches the floor-2 cart and stops there, safely, every time.
+  Zero-shot VAMOS cannot make a 0.65 m avoidance turn with a +/-0.25 m spread, so
+  `--vamos` is a measurement of the gate and the projector, not a working
+  steering mode on a floor the map already describes. Spec L4 s5, the LoRA
+  fine-tune, is what this is waiting on.
+- `--vamos` is **not reproducible**: the server samples at `temperature=1.0` and
+  the client sends no temperature or seed, so two identical commands differ.
+  `--seed` fixes the crowd, not the VLM.
 - The people are capsules on scripted legs, not a pedestrian model. They know
   exactly one thing about the dog -- do not walk into the thing in front of
   you -- and making them any cleverer would quietly solve the robot's problem

@@ -57,7 +57,7 @@ ELEVATOR_XY = (BUILDING_L - 1.4, CORR_MID_Y)
 # the middle would just be an invitation to thread between two flights -- and
 # it stops at x=2.5, half a metre short of the doors of the westernmost rooms
 # (slot 0, gaps centred on x=3), so sealing the stairwell does not also seal
-# room 101 and room 106 off the map. sim/stairs.py's shaft is sized to match.
+# room 101 and room 106 off the map. sim/scene/stairs.py's shaft is sized to match.
 STAIRS_ZONE = {"x": (0.0, 2.5), "y": (8.3, 10.7)}
 
 # Named (non-numbered) locations, pinned to fixed slots so the same place

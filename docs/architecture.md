@@ -194,7 +194,7 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 
 | Stage | Cost | Budget |
 |---|---|---|
-| LiDAR scan (~2000 rays) | 1.3 ms | — |
+| LiDAR scan (1980 rays) | ~1.5 ms | — |
 | Perception + `free_destination` | 2.4 ms | 50 ms (one 20 Hz tick) — 5% |
 | `Dream.factor()` × 5 candidates | 7.4 ms | ~1.8 s (a VLM call) |
 | Static clearance field (once per floor) | ~125 ms | cached — cannot be rebuilt per tick |

@@ -14,8 +14,9 @@ interface table for the same reason.
 Pattern. 360 degrees horizontally -- a real Mid-360 is non-repetitive rather
 than a raster, but for finding a crate in a corridor a uniform pattern is
 honest and cheaper to reason about -- and -7 to +52 degrees vertically, which
-is the unit's own FOV. ~2000 rays comes out at 1.7 ms a scan, so the cost of
-carrying it at every control tick is nothing.
+is the unit's own FOV. ~2000 rays comes out at ~1.5 ms a scan (1.3-1.7
+depending on how much of the floor is in range), so the cost of carrying it
+at every control tick is nothing.
 
 Two things that are not obvious and cost an afternoon each:
 
@@ -32,7 +33,7 @@ import math
 import mujoco
 import numpy as np
 
-NH, NV = 180, 11                # ~2000 rays: 1.7 ms, 589 Hz if anyone needed it
+NH, NV = 180, 11                # 1980 rays, ~1.5 ms a scan on an M-series Mac
 EL_MIN, EL_MAX = -7.0, 52.0     # degrees, the Mid-360's vertical FOV
 MOUNT_H = 0.50                  # above the floor -- clear of the dog's own back
 MIN_R = 0.35                    # minimum range, and the self-hit guard

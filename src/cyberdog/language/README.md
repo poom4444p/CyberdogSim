@@ -37,12 +37,12 @@ Each script is a step; run them in this order to go from scratch to a working mo
 | 1 | `generate_dataset.py` | (templates) → `datasets/raw_dataset_english.json` |
 | 2 | `prepare_dataset.py` | `datasets/raw_dataset_english.json` → `datasets/gemma_training_data.jsonl` |
 | 3 | `train.py` | `datasets/gemma_training_data.jsonl` → `models/lora/` (+ checkpoints in `models/lora_training_outputs/`) |
-| 4 | `test_model.py` | interactive manual sanity check |
-| 5 | `eval_model.py` | batch accuracy check against N fresh generated samples |
+| 4 | `scripts/language/try_parser.py` | interactive manual sanity check |
+| 5 | `evaluate.py` | batch accuracy check against N fresh generated samples |
 
 `infer.py` isn't a pipeline step — it's the shared inference module
 (`load_model`, `parse_command`, `generate_raw`, `get_device`) that
-`main_planner.py`, `test_model.py`, `eval_model.py` and
+`main_planner.py`, `scripts/language/try_parser.py`, `evaluate.py` and
 `tests/test_locations.py` all import so the model-loading/generation
 logic lives in exactly one place.
 
@@ -52,7 +52,6 @@ Other files:
 |---|---|
 | `command_splitter.py` | Rules: split a multi-stop command into single-stop commands (no model) |
 | `floor_parser.py` | Rules: pull out a floor phrase and turn it into a floor number (no model) |
-| `archive/raw_dataset_english_old_1000.json` | Old 1,000-sample dataset, kept for reference; nothing loads it |
 | `models/lora_training_outputs/` | Intermediate training checkpoints (only needed to resume a run) |
 
 ## What it recognizes
@@ -92,8 +91,8 @@ holds that question).
 ## Running it
 
 Everything here needs `torch` + `transformers` + `peft` + `trl` + `datasets`,
-which are not in the base Python — use a conda/venv environment that has
-them (this project used a `vamos_mac` conda env during development).
+which are not in the base Python — `pip install -e ".[language]"` adds them
+to the twin's `cyberdog_sim` environment, which is where `--nlu` runs them.
 
 ```bash
 export KMP_DUPLICATE_LIB_OK=TRUE   # macOS-only libomp workaround, harmless elsewhere
@@ -116,8 +115,10 @@ pip install torch transformers peft trl datasets accelerate
 python3 -c "import torch; print(torch.cuda.is_available())"   # should print True
 ```
 
-Run every script from inside `cyberdog/language/` — the data and model
-paths are relative. Each file also has a "Running on Linux" note at the top.
+Run the commands above from the repo root, with the package installed
+(`pip install -e ".[language]"`); every path is resolved through
+`cyberdog.paths`, so the working directory does not matter. Each file also
+has a "Running on Linux" note at the top.
 Older NVIDIA GPUs without bfloat16 (pre-Ampere, e.g. GTX 10xx / T4): change
 `torch_dtype=torch.bfloat16` to `torch.float16` in `infer.py` and
 `train.py`.
@@ -127,8 +128,8 @@ in that order, so a Linux box with an NVIDIA GPU automatically trains and
 runs on `cuda`. The two Mac-specific bits already in the code are both
 no-ops elsewhere:
 - `KMP_DUPLICATE_LIB_OK=TRUE` works around a macOS libomp conflict.
-- `train.py` is named `_mac` for history's sake, not because it's
-  Mac-only.
+- `train.py` carries a "for Mac" note from when it was `train_mac.py`; it
+  is not Mac-only and runs unchanged on Linux.
 
 ## Rule-based pre-processing
 
@@ -181,8 +182,10 @@ editing the rules:
 
 ```bash
 python3 -c "
-import random; from generate_dataset import generate_synthetic_dataset as g
-from command_splitter import split_destinations as sp; from floor_parser import extract_floor as fl
+import random
+from cyberdog.language.generate_dataset import generate_synthetic_dataset as g
+from cyberdog.language.command_splitter import split_destinations as sp
+from cyberdog.language.floor_parser import extract_floor as fl
 random.seed(1); s=g(4000)
 print(sum(len(sp(x['text']))!=1 or fl(x['text'],1)[0] is not None for x in s), 'changed')"
 ```
@@ -211,7 +214,7 @@ python -m cyberdog.language.floor_parser       # 22 cases
 
 ## Latest results
 
-Batch eval (`eval_model.py --num-samples 100`) against the current
+Batch eval (`python -m cyberdog.language.evaluate --num-samples 100`) against the current
 `models/lora/`, on freshly generated samples covering all 43 locations
 (rooms, labs, other, slang):
 
@@ -223,13 +226,13 @@ Batch eval (`eval_model.py --num-samples 100`) against the current
 | `query` correct | 100/100 |
 | **Fully correct (all 3 fields)** | **100/100** |
 
-Caveat: `eval_model.py` draws samples from the *same templates* used to
+Caveat: `evaluate.py` draws samples from the *same templates* used to
 build the training set, so this measures in-distribution correctness, not
 generalization to phrasing nobody wrote a template for. An earlier,
 smaller-dataset version of this model (9 generic locations, no slang) broke
 on question-form commands like `"Is the door open in the lab? Go check."`
 that weren't well represented in the templates — worth spot-checking new
-phrasing styles with `test_model.py` before trusting this on truly novel
+phrasing styles with `try_parser.py` before trusting this on truly novel
 input.
 
 ## Known limitations / next steps

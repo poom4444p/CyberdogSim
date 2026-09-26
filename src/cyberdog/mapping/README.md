@@ -29,10 +29,10 @@ From the CyberDog Skill spec:
 pip install -r requirements.txt
 
 # Generate a synthetic sample map
-python scripts/generate_sample_map.py
+python scripts/mapping/generate_sample_map.py
 
 # Visualize the map + zones + route
-python scripts/visualize_map.py
+python scripts/mapping/visualize_map.py
 
 # Run tests
 python -m pytest tests/ -v

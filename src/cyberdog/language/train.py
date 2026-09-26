@@ -1,5 +1,5 @@
-# NOTE for Linux/Windows users: this script (as the "_mac" in its name
-# suggests) was built and tested on a Mac with Apple Silicon (MPS backend).
+# NOTE for Linux/Windows users: this script was built and tested on a Mac
+# with Apple Silicon (MPS backend) -- it used to be called train_mac.py.
 # Training on Linux with an NVIDIA GPU works too and needs no manual edits —
 # device selection below (get_device(), from infer.py) already picks "cuda"
 # first, "mps" second, "cpu" last. The KMP_DUPLICATE_LIB_OK env var is a

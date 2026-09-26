@@ -20,8 +20,8 @@ destination point 2-4 m ahead → camera pixel (u, v) → PaliGemma <loc> tokens
 ```
 
 Everything here runs **without hardware or ROS**: the robot pose, camera and
-building are simulated. `main_planner.py` in the project root runs the whole
-pipeline (command → model → this layer).
+building are simulated. `cyberdog/main_planner.py`, one level up, runs the whole
+pipeline (command → model → this layer): `python -m cyberdog.main_planner`.
 
 ## Files
 
@@ -29,15 +29,19 @@ pipeline (command → model → this layer).
 |---|---|
 | `building_router.py` | Loads the building (per-floor grids + `locations.json`), resolves place names, plans multi-floor routes |
 | `checkpoint_projector.py` | Destination-point selection + pinhole projection to a pixel; self-test when run directly |
-| `camera_config.yaml` | Camera intrinsics — **placeholder values** until the real camera is known |
-| `test_locations.py` | Checks the building matches the model's training locations (optionally runs the model too) |
 | `visualize_route.py` | Draws a planned trip on the floor maps (PNG) to check routes by eye |
 
-Data it reads (generated, lives in `data/`):
+Data and config it reads (resolved through `cyberdog.paths`):
 
 - `data/building/locations.json` — place name → list of `{floor, xy, door_xy}`
 - `data/building/maps/floorN/room_map.{png,yaml}` — occupancy grid per floor
 - `config/map_config.yaml` — A* settings (checkpoint spacing, turn threshold)
+- `config/camera_config.yaml` — camera intrinsics, **placeholder values**
+  until the real camera is known
+
+Its acceptance test lives with the others: `tests/test_locations.py` checks
+the building matches the model's training locations (and optionally runs the
+model too).
 
 ## The building (placeholder)
 

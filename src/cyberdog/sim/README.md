@@ -271,7 +271,7 @@ them -- `lidar.py` and `perception.py` below -- and goes round.
 ## Seeing them, and going round
 
 `lidar.py` is the virtual Mid-360 the spec asks for at L2 step 2: ~2000 rays,
-360 degrees, **1.7 ms a scan**, emitting the `/lidar/points`-shaped cloud L5 and
+360 degrees, **~1.5 ms a scan**, emitting the `/lidar/points`-shaped cloud L5 and
 L6 are specified to consume, so the real unit swaps in behind one interface.
 
 `perception.py` turns a scan into the one thing the rest of the stack already

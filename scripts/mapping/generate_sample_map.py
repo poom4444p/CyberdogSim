@@ -11,7 +11,7 @@ Creates a simple campus layout with:
 Saves as .pgm + .yaml for use with the map pipeline.
 
 Usage:
-    python scripts/generate_sample_map.py
+    python scripts/mapping/generate_sample_map.py
 """
 
 import os

@@ -23,8 +23,8 @@ from cyberdog.sim.scene.levels import FLOOR_HEIGHT, SLAB_THICK, floor_z  # noqa:
 # The flight's run, west to east. It has to end clear of the doors of the
 # westernmost rooms (centred on x=3): the whole corridor width here is a no-go
 # zone, and a zone that reached those doors would take rooms 101 and 106 off
-# the map. Short and steep is fine -- nothing climbs this. See data/
-# scripts/generate_building.py STAIRS_ZONE, which is the same numbers.
+# the map. Short and steep is fine -- nothing climbs this. See
+# scripts/mapping/generate_building.py STAIRS_ZONE, which is the same numbers.
 SHAFT_X0, SHAFT_X1 = 0.35, 2.2
 N_STEPS = 14
 

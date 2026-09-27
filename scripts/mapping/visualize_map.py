@@ -9,8 +9,8 @@ Acceptance criteria from CyberDogSkill.md:
 This script renders in matplotlib (no RViz required for PoC).
 
 Usage:
-    python scripts/visualize_map.py
-    python scripts/visualize_map.py --routes 5
+    python scripts/mapping/visualize_map.py
+    python scripts/mapping/visualize_map.py --routes 5
 """
 
 import os
@@ -235,7 +235,7 @@ def main():
     grid_path = os.path.join(data_dir, 'sample_grid')
     if not os.path.exists(grid_path + '.yaml'):
         print("Sample grid not found. Run generate_sample_map.py first.")
-        print("  python scripts/generate_sample_map.py")
+        print("  python scripts/mapping/generate_sample_map.py")
         sys.exit(1)
 
     print("Loading map...")

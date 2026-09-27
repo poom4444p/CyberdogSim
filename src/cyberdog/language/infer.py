@@ -5,7 +5,7 @@
 # so it's safe to leave in place there too.
 #
 # Running on Linux: this is a library module, not a script -- it's imported by
-# tests/test_language_model.py, evaluate.py, main_planner.py and tests/test_locations.py.
+# scripts/language/try_parser.py, evaluate.py, main_planner.py and tests/test_locations.py.
 # Setup (once):
 #   python3 -m venv .venv && source .venv/bin/activate
 #   pip install torch transformers peft trl datasets accelerate

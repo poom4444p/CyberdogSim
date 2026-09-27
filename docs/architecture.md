@@ -135,17 +135,14 @@ the map did not already have.
 `sim/scene/obstacles.py` is the exception, and the exception is the point. Its
 crates are drawn into the scene and deliberately **absent from `data/building/`**
 — no grid cell, no zone, no location. The map is stale on purpose. A* routes
-straight through them; the static clearance field reports 0.85–1.10 m of open
+straight through them; the static clearance field reports 0.40–0.55 m of open
 floor exactly where they stand. That gap is what gives the perception layer a
 job, and it is what `tests/selftest.py` measures.
 
-The module asserts its own placement: each crate must straddle the centreline
-the dog actually walks (pure pursuit cuts corners off the checkpoint polyline),
-and must leave at least `MIN_GAP = 0.6 m` on its wider side to get past. Size is
-asserted the other way round, by being modest: these are the objects they are
-named after — a 1.2 x 0.7 m trolley, a 0.6 m square stack of cartons — and not
-the half-corridor chicanes an earlier version built, which made getting past a
-manoeuvre rather than a detour. A crate that sealed the corridor would be a
+The module asserts its own placement: each crate must reach the centreline the
+dog actually walks (pure pursuit cuts corners, so long transits run down the
+middle at y=9.5, not along the checkpoint polyline), and must leave at least
+`MIN_GAP = 0.6 m` to squeeze past. A crate that sealed the corridor would be a
 wall the planner cannot see, and every route on that floor would fail for reasons
 no error message explains.
 

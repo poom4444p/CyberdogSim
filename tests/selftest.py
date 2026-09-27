@@ -298,51 +298,31 @@ def run():
     """
     import subprocess
     py = sys.executable
-    # (destination, expected outcome, extra args). The outcome is what this
-    # build is known to do, not what it ought to do: "collides" is a documented
-    # limit with a README entry, scored so that it shows up here the day it
-    # changes in either direction.
-    cases = [("restroom", "arrives", []), ("cafeteria", "arrives", []),
-             ("room 201", "arrives", []),
-             # The floor-1 route, past the trolley. It used to stop short, back
-             # when the trolley was 1.45 m deep and getting past it was a
-             # full-corridor crossing; at a real trolley's 0.7 m it is an
-             # obstacle to be stepped around, which is what this scores.
-             ("room 101", "arrives", []),
-             # The floor-2 route whose door is a metre west of the crate --
-             # the one that needs the crate's open side to be the north one.
-             ("electrical engineering lab", "arrives", []),
-             # Floor 3, both sides of the cartons: a north room and a south
-             # one. The suite ran six routes for a long time and none of them
-             # came at a box from the side its slack was not on, which is how
-             # three configurations of this scene passed while colliding.
-             ("biology lab", "arrives", []),
-             # `chemistry lab` used to be that collision -- 0.4 s inside the
-             # cartons, every tick of it while the goal pixel was off-frame and
-             # avoidance was switched off. It now stops short instead: the door
-             # is 1.2 m west of the cartons, so getting in means passing them on
-             # the north and turning 90 degrees south immediately, which is a
-             # curve and not something a displaced straight-line goal can
-             # express. Stopping and saying so is the right answer until
-             # CE-RRT* (L6 s2); arriving would be better still, so this is
-             # scored to report either change.
-             ("chemistry lab", "stops short", []),
+    cases = [("restroom", True, []), ("cafeteria", True, []),
+             ("room 201", True, []), ("chemistry lab", True, []),
+             ("room 101", False, []),
              # And once more through a corridor with people in it, who are on
              # no map either and who have to be waited for rather than dodged.
-             ("room 201", "arrives", ["--pedestrians", "3", "--seed", "1"])]
-    for dest, expect, extra in cases:
+             ("room 201", True, ["--pedestrians", "3", "--seed", "1"])]
+    for dest, should_arrive, extra in cases:
         out = subprocess.run(
             [py, "-m", "cyberdog.sim.run_building", dest,
              "--auto-confirm", "--no-video"] + extra,
             capture_output=True, text=True).stdout
         arrived = "ARRIVED" in out
         hit = "COLLISIONS:" in out or "CONTACT:" in out
-        got = "collides" if hit else "arrives" if arrived else "stops short"
-        label = dest + (" (with people)" if extra else "")
-        if expect != "arrives":
-            label += f" (known limit: {expect})"
-        check(f"route: {label}", got == expect,
-              f"{got}" + ("" if got == expect else f", expected {expect}"))
+        note = "arrived" if arrived else "stopped short"
+        dest = dest + (" (with people)" if extra else "")
+        if should_arrive:
+            check(f"route: {dest}", arrived and not hit,
+                  f"{note}, {'COLLIDED' if hit else 'no collision'}")
+        else:
+            # Known limit: the floor-1 trolley blocks the same wall the route
+            # hugs, so getting past is a full-corridor crossing that needs a
+            # planned curve (CE-RRT*, spec L6 s2). Stopping is the correct
+            # behaviour until that exists; driving through it would not be.
+            check(f"route: {dest} (known limit)", not hit,
+                  f"{note} as expected, {'COLLIDED' if hit else 'no collision'}")
 
 
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,

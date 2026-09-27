@@ -94,9 +94,23 @@ def project_to_pixel(point_xy, robot_pose, cam):
     return {"state": "TRACK", "pixel": (int(u), int(v)), "loc": (loc_x, loc_y)}
 
 
-def project_route(robot_pose, waypoints, cam, min_d=2.0, max_d=4.0):
-    """Convenience wrapper: pick the destination, then project it."""
-    destination = pick_destination(robot_pose[:2], waypoints, min_d, max_d)
+def project_route(robot_pose, waypoints, cam, min_d=2.0, max_d=4.0, pick_from=None):
+    """Convenience wrapper: pick the destination, then project it.
+
+    `pick_from` is where along the route the destination is measured from,
+    when that is not where the lens is. It matters: the lens sits
+    CAM_FORWARD ahead of the body, so with the pose alone the choice of
+    destination turns with the dog, and a waypoint sitting near the min_d
+    boundary hops in and out of range as the body rotates. The dog then steers
+    alternately at that waypoint and at a point 4 m down the leg past it, both
+    far enough off its heading to be a turn rather than a step -- and a turn
+    does not move it, so the geometry never changes and it pivots on the spot
+    until the leg times out. Measured from the body it is the same 2-4 m
+    whichever way the dog happens to be looking. The projection itself still
+    comes from `robot_pose`, because that is what the camera can see.
+    """
+    destination = pick_destination(pick_from if pick_from is not None else robot_pose[:2],
+                                   waypoints, min_d, max_d)
     if destination is None:
         return {"state": "ARRIVED"}
     result = project_to_pixel(destination, robot_pose, cam)

@@ -74,6 +74,14 @@ SIGN_OFF = 1.25
 LIFT_CAM = (0, 3.4, -6)
 MAX_TICKS = 6000          # per leg
 
+# A leg is done anywhere within GOAL_R of its last waypoint, which is half a
+# metre of slop -- fine outside a room, too much in front of a lift, where it
+# is the difference between stopping at the doors and stopping in them. Lift
+# legs are held to a tighter radius, and the standoff has to beat it.
+LIFT_GOAL_R = 0.25
+assert lift.STANDOFF > LIFT_GOAL_R, \
+    f"lift.STANDOFF ({lift.STANDOFF}) must exceed LIFT_GOAL_R ({LIFT_GOAL_R})"
+
 # What to do when the LiDAR has found something and VAMOS has nothing that
 # clears it. Not one rule but three, because "stop" and "carry on" are both
 # wrong: crawl while asking again, and only stop once it is close and the
@@ -171,6 +179,38 @@ def resolve_stops(router, text, use_nlu=False):
     return stops
 
 
+def lift_approach(pts, says):
+    """A leg planned to the lift, cut back to the waiting point outside it.
+
+    The router hands over at lift.LIFT_XY, which is inside the car, so the
+    velocity controller used to drive the dog through the open face and park it
+    in the shaft -- before the lift had been called, and with a scripted "walk
+    in" afterwards that had nowhere left to walk. Drop the checkpoints in the
+    doorway and end at the standoff; the handover happens there and lift_ride
+    walks the last metre in. The final announcement ("take the lift") comes
+    with it, because it is still the last thing said on this leg.
+    """
+    keep = [k for k, p in enumerate(pts) if not lift.in_doorway(p)]
+    if keep and keep[-1] == len(pts) - 1:      # handed over outside already
+        return pts, says
+    return ([pts[k] for k in keep] + [lift.WAIT_XY],
+            [says[k] for k in keep] + [says[-1]])
+
+
+def lift_departure(pts, says):
+    """The leg out of the lift, picked up where the dog actually stands.
+
+    lift_ride steps back out to the same waiting point, so starting this leg at
+    LIFT_XY meant the first waypoint was behind the dog and the first thing the
+    controller did was turn round towards the shaft.
+    """
+    keep = [k for k, p in enumerate(pts) if not lift.in_doorway(p)]
+    if keep and keep[0] == 0:                  # picked up outside already
+        return pts, says
+    return ([lift.WAIT_XY] + [pts[k] for k in keep],
+            [says[0]] + [says[k] for k in keep])
+
+
 def plan_stops(router, stops):
     """Stops -> [(floor, destination, [(x, y), ...], [[announcement], ...])]
     legs, following the planner's own floor handoffs.
@@ -211,11 +251,17 @@ def plan_stops(router, stops):
         planned = router.plan(floor, xy, target)
         if planned is None:
             raise SystemExit(f"no route to {name}")
-        for f, route in planned:
-            legs.append((f, name,
-                         [(float(c.position[0]), float(c.position[1]))
-                          for c in route.checkpoints],
-                         [list(c.announcements) for c in route.checkpoints]))
+        for j, (f, route) in enumerate(planned):
+            pts = [(float(c.position[0]), float(c.position[1]))
+                   for c in route.checkpoints]
+            says = [list(c.announcements) for c in route.checkpoints]
+            # A cross-floor stop comes back as a leg to the lift and a leg out
+            # of it; neither should be driven into the car itself.
+            if len(planned) > 1 and j == 0:
+                pts, says = lift_approach(pts, says)
+            elif len(planned) > 1 and j == 1:
+                pts, says = lift_departure(pts, says)
+            legs.append((f, name, pts, says))
         if hazard is not None:
             # Replaces "destination reached" on the last leg of this stop:
             # the dog has not reached what was asked for, and saying so is the
@@ -601,15 +647,30 @@ class Run:
         self.ped["waited"] += 1
         return person
 
-    def follow(self, waypoints, floor, announcements=None, verbose=True):
-        """Walk one floor's leg. Same controller as run_demo, plus the frames."""
+    def follow(self, waypoints, floor, announcements=None, verbose=True,
+               goal_r=GOAL_R):
+        """Walk one floor's leg. Same controller as run_demo, plus the frames.
+
+        `goal_r` is how near the last waypoint counts as arrived -- tightened
+        for the legs that end at the lift, where the remaining half metre is
+        walked scripted and has to start outside the car.
+        """
         self.floor = floor
         self.robot.set_height(levels.floor_z(floor))
+        if not waypoints:
+            # Asked for where it already is. A* has no checkpoints to give for
+            # a route of zero length, and every line below indexes into them --
+            # `waypoints[-1]` on an empty list ended the run in an IndexError
+            # rather than an answer, for "take me to the main entrance" said at
+            # the main entrance.
+            self.say("We are already there.")
+            return True, 0
         i = 1 if len(waypoints) > 1 else 0
         said = set()
         chosen, candidates, safety = None, [], 1.0
         hunting = halted = False
         stalled = no_goal = 0
+        lean = 0.0                # the side of a detour once it is committed
 
         for n in range(MAX_TICKS):
             x, y, yaw = self.robot.get_pose()
@@ -653,7 +714,10 @@ class Run:
             self.score_collision(floor, x, y)
             self.score_people(floor, x, y)
 
-            state = project_route(self.robot.camera_pose(), waypoints[i:], self.cam)
+            # Picked from the body, projected from the lens -- see
+            # project_route. The probe below already measures from the body.
+            state = project_route(self.robot.camera_pose(), waypoints[i:], self.cam,
+                                  pick_from=(x, y))
 
             # "Map decides WHERE": the same destination, moved sideways when it or
             # the line to it is blocked by something the map never had. VAMOS
@@ -691,7 +755,14 @@ class Run:
                     if q is not None and line_clear((x, y), q, live.static_at, ROBOT_R):
                         probe = q
                         break
-                aim, offset = free_destination(state["destination"], (x, y), live, probe=probe)
+                aim, offset = free_destination(state["destination"], (x, y), live,
+                                               probe=probe, prefer=lean)
+                # Which way round it went, kept until the thing is out of
+                # sight: a detour that changes its mind halfway is a swerve,
+                # and the announcement below has already told the person which
+                # way they are about to be led.
+                if offset:
+                    lean = math.copysign(1.0, offset)
                 # One tick with no clear goal is noise -- the scan is rebuilt
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
@@ -718,7 +789,7 @@ class Run:
 
             self.frame(state, chosen, candidates, safety if chosen else None)
 
-            if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < GOAL_R:
+            if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r:
                 for line in (announcements[-1] if announcements else []):
                     self.say(line)
                 return True, n
@@ -771,9 +842,9 @@ class Run:
             # it can walk is walked at half pace.
             if not len(live.points):
                 # Nothing in sight any more: next time is a new obstacle and
-                # deserves to be announced again.
+                # deserves to be announced again, and gets its own side.
                 hunting = halted = False
-                stalled = 0
+                stalled = lean = 0
             if offset and not hunting:
                 # Said before the dog leans, not during: the person's arm is
                 # attached to the handle, and which way it is about to go is
@@ -894,11 +965,16 @@ class Run:
         real Go2 walks this under its own controller; here it is scripted, the
         way the whole kinematic twin is.
         """
-        x, y, _ = self.robot.get_pose()
+        x, y, yaw0 = self.robot.get_pose()
+        # Turned over the walk, not snapped on the first frame: the dog reaches
+        # the lift on whatever heading the corridor left it with, and setting
+        # the target yaw outright made the board a teleported quarter-turn.
+        dyaw = wrap(yaw - yaw0)
         ticks = max(int(math.dist((x, y), to_xy) / (STEP_V * self.robot.CONTROL_DT)), 1)
         for k in range(1, ticks + 1):
             t = k / ticks
-            self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t), yaw, z=z)
+            self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t),
+                             yaw0 + dyaw * t, z=z)
             self.step_crowd()
             self.frame()
 
@@ -926,23 +1002,29 @@ class Run:
     def lift_ride(self, from_floor, to_floor):
         """Change floor the only way this robot will: in the lift.
 
-        The planner hands over at the lift point and picks up at the same xy
-        on the other floor, and the dog is already standing in the car when it
-        gets here -- that point is inside the car's footprint. This is the bit
-        in between: ask, wait, ride, announce.
+        The leg in stops at lift.WAIT_XY, outside the open face (see
+        lift_approach), so the dog is standing in front of the doors when it
+        gets here rather than already in the shaft. This is the bit in between:
+        ask, walk in, ride, announce, step back out.
         """
         if to_floor not in lift.FLOORS_SERVED:
             raise HazardStop(f"the lift does not serve floor {to_floor}")
 
         self.in_lift = True
         z_from = levels.floor_z(from_floor)
+        # Asked from outside, and nothing moves until it is answered: a dog
+        # that boards and then asks for the button has already committed the
+        # person it is leading to a car that may not be there.
         self.confirm(f"Lift ahead. Press the call button for floor {to_floor}, "
                      f"then press continue.")
-        # East into the car through its open west face, then turn to face the
-        # doors: that is where the person is, and it is what the dog's own
-        # camera should be looking at on the way up.
+        # Turn to face the doors, then walk straight in through the open west
+        # face. Turn first, walk second: rolling the two together -- gliding to
+        # the car while the yaw caught up -- walked the dog in sideways, which
+        # is not a thing a dog does and looked exactly as wrong as it was.
+        self.face(lift.LIFT_XY)
         self.glide(lift.LIFT_XY, 0.0, z_from)
-        self.pivot(0.0, math.pi, z_from)
+        self.pivot(self.robot.get_pose()[2], math.pi, z_from)
+        # Facing the doors, in the car, waiting to go: that is the shot.
 
         z0, z1 = z_from, levels.floor_z(to_floor)
         yaw = math.pi                      # facing the doors for the ride
@@ -964,8 +1046,9 @@ class Run:
         for _ in range(int(WAIT_S * FPS)):
             self.frame()
         # Back out west into the corridor before the velocity loop takes over,
-        # so the first thing it does is not a turn into the shaft wall.
-        self.glide((lift.CAR[0] - 0.4, lift.LIFT_XY[1]), math.pi, z1)
+        # so the first thing it does is not a turn into the shaft wall. To the
+        # same waiting point the leg out of the lift now starts from.
+        self.glide(lift.WAIT_XY, math.pi, z1)
         self.in_lift = False
 
 
@@ -1021,7 +1104,8 @@ def main():
             changing = k + 1 < len(legs) and legs[k + 1][0] != floor
             print(f"  leg {k + 1}/{len(legs)}: floor {floor}, {len(waypoints)} checkpoints "
                   f"-> {'the lift' if changing else name}")
-            ok, ticks = run.follow(waypoints, floor, announcements)
+            ok, ticks = run.follow(waypoints, floor, announcements,
+                                   goal_r=LIFT_GOAL_R if changing else GOAL_R)
             if not ok:
                 print(f"  leg {k + 1} timed out after {ticks} ticks")
                 break

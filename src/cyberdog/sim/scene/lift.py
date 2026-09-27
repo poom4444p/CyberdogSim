@@ -39,6 +39,38 @@ _x0, _x1, _y0, _y1 = CAR
 assert _x0 < LIFT_XY[0] < _x1 and _y0 < LIFT_XY[1] < _y1, \
     f"the elevator point {LIFT_XY} in locations.json is outside the car {CAR}"
 
+# Where the dog stops and the handover happens: on the car's centre line, this
+# far west of the open face. LIFT_XY is *inside* the car, so a corridor leg
+# planned to it drives the dog into the shaft before anyone has been asked to
+# call the lift -- and with run_building's GOAL_R of 0.5 m it stopped half a
+# metre in. The last couple of metres are scripted instead (run_building.glide),
+# after the person has pressed the button, and the same point is where the dog
+# steps back out to.
+#
+# The distance is short on purpose. Every route into this corridor comes up
+# through the doorway at x=45 and turns east, so a standoff further west than
+# that is *behind* the dog when it arrives: it veered across the corridor away
+# from the lift, stopped, and turned back through 113 degrees to walk in. At
+# 0.6 m the waiting point sits on the line the dog is already walking, one
+# stride short of the doors. run_building holds lift legs to a tighter arrival
+# radius (LIFT_GOAL_R) than an ordinary destination so that the slop in
+# "arrived" still cannot put it in the doorway.
+STANDOFF = 0.6
+WAIT_XY = (CAR[0] - STANDOFF, LIFT_XY[1])
+
+assert not (_x0 <= WAIT_XY[0] <= _x1 and _y0 <= WAIT_XY[1] <= _y1), \
+    f"the lift waiting point {WAIT_XY} is inside the car {CAR}"
+
+
+def in_doorway(xy):
+    """Is this point in the car, or in the mouth of the shaft outside it?
+
+    Everything east of the waiting point, within the car's own width. A route
+    checkpoint here is one the dog should not walk to under its own controller:
+    it is either in the car or on the last stride into it.
+    """
+    return xy[0] > WAIT_XY[0] and _y0 < xy[1] < _y1
+
 
 def hole(n):
     """(x0, x1, y0, y1) opening in floor n's slab, or None if it has none.

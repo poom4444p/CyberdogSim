@@ -319,14 +319,14 @@ def run():
              ("biology lab", "arrives", []),
              # `chemistry lab` used to be that collision -- 0.4 s inside the
              # cartons, every tick of it while the goal pixel was off-frame and
-             # avoidance was switched off. It now stops short instead: the door
-             # is 1.2 m west of the cartons, so getting in means passing them on
-             # the north and turning 90 degrees south immediately, which is a
-             # curve and not something a displaced straight-line goal can
-             # express. Stopping and saying so is the right answer until
-             # CE-RRT* (L6 s2); arriving would be better still, so this is
-             # scored to report either change.
-             ("chemistry lab", "stops short", []),
+             # avoidance was switched off. Then it stopped short of its door,
+             # which was the honest answer while the detour could not hold a
+             # line: the door is 1.2 m west of the cartons, so getting in means
+             # passing them on the north and turning south immediately. What
+             # was actually stopping it was the side of the detour being
+             # re-decided every tick (see free_destination's `prefer`); with
+             # the crossing committed to one side it arrives, 0.32 m clear.
+             ("chemistry lab", "arrives", []),
              # And once more through a corridor with people in it, who are on
              # no map either and who have to be waited for rather than dodged.
              ("room 201", "arrives", ["--pedestrians", "3", "--seed", "1"])]

@@ -298,7 +298,26 @@ def in_open_floor(a, b, live, need=STATIC_MIN, step=0.1, skip=SKIP):
 
 
 def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
-                max_offset=MAX_OFFSET, step=OFFSET_STEP):
+                     max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0):
+    """The goal to aim at, keeping to the side the dog already committed to.
+
+    Thin wrapper over `_free_destination`, which does the work. A preference
+    biases the answer and must never *be* the answer "no way past": the dog
+    stopped a stride short of a hallway destination tucked behind a trolley
+    because the side it had leant towards had nothing reachable left on it,
+    while the other side did. So when the committed side comes back
+    empty-handed, both are judged again.
+    """
+    aim, off = _free_destination(destination, xy, live, probe, need,
+                                 max_offset, step, prefer)
+    if aim is None and prefer:
+        aim, off = _free_destination(destination, xy, live, probe, need,
+                                     max_offset, step, 0.0)
+    return aim, off
+
+
+def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
+                max_offset=MAX_OFFSET, step=OFFSET_STEP, prefer=0.0):
     """The goal to actually aim at: `destination`, or a point beside it with room.
 
     Returns (point, offset). Offset is signed and 0.0 when nothing moved, and
@@ -334,6 +353,17 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     slips past on whichever side has space rather than by convention -- and the
     roomiest rather than the nearest, because the smallest workable shift puts
     the goal hard against the crate and the dog arrives with nowhere to go.
+
+    `prefer` is the side the dog has already committed to, +1 or -1, and it is
+    tried alone before both are. Which side is roomiest is judged afresh every
+    tick from a scan that changes as the dog closes in, and near a crate on a
+    turn the answer flips: level with the floor-2 crate, "roomiest" alternated
+    between a point 0.7 m north of the pinch and one 0.9 m south of it, tick
+    about. The dog had already leant north, and being sent south every other
+    tick walked it into the crate it was going round. Committing is also what
+    the person on the handle is owed -- they were told which way it was
+    stepping. The commitment is a preference, not an override: if nothing on
+    that side is reachable any more, both sides are judged again.
     """
     # Nothing standing in the way, so there is nothing to go round: the
     # planner's route is still the route. `still` rather than `local` -- a
@@ -389,17 +419,24 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
 
     # Which side, and how far across: both decided at the pinch, where the
     # obstacle is.
-    side, want, best_room = None, 0.0, -1.0
-    off = step
-    while off <= max_offset + 1e-9:
-        for sign in (1.0, -1.0):
-            p = (pinch[0] + nx * off * sign, pinch[1] + ny * off * sign)
-            if not point_ok(p):
-                continue
-            room = min(live.detected_at(*p), live.static_at(*p))
-            if room > best_room + 1e-9:
-                side, want, best_room = sign, off, room
-        off += step
+    def roomiest(signs):
+        side, want, best_room = None, 0.0, -1.0
+        off = step
+        while off <= max_offset + 1e-9:
+            for sign in signs:
+                p = (pinch[0] + nx * off * sign, pinch[1] + ny * off * sign)
+                if not point_ok(p):
+                    continue
+                room = min(live.detected_at(*p), live.static_at(*p))
+                if room > best_room + 1e-9:
+                    side, want, best_room = sign, off, room
+            off += step
+        return side, want, best_room
+
+    side, want, best_room = (roomiest((math.copysign(1.0, prefer),)) if prefer
+                             else (None, 0.0, -1.0))
+    if side is None:
+        side, want, best_room = roomiest((1.0, -1.0))
     if side is None:
         return None, 0.0
 

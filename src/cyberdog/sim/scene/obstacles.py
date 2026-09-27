@@ -67,13 +67,15 @@ what it fits through, and the layout is no longer load-bearing -- it is simply
 where these objects sit. Someone rearranging them should re-run the twenty
 routes rather than trusting the "open north" rule.
 
-What has not moved is the floor-3 compromise. Those routes fan out to doors on
+The floor-3 compromise is the tightest. Those routes fan out to doors on
 *both* sides of the corridor from a single lift, so whichever side the cartons
 leave open, routes wanting the other side get 0.52 m. `chemistry lab` is the
-one that wants it: it now stops short and says so, where it used to drive
-through the cartons. Getting in means passing them on the north and turning 90
-degrees south into a door 1.2 m further on, which is a curve -- CE-RRT*, spec
-L6 s2 -- and not something a goal displaced sideways can express.
+one that wants it: it used to drive through the cartons, then stopped short of
+its door, and now gets in with 0.32 m in hand. Getting in means passing them on
+the north and turning 90 degrees south into a door 1.2 m further on, which is a
+curve -- CE-RRT*, spec L6 s2 -- and not something a goal displaced sideways can
+express. What it turned out to need first was simply not changing its mind
+about which side to pass on: see `free_destination(prefer=...)`.
 
 MIN_GAP is asserted against the wider side, so it cannot catch a box whose open
 side is the wrong one: which side is useful depends on the routes, not on the

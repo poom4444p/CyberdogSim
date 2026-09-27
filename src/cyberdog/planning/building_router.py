@@ -165,10 +165,35 @@ class BuildingRouter:
         `clearance` from any zone edge. Stopping the width of a paving slab
         from an open stairwell is not "near the stairs", it is on top of them,
         and the run-time stop would fire the moment the dog drifted.
+
+        The one thing the spread may cross is the no-go zone it starts inside.
+        A stairwell is drawn solid on the map -- "stairs" in locations.json is
+        a point in the middle of a block of occupied cells with no free
+        neighbour at all -- so a spread that only ever steps onto free cells
+        never left the first cell, returned `xy` itself, and handed A* a goal
+        inside a wall: every "take me to the stairs" died as `no route to
+        stairs`, on all three floors, and with it the whole multi-stop demo.
+        Inside that zone the spread ignores occupancy, because the zone is
+        exactly the blob it is trying to get out of and its edge is where the
+        corridor begins. Everywhere else walls still stop it, so the point it
+        comes back with is one the dog could walk to.
         """
         raw, plan = self.grids[floor], self.plan_grids[floor]
         start = raw.world_to_grid(*xy)
         H, W = raw.grid.shape
+        # The stop zones `xy` is in -- the ones whose insides are crossable
+        # here. Not "any stop zone": crossing a stairwell two rooms away is
+        # hopping a wall, which is the thing this spread exists to not do.
+        blob = [z for z in self.behavior.zones
+                if z.action_rules.speed_modifier <= 0.0 and z.contains_point(*xy)]
+
+        def passable(r, c):
+            """Free floor, or inside the zone the search started in."""
+            if raw.is_free(r, c):             # walls stop the spread, zones do not
+                return True
+            x, y = raw.grid_to_world(r, c)
+            return any(z.contains_point(x, y) for z in blob)
+
         seen, queue = {start}, deque([start])
         while queue:
             r, c = queue.popleft()
@@ -180,7 +205,7 @@ class BuildingRouter:
                 if nxt in seen or not (0 <= nxt[0] < H and 0 <= nxt[1] < W):
                     continue
                 seen.add(nxt)
-                if raw.is_free(*nxt):         # walls stop the spread, zones do not
+                if passable(*nxt):
                     queue.append(nxt)
         return tuple(xy)                      # nowhere free at all; caller will fail
 

@@ -162,7 +162,10 @@ handle. Stairs are a hazard, not a route. So:
 
 Boarding is a handover, not an autonomy claim: the dog stops short, says
 "press the call button for floor N, then press continue", and waits. The real
-robot cannot press a button, so a human does. `--auto-confirm` answers for
+robot cannot press a button, so a human does. Stopping short is literal --
+the router's handoff point (`lift.LIFT_XY`) is inside the car, so the leg to
+the lift is cut back to `lift.WAIT_XY`, a standoff outside the open face, and
+the walk in happens only after the handover is answered. `--auto-confirm` answers for
 them after a visible pause, which is what batch runs and recordings use.
 
 The ride itself is scripted: `cmd_vel` has no z, so the dog is placed along
@@ -274,13 +277,15 @@ fits through, so the arrangement is no longer load-bearing -- but it is still
 the arrangement these twenty routes were measured on, so re-run them before
 trusting a different one.
 
-Floor 3 is the exception that did not move. Those routes fan out to doors on
-*both* sides of the corridor from a single lift, so whichever side the cartons
-leave open, routes wanting the other side get 0.52 m. `chemistry lab` is the
-one that wants it, and it stops short and says so -- where it used to drive
-straight through the cartons. Getting in means passing them on the north and
-turning 90 degrees south into a door 1.2 m on, which is a curve and not
-something a sideways-displaced goal can express.
+Floor 3 is the tightest. Those routes fan out to doors on *both* sides of the
+corridor from a single lift, so whichever side the cartons leave open, routes
+wanting the other side get 0.52 m. `chemistry lab` is the one that wants it: it
+used to drive straight through the cartons, then stopped short of its door for a
+long time, and it now arrives with 0.32 m in hand. Getting in means passing them
+on the north and turning 90 degrees south into a door 1.2 m on -- still a curve
+no sideways-displaced goal can express, but what was actually stopping the dog
+was changing its mind about which side to pass on, tick by tick. See
+`free_destination(prefer=...)`.
 
 Re-check the table after any change to the grids or the router. `MIN_GAP` is
 asserted against the wider side, so it cannot catch a box whose open side is the
@@ -518,8 +523,9 @@ python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video
   collisions: none -- the dog never entered an obstacle's footprint
 ```
 
-Across all twenty named destinations in the building, map-only: **19 arrive,
-none of them having touched anything**; `chemistry lab` stops short. The
+Across every named destination in the building, map-only: **they all arrive,
+none of them having touched anything** -- `chemistry lab` and the floor-2
+`restroom` included, which is new (see `prefer`, below). The
 six-route suite in `selftest.py` missed a collision for three successive layouts
 of this scene, because none of its routes came at a box from the side the slack
 was not on; it now runs eight, including both sides of the cartons, and scores
@@ -583,12 +589,17 @@ path -- the block above is the only score it has.
   is fine for a 360-degree sensor and wrong the moment something is occluded.
   Beyond LiDAR range an imagined rollout is still scored on the static map.
 - CE-RRT* (L6 §2) does not exist -- VAMOS proposes and the gate disposes.
-- **`chemistry lab` stops short of its door** -- the one route of twenty that
-  does not arrive, and it arrives nowhere near anything. The cartons sit 1.2 m
-  east of a north-side door, so getting in means passing them on the north and
-  turning 90 degrees south immediately: a curve, which a sideways-displaced goal
-  cannot express. CE-RRT* (L6 §2) is the repair. Scored in `selftest.py` as
-  `stops short`, so it reports the day it changes in either direction.
+- **A detour holds its side for as long as the obstacle is in sight, and
+  nothing plans the curve past that.** Which side has more room is judged
+  afresh every tick, from a scan that changes as the dog closes in, and level
+  with an obstacle the answer alternates: measured beside the floor-2 crate, it
+  flipped between 0.7 m north of the pinch and 0.9 m south of it, tick about.
+  The dog leant north, was sent south the next tick, and drove into the crate it
+  was going round; `chemistry lab` stopped short for the same reason.
+  `free_destination(prefer=...)` commits to the first side chosen and only
+  reconsiders when that side has nothing reachable left, which is what those two
+  routes were waiting for. A genuine curve -- round an obstacle and immediately
+  through a door -- is still CE-RRT* (L6 §2), and still does not exist.
 
 Three entries that used to be on this list are gone, and all three were the same
 kind of mistake -- a test that asked a question other than the one that

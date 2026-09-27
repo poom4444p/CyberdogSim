@@ -360,9 +360,11 @@ and the perception layer has something real to find. `tests/selftest.py` scores
 runs by comparing the dog's pose to those crates' footprints — data the robot is
 never shown. Current results: 2008 unexplained LiDAR returns over the corridor
 with **zero false positives**, and all eight scored routes end as intended.
-Across every named destination in the building — twenty routes, all three floors
-— **19 arrive with zero collisions**; `chemistry lab` stops short and says so.
-Nothing in the building drives through anything any more.
+Across every named destination in the building — all three floors — **every
+route arrives with zero collisions**, including `chemistry lab`, which used to
+stop short of its own door. The stairs, correctly, are not one of them: those
+end in the corridor outside, with the refusal spoken. Nothing in the building
+drives through anything any more.
 
 The suite ran six routes until recently and reported `ALL PASS` for three
 successive layouts of this scene, one of which drove through a crate. None of
@@ -422,12 +424,18 @@ this list used to carry. No threshold changed: `DESTINATION_CLEAR`, `LINE_NEED`
 and `STATIC_MIN` are what they were, having been measured first and found not
 to be binding.
 
-- **`chemistry lab` stops short of its own door**, 19 routes out of 20 having
-  arrived. The lab is on the north side of a corridor whose cartons sit 1.2 m
-  east of its door, so getting in means passing them on the north and then
-  turning 90° south immediately — a curve, which a goal displaced sideways
-  cannot express. CE-RRT\* (spec L6 s2) is the repair. It used to *collide*
-  here rather than stop.
+- **A detour is committed to one side now, and that was the real limit.**
+  `chemistry lab` stopped short of its own door for a long time, and the
+  diagnosis was geometric: cartons 1.2 m east of the door, so getting in means
+  passing them on the north and turning 90° south immediately — a curve, which
+  a goal displaced sideways cannot express. Half of that was true and half of
+  it was a flip-flop: "which side has more room" is judged afresh every tick
+  from a scan that changes as the dog closes in, and level with an obstacle the
+  answer alternates. The dog leant north, was sent south the next tick, and
+  undid its own crossing. With the side committed until the obstacle is out of
+  sight (`free_destination(prefer=...)`), `chemistry lab` and the floor-2
+  `restroom` both arrive. CE-RRT\* (spec L6 s2) is still what a real curve
+  wants; it is no longer what these two routes were waiting for.
 - **Zero-shot VAMOS proposes short paths, and whether that is enough depends on
   the corridor.** Its five candidates spread about ±0.25 m over a 2 m path. When
   an obstacle demanded 0.65 m of sidestep — the old 1.45 m-deep boxes — its paths

@@ -661,19 +661,7 @@ class Run:
             # crate is five candidate paths into the crate -- measured, before
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
-            # Whenever the route has a destination -- not only when the camera
-            # can see it. This used to read `if state["state"] == "TRACK"`, and
-            # that is a camera test standing in for a safety one: ALIGN means
-            # the goal pixel is outside the image, which happens exactly when
-            # the dog is turning into a doorway, and it says nothing whatever
-            # about what is in front of it. The LiDAR is a 360-degree sensor.
-            # With avoidance gated on the projection, the dog steered at the
-            # raw A* waypoint for the whole turn and drove straight through
-            # anything the map did not know about: `chemistry lab` spent 0.4 s
-            # inside the floor-3 cartons, every tick of it in ALIGN, on a route
-            # whose own clearance figures looked fine either side of the turn.
-            tracking = state["state"] == "TRACK"
-            if state.get("destination") is not None:
+            if state["state"] == "TRACK":
                 # Judge the blockage further out than the destination -- see
                 # free_destination. PROBE_D is far enough to start moving across
                 # while there is still open corridor to do it in.
@@ -697,11 +685,7 @@ class Run:
                 # should not start the stopping sequence.
                 no_goal = no_goal + 1 if aim is None else 0
                 blocked = no_goal >= BLOCKED_TICKS
-                # Re-aiming the VLM is still a TRACK-only affair: a goal pixel
-                # is what VAMOS consumes, and during an alignment turn there is
-                # not one. Steering by the displaced goal, below, needs no
-                # pixel at all.
-                if tracking and aim is not None and offset:
+                if aim is not None and offset:
                     moved = project_to_pixel(aim, self.robot.camera_pose(), self.cam)
                     if moved["state"] == "TRACK":
                         moved["destination"] = aim

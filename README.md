@@ -358,31 +358,21 @@ Worth stating plainly, because the parts have different maturity.
 deliberately absent from the occupancy grid, so A* routes straight through them
 and the perception layer has something real to find. `tests/selftest.py` scores
 runs by comparing the dog's pose to those crates' footprints — data the robot is
-never shown. Current results: 2008 unexplained LiDAR returns over the corridor
-with **zero false positives**, and all eight scored routes end as intended.
-Across every named destination in the building — twenty routes, all three floors
-— **19 arrive with zero collisions**; `chemistry lab` stops short and says so.
-Nothing in the building drives through anything any more.
-
-The suite ran six routes until recently and reported `ALL PASS` for three
-successive layouts of this scene, one of which drove through a crate. None of
-its six came at a box from the side the box's clearance was *not* on. It now
-runs eight, including both sides of the floor-3 cartons, and scores each route
-against what it is known to do rather than a single arrived/not flag.
+never shown. Current results: 1741 unexplained LiDAR returns over the corridor
+with **zero false positives**, and all six scored routes end as intended — five
+arrive with no collision, and `room 101` stops short, which is the known limit
+below rather than a failure.
 
 The same is true of the people in `sim/scene/pedestrians.py`, who are on no map
 either and who additionally move, so a single scan cannot describe them.
 `sensing/tracking.py` gives a thing a velocity, and the dog stops for anything
 walking whose path meets its own inside the next 2.5 s. Scored the same way:
-six seeds of three people on the floor-2 route, **6 of 6 arrive with no
-collision and no contact** — the closest anybody came was 0.55 m, and four of
-the six stayed beyond 0.6 m. That is the first time this project has measured
-zero: the documented figure was 2 of 6 seeds inside the 0.55 m threshold, and
-the obstacle resize briefly made it 3 of 6. What cleared it was not the scene
-but `free_destination` finishing its sideways crossing *at the obstacle*
-instead of out at the destination, so the dog stops arriving alongside a crate
-still half-way across and squeezing past in the lane people walk down.
-With the yielding disabled and everything else identical, the same
+six seeds of three people on the floor-2 route, **6 of 6 arrive** with no
+collision, 2–6 stops each. Four of the six keep everybody at arm's length
+(closest 0.69 m); **two of the six dip inside the 0.55 m contact threshold**, to
+0.52 m and 0.45 m — a graze past somebody in a corridor the route already hugs
+one wall of, not a collision, and the honest number until the planner can commit
+to a curve. With the yielding disabled and everything else identical, the same
 seeds produce contact throughout — which is what says the stopping is doing the
 work rather than the crowd happening to miss. In an empty building the same logic
 yields **zero** times, which took two shape filters to reach: a crate's visible
@@ -391,68 +381,28 @@ pace, so speed alone cannot tell them apart.
 
 **Known limits, deliberately not yet closed:**
 
-Three things that used to be on this list are not any more, and all three were
-the same class of bug — a test that asked a question other than the one that
-mattered. They are written up in `sim/sensing/perception.py` and
-`sim/run_building.py`; briefly:
-
-- **Obstacle avoidance ran only while the camera could see the goal pixel**
-  (`if state["state"] == "TRACK"`). `ALIGN` is what the projector reports when
-  the dog is turning into a doorway, so for the whole of every turn the dog
-  steered at the raw A\* waypoint with the LiDAR ignored. That was the
-  `chemistry lab` collision: 0.4 s inside the cartons, every tick of it in
-  `ALIGN`. The Mid-360 is a 360° sensor; whether a projection is in frame says
-  nothing about what is in front of the dog.
-- **It drew straight lines through walls.** Within 2 m of a corner checkpoint,
-  `pick_destination` interpolates *past* the corner, so the goal handed to
-  `free_destination` sat metres inside a room. The tightest point on the line to
-  it is then the wall, every sideways offset lands inside the building, and the
-  verdict is "I cannot find a way past this" — measured with the dog standing in
-  a corridor with 0.68 m clear on every side.
-- **The sideways crossing finished in the wrong place.** The offset was measured
-  at the obstacle and applied at the destination, so the dog drove a shallow
-  diagonal and arrived *level with* the crate only part-way across — told to
-  cross 0.70 m, it reached the cartons with 0.24 m against the 0.20 m it
-  insists on. This is what produced the pedestrian grazes: squeezing past a
-  crate at the last moment, in the lane people walk down.
-
-Together they removed every collision in the building, took pedestrian contacts
-from 2-of-6 seeds to **0 of 6**, and fixed the `restroom --seed 5` timeout that
-this list used to carry. No threshold changed: `DESTINATION_CLEAR`, `LINE_NEED`
-and `STATIC_MIN` are what they were, having been measured first and found not
-to be binding.
-
-- **`chemistry lab` stops short of its own door**, 19 routes out of 20 having
-  arrived. The lab is on the north side of a corridor whose cartons sit 1.2 m
-  east of its door, so getting in means passing them on the north and then
-  turning 90° south immediately — a curve, which a goal displaced sideways
-  cannot express. CE-RRT\* (spec L6 s2) is the repair. It used to *collide*
-  here rather than stop.
-- **Zero-shot VAMOS proposes short paths, and whether that is enough depends on
-  the corridor.** Its five candidates spread about ±0.25 m over a 2 m path. When
-  an obstacle demanded 0.65 m of sidestep — the old 1.45 m-deep boxes — its paths
-  were safe over their own length, passed the safety gate, and still led into the
-  crate, and `room 201` did not finish under `--vamos` in four consecutive runs.
-  With realistically sized boxes the sidestep is inside what the model proposes:
-  the same route now arrives in 92 s and the gate rejects 15 of 95 candidates
-  instead of 113 of 149, at a mean safety of 1.00. Nothing about the VLM changed — same
-  server, same prompt, same gate — so read that as a fact about this corridor,
-  not about zero-shot VAMOS. Where a turn does exceed its horizon the map still
-  makes it (`perception.free_destination`), until the LoRA fine-tune of spec
-  L4 s5 exists. **`--vamos` can still perform worse than without it** on a floor
-  the map already describes well: it replaces a globally-correct A* line with a
-  2 m horizon and throttles speed by its own confidence, costing 11 s on that
-  route.
-- **Floor 1 is a lobby, not a corridor, on any cross-floor route.** `main
-  entrance` is 1.6 m from the lift, so the floor-1 leg of the `building.mp4`
-  demo is five metres of turning out of a doorway: VAMOS is called there but
-  nearly every candidate goes through the entrance wall, so its paths are barely
-  on screen. Give it a floor-1 destination (`room 101`, `cafeteria`) to watch it
-  steer down a corridor.
+- The `room 101` route **stops short.** The floor-1 trolley blocks the same wall
+  the route hugs, so getting past needs a full-corridor crossing — which needs a
+  planned curve (CE-RRT\*, spec L6 s2). Stopping is the correct behaviour until
+  that exists; driving through it would not be.
+- **Zero-shot VAMOS cannot make the avoidance turn itself.** Its five candidates
+  spread about ±0.25 m over a 2 m path; getting round a crate in this corridor
+  takes about 0.65 m. So its paths are safe over their own length, pass the
+  safety gate, and still lead into the obstacle. The map makes that turn instead
+  (`perception.free_destination`) until the LoRA fine-tune of spec L4 s5 exists.
+  **This is why `--vamos` can perform worse than without it** on a floor the map
+  already describes well: it replaces a globally-correct A* line with a 2 m
+  horizon, and throttles speed by its own confidence. VAMOS earns its place
+  where the map is wrong or missing, not where it is right. Measured: `room 201`
+  arrives in 84 s map-only and **does not finish at all under `--vamos`** — four
+  consecutive runs end at the floor-2 cart, with no collision and no failed VLM
+  call, the safety gate rejecting 113 of 149 candidates on that floor. It fails
+  safe, which is the gate working as designed; it is not a route that works.
 - `--vamos` is **not reproducible.** The VLM server samples at `temperature=1.0`
   and the client sends neither a temperature nor a seed, so two identical
-  commands give different paths. `--seed` pins the crowd, not the model. The two
-  `room 201` runs above differed by 2 calls and 16 candidates on the same route.
+  commands give different paths. `--seed` pins the crowd, not the model. Three of
+  those four runs gave up after ~69 s of sim time and ~66 calls; the fourth
+  crawled at the cart for 100 s and spent 560 calls before ending the same way.
 - The collision counter is a **point test** on the dog's centre, not its body, so
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.

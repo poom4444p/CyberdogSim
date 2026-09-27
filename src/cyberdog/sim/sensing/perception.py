@@ -264,39 +264,6 @@ def line_clear(a, b, clearance, need=DESTINATION_CLEAR, step=0.1, skip=SKIP):
     return True
 
 
-def in_open_floor(a, b, live, need=STATIC_MIN, step=0.1, skip=SKIP):
-    """`b`, or the last point on the line a -> b still in mapped open floor.
-
-    Everything below reasons about straight lines, and a straight line is only
-    a description of what the dog can do while it stays inside the building.
-    A route that turns into a doorway breaks that: `pick_destination` hands
-    back a point 2-4 m along the route, and once the dog is within 2 m of the
-    turn that point is *past* it -- several metres into the room, behind a
-    wall. The tightest spot on the line to it is then the wall, every sideways
-    offset from that pinch is inside the building, and free_destination reports
-    "no way past" in a corridor with a clear metre down one side. Measured on
-    `chemistry lab`: stopped at (42.4, 9.7) with 0.68 m of room all round it.
-
-    So the geometry is done against the part of the line the dog could
-    actually drive, which at a turn is the approach to it. The rest of the
-    route has not gone anywhere -- the next tick, a metre further on, asks
-    again from there.
-
-    Mapped structure only. A crate is exactly what the caller is here to go
-    round, and clamping to it would hide it.
-    """
-    d = math.dist(a, b)
-    n = max(int(d / step), 1)
-    first = int(skip / step) if d > skip else 0
-    for k in range(first, n + 1):
-        t = k / n
-        p = (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-        if live.static_at(*p) < need:
-            t = max(k - 1, first) / n
-            return (a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t)
-    return b
-
-
 def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
                 max_offset=MAX_OFFSET, step=OFFSET_STEP):
     """The goal to actually aim at: `destination`, or a point beside it with room.
@@ -342,12 +309,7 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     if live.still is None:
         return destination, 0.0
 
-    # Both the far point the detour is judged at and the goal it is placed at
-    # have to be inside the building -- see in_open_floor. Without this, a
-    # destination around a corner turns every question below into a question
-    # about a wall.
-    far = in_open_floor(xy, probe if probe is not None else destination, live)
-    goal = in_open_floor(xy, destination, live)
+    far = probe if probe is not None else destination
 
     def point_ok(p):
         """Room enough to stand, and still inside the building."""
@@ -356,7 +318,7 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     def reachable(p):
         return point_ok(p) and line_clear(xy, p, live.detected_at, LINE_NEED)
 
-    if reachable(far) and reachable(goal):
+    if reachable(far) and reachable(destination):
         return destination, 0.0
 
     dx, dy = far[0] - xy[0], far[1] - xy[1]
@@ -370,7 +332,7 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     # remaining offset reads 0.3 m smaller, and the dog converges on a course
     # that grazes the obstacle instead of one that clears it. Across the route
     # the target is a fixed place in the corridor and the crossing finishes.
-    rdx, rdy = far[0] - goal[0], far[1] - goal[1]
+    rdx, rdy = far[0] - destination[0], far[1] - destination[1]
     rd = math.hypot(rdx, rdy)
     if rd < 1e-6:
         rdx, rdy, rd = dx, dy, d
@@ -413,30 +375,12 @@ def free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     # says whether it can be got to.
     tries = sorted((k * step for k in range(1, int(max_offset / step) + 1)),
                    key=lambda o: abs(o - want))
-
-    # Aim where the crossing has to be *finished*, which is the pinch -- not
-    # where it would be finished if the dog had the whole way to the
-    # destination to do it in. The dog drives at the point it is handed, so a
-    # goal offset out at the destination is a shallow diagonal that is only
-    # part-way across by the time the dog is level with the obstacle.
-    # Measured on `chemistry lab`: told to cross 0.70 m, the dog reached the
-    # cartons with 0.24 m in hand against the 0.20 m it insists on, and one
-    # tick of noise either way was the difference between squeezing past and
-    # reporting no way through. Crossing by the pinch leaves the whole 0.70 m.
     for o in tries:
-        p = (pinch[0] + nx * o * side, pinch[1] + ny * o * side)
-        if reachable(p):
-            return p, o * side
-
-    # Past the pinch, or nothing beside it can be reached from here: fall back
-    # to offsetting the goal itself, which is the same manoeuvre judged over a
-    # longer run-up.
-    for o in tries:
-        p = (goal[0] + nx * o * side, goal[1] + ny * o * side)
+        p = (destination[0] + nx * o * side, destination[1] + ny * o * side)
         if reachable(p):
             return p, o * side
 
     # Nothing on that side fits yet but the destination itself is still reachable:
     # keep going and ask again a metre later, rather than stopping on a
     # geometry that is about to change.
-    return (destination, 0.0) if reachable(goal) else (None, 0.0)
+    return (destination, 0.0) if reachable(destination) else (None, 0.0)

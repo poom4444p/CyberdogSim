@@ -65,7 +65,7 @@ def main():
     parse_command = None
     if args.command:
         # Load torch before numpy/PIL/matplotlib -- libomp crash on macOS otherwise.
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        os.environ["KMP_DUPLICATE_LIB_OK"] = os.environ.get("KMP_DUPLICATE_LIB_OK") or "TRUE"
         from cyberdog.language.infer import load_model, parse_command
         load_model()
 

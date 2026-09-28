@@ -97,6 +97,29 @@ class TestLift:
             assert labels == {"lift"}, (word, labels)
 
 
+class TestStairs:
+    """The model is the stairs' backup: it must learn the phrasings the
+    rule (BuildingRouter.hazard_named) cannot match."""
+
+    @pytest.mark.parametrize("word", ["steps", "flight of stairs", "stairs", "stairwell"])
+    def test_stair_words_map_to_stairs(self, training, word):
+        labels = {s["location"] for s in training if _has_phrase(s["text"], word)}
+        assert labels == {"stairs"}, (word, labels)
+
+    def test_stairs_is_a_real_map_name(self):
+        # A "stairs" answer must reach the router's refusal, which looks the
+        # name up in locations.json.
+        from cyberdog.planning.building_router import BuildingRouter
+        router = BuildingRouter()
+        assert router.hazard_place("stairs") is not None
+
+    def test_rule_still_ignores_steps(self):
+        # "steps" is the model's job only; as a word match it would refuse
+        # "take a few steps back".
+        from cyberdog.planning.building_router import BuildingRouter
+        assert BuildingRouter().hazard_named("take a few steps back") is None
+
+
 class TestSplitterPhrasing:
     """New sentence openings must reach the model as written, not as
     "Go to Where's the library?"."""

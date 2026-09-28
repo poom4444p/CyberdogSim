@@ -68,9 +68,14 @@ room numbers don't drown out everything else:
   **Placeholder names** — swap in the university's real department names
   in `lab_locations` / `LAB_ALIASES` once confirmed.
 - **Other** — `hallway`, `library`, `office`, `main entrance`, `cafeteria`,
-  `restroom`, `server room`, `lift` (also "elevator"). The stairs are not
-  here on purpose: `BuildingRouter.hazard_named` catches them with rules
-  before the model runs.
+  `restroom`, `server room`, `lift` (also "elevator"), `stairs`.
+  The stairs are a **backup**, not the safety rule:
+  `BuildingRouter.hazard_named` still checks the raw text for the map's four
+  stair names before the model runs. The model catches what that word match
+  cannot ("the stair", "the steps"), and a `stairs` answer is safe either way
+  -- the router walks to the corridor outside, refuses out loud and points at
+  the lift. "steps" is deliberately *not* in the rule: "take a few steps
+  back" is not a request for the stairs.
 
 A place the building does not have ("the gym", "the parking lot") comes back
 as `target_location: "unknown"` (`UNKNOWN_LOCATION`), and `run_building --nlu`

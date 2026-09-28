@@ -25,9 +25,16 @@ OTHER_ALIASES = {
     "restroom": ["restroom", "bathroom", "toilet", "washroom", "loo", "gents",
                  "men's room", "ladies' room", "wc"],
     "server room": ["server room", "server closet", "IT room"],
-    # The only way between floors (the stairs are refused by rules before the
-    # model runs -- see BuildingRouter.hazard_named -- so they are not here).
+    # The only way between floors.
     "lift": ["lift", "elevator"],
+    # A backup, not the safety rule. BuildingRouter.hazard_named checks the
+    # raw text for the map's four stair names before the model runs; this
+    # catches what that word match cannot ("the stair", "the steps"). An
+    # answer of "stairs" is safe either way: the router walks to the corridor
+    # outside, refuses out loud, and points at the lift. "steps" stays out of
+    # the rule on purpose -- "take a few steps back" is not a request.
+    "stairs": ["stairs", "staircase", "stairway", "stairwell", "steps",
+               "flight of stairs"],
 }
 
 LAB_ALIASES = {
@@ -70,6 +77,7 @@ HELD_OUT_ALIASES = {
     "server room": ["data room"],
     "electrical engineering lab": ["electronics lab"],
     "mechanical engineering lab": ["mech lab"],
+    "stairs": ["stair"],
 }
 HELD_OUT_NAV_TEMPLATES = [
     "Which way to the {location}?",
@@ -256,8 +264,8 @@ def generate_synthetic_dataset(num_samples=1000, held_out=False):
 
 if __name__ == "__main__":
     print("Generating synthetic English dataset...")
-    # 4000 samples so the ~44 distinct locations (30 numbered rooms + 6 labs
-    # + 8 other) each get reasonable coverage, not just a handful of examples.
+    # 4000 samples so the ~45 distinct locations (30 numbered rooms + 6 labs
+    # + 9 other) each get reasonable coverage, not just a handful of examples.
     data = generate_synthetic_dataset(4000)
     
     output_file = str(paths.RAW_DATASET)

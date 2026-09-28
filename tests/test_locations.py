@@ -36,7 +36,7 @@ def main():
 
     if args.with_model:
         # Load torch before the map stack (numpy/PIL) -- libomp crash on macOS otherwise.
-        os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+        os.environ["KMP_DUPLICATE_LIB_OK"] = os.environ.get("KMP_DUPLICATE_LIB_OK") or "TRUE"
         from cyberdog.language.infer import parse_command
     from cyberdog.language.generate_dataset import UNKNOWN_LOCATION, generate_synthetic_dataset
     from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute
@@ -65,6 +65,10 @@ def main():
             continue
         for e in entries:
             grid = router.grids[e["floor"]]
+            # A no-go place (the stairwells) is stamped into the grid as an
+            # obstacle on purpose, so its point is blocked by design.
+            if router.hazard_place(name) is not None:
+                continue
             if not grid.is_free(*grid.world_to_grid(*e["xy"])):
                 failures.append(f"{name} (floor {e['floor']}): point is not free space")
         # Places inside a no-go zone (the stairwells) are meant to refuse;

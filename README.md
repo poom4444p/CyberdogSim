@@ -19,154 +19,232 @@ deterministic.
 
 ---
 
-## Setup (macOS, Apple Silicon)
+## Start here: from a fresh clone to a walking dog
 
-Two conda environments, on purpose — the same split the real robot has, where
-the VLM is a service rather than an import. The twin runs without torch; only
-the VLM server needs it. **The twin is the first environment and it is enough to
-see the whole thing work.** The second is optional, and only for `--vamos`.
+The repo holds code and the building map only. It does **not** include the
+trained model, the training data, or any built scene, because those are
+generated (they are gitignored):
 
-`--nlu` is the exception to the split: the Gemma command parser is small enough
-to run in-process, so it wants torch inside the twin rather than a server of its
-own. It is an optional extra on the same environment — step 1 has it.
+| Folder | What goes there | Made by |
+|---|---|---|
+| `datasets/` | training data for the command parser | step 2 |
+| `models/lora/` | the trained command parser | step 2 |
+| `output/` | the built MuJoCo scene and recorded videos | step 3 |
 
-### 1. The twin — `cyberdog_sim`
+So on a new machine, run the steps below in order. Every command runs from the
+repo root. The steps are written for macOS on Apple Silicon; Linux notes are in
+[`language/README.md`](src/cyberdog/language/README.md#linux--nvidia-gpu-users).
+
+| Step | What | Needed? |
+|---|---|---|
+| [1](#1-install) | Install the environment and the robot model | yes |
+| [2](#2-train-the-command-parser) | Train the command parser | only for plain-English commands (`--nlu`) |
+| [3](#3-build-the-scene) | Build the 3D building | yes |
+| [4](#4-walk-the-dog) | Walk the dog | yes |
+| [5](#5-walk-the-dog-from-plain-english) | Walk the dog from plain English | needs step 2 |
+| [6](#6-optional-the-vlm-server) | Start the VLM server | optional, only for `--vamos` |
+| [7](#7-check-everything-works) | Run the tests | recommended |
+
+### 1. Install
 
 ```bash
 conda create -n cyberdog_sim python=3.11 -y
 conda activate cyberdog_sim
 
+pip install -e ".[language,dev]"   # the twin + the command parser + pytest
+
 git clone https://github.com/google-deepmind/mujoco_menagerie ~/mujoco_menagerie
-pip install -e .
 ```
 
-`mujoco_menagerie` supplies the Go2 robot model and deliberately lives outside
-the repo — it is a large third-party asset, not this project's code.
+- `pip install -e .` alone is enough for the twin. `[language]` adds torch,
+  transformers, peft and trl, which step 2 needs; `[dev]` adds pytest.
+- `mujoco_menagerie` supplies the Go2 robot model. It lives outside the repo
+  because it is a large third-party asset.
 
-**If you already have it somewhere else**, don't move it. Point at it instead,
-and make the setting permanent for this environment only:
+**If you already have the menagerie somewhere else**, point at it instead of
+moving it:
 
 ```bash
-conda env config vars set MENAGERIE_PATH=~/Learn/mujoco_menagerie -n cyberdog_sim
-conda activate cyberdog_sim     # REQUIRED: see below
+conda env config vars set MENAGERIE_PATH=~/path/to/mujoco_menagerie -n cyberdog_sim
+conda activate cyberdog_sim     # REQUIRED: the variable only reaches a shell on activation
+echo $MENAGERIE_PATH            # must print the path; if empty, activate again
 ```
 
-`paths.py` reads `MENAGERIE_PATH` and falls back to `~/mujoco_menagerie`.
+### 2. Train the command parser
 
-> **That second line is not decoration.** `conda env config vars set` writes the
-> variable into the *environment's config*; it reaches a shell only when that
-> environment is activated. Set it and carry on in the shell you are already
-> in, and the variable is configured and still absent — `echo $MENAGERIE_PATH`
-> prints nothing, and every command you run uses the fallback. Re-activate even
-> if the prompt already says `(cyberdog_sim)`.
-
-`echo $MENAGERIE_PATH` is the check. If it prints nothing, the next section is
-about to bite.
-
-**For `--nlu` only**, add the command parser's dependencies. Without them the
-twin still runs; you just have to name a place the map knows, because matching
-is done against `locations.json` by name rather than by model:
+The command parser turns `"I need to pee"` into `restroom`. It is a LoRA
+fine-tune of `unsloth/gemma-2b-it` on synthetic data the repo generates itself,
+so there is nothing to download except the base model (not gated, fetched
+automatically the first time).
 
 ```bash
-pip install -e ".[language]"
+python -m cyberdog.language.generate_dataset   # -> datasets/raw_dataset_english.json
+python -m cyberdog.language.prepare_dataset    # -> datasets/gemma_training_data.jsonl
+python -m cyberdog.language.train              # -> models/lora/
 ```
 
-That pulls torch, transformers and peft into `cyberdog_sim`. The LoRA adapter is
-already in `models/lora`, and the base model (`unsloth/gemma-2b-it`, not gated)
-is fetched once on first use. No `KMP_DUPLICATE_LIB_OK` is needed here —
-`language/infer.py` sets it for you.
+Training picks the fastest device by itself (CUDA, then Apple `mps`, then CPU)
+and prints which one it chose. It keeps the checkpoint with the lowest
+`eval_loss`, so the saved model is the best one, not just the last.
 
-### 2. Build the scene, then walk the dog
+Then check the result:
+
+```bash
+python scripts/language/try_parser.py                  # type a command, see what it parses to
+python -m cyberdog.language.evaluate --num-samples 100 # accuracy on fresh generated commands
+python -m cyberdog.language.evaluate --num-samples 100 --held-out   # wording it never saw
+```
+
+`--held-out` is the number that matters: it only uses phrasings that were kept
+out of training, so it shows whether the model generalises rather than
+memorises.
+
+Skip this step if you only want to name places exactly as the map does
+(`restroom`, `cafeteria`, `room 201`). Everything else works without it. How
+the parser works, what it recognises and how to add places or slang:
+[`language/README.md`](src/cyberdog/language/README.md).
+
+### 3. Build the scene
 
 ```bash
 python -m cyberdog.sim.scene.build_scene --building
+```
+
+This writes the three-storey building to `output/scene_cache/building.xml`. It
+bakes in the location of the Go2 model, so if you move `mujoco_menagerie`
+later, run it again.
+
+### 4. Walk the dog
+
+```bash
 python -m cyberdog.sim.run_building "room 201"
 ```
 
-That second command is the whole stack in one line: routing, the lift, voice
-announcements, LiDAR, obstacle avoidance, and an MP4 written to
-`output/scene_cache/building.mp4`.
+That is the whole stack in one line: routing, the lift, voice announcements,
+LiDAR, obstacle avoidance, and a video written to
+`output/scene_cache/building.mp4`. Add `--no-video` for a faster run.
 
-> **The scene caches the path, so order matters.** `build_scene` writes the
-> Go2's location into `building.xml` as an absolute path. It must therefore run
-> *after* `MENAGERIE_PATH` is in the shell, and if you move the menagerie later
-> you must rebuild the scene — changing the variable alone will not touch the
-> cached XML.
->
-> This used to fail in the most confusing way available. The builder wrote
-> whatever path it had and reported success; the complaint arrived later, from
-> MuJoCo, out of whichever run first loaded the file, naming a path you never
-> typed on a line you never wrote. Rebuilding the scene is the obvious
-> response and silently re-bakes the same wrong path, so the identical error
-> comes back and the fix appears not to work.
->
-> `build_scene` now checks before it writes, so the failure lands where the
-> mistake is and says what to do about it:
->
-> ```
-> cannot find the Go2 model at /Users/you/mujoco_menagerie/unitree_go2/go2.xml
->   looked there because of the default, because MENAGERIE_PATH is not set in this shell
->   fix: conda env config vars set MENAGERIE_PATH=/path/to/mujoco_menagerie -n cyberdog_sim
->        then `conda activate cyberdog_sim` again -- the variable only reaches a shell on activation
-> ```
+At the end it prints a score:
 
-### 3. The VLM server — `vamos_mac` (optional)
+```
+ARRIVED on floor 1 at (33.1, 4.5) after 32s of sim time
+obstacles: up to 20 returns the map could not explain, 0.0s crawling, ...
+collisions: none -- the dog never entered an obstacle's footprint
+people: 1 times it stopped to let someone past, 1.1s waiting in total
+contact: none -- closest it came to anybody was 3.31 m
+```
 
-Only needed for `--vamos`. Skip it on a first run; the dog navigates and avoids
-obstacles without it (see [What is and isn't verified](#what-is-and-isnt-verified)).
+Read `collisions` and `contact` first: they are scored against ground truth the
+robot is never shown. A run that arrives but reports `CONTACT` is not a pass.
+
+### 5. Walk the dog from plain English
+
+With the model from step 2, add `--nlu`:
+
+```bash
+python -m cyberdog.sim.run_building "I need to pee" --nlu
+python -m cyberdog.sim.run_building "I need to pee on the 2nd floor" --nlu
+python -m cyberdog.sim.run_building "I need to pee, then take me to the cafeteria" --nlu
+python -m cyberdog.sim.run_building "take me upstairs" --nlu
+```
+
+And with people walking the corridors, which are on no map:
+
+```bash
+python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1
+```
+
+### 6. (Optional) The VLM server
+
+Only needed for `--vamos`, which puts the VAMOS vision-language model in the
+steering loop. The dog navigates and avoids obstacles without it. It runs in a
+second environment, the same split the real robot has, where the VLM is a
+service rather than an import.
 
 ```bash
 conda env create -f vendor/VAMOS/environment_mac.yml
 conda activate vamos_mac
-pip install fastapi uvicorn pydantic python-multipart
-```
-
-That `pip install` line is not redundant: `vlm_server.py` imports FastAPI,
-Uvicorn and Pydantic, and the upstream `environment_mac.yml` does not list them.
-
-On macOS, conda's OpenMP runtime and the one bundled inside pip's torch collide
-and abort the process on `import torch`. Set the documented escape hatch for
-this environment:
-
-```bash
+pip install fastapi uvicorn pydantic python-multipart   # not in the upstream yml
 conda env config vars set KMP_DUPLICATE_LIB_OK=TRUE -n vamos_mac
-conda activate vamos_mac
-```
+conda activate vamos_mac                                 # again, to pick that up
 
-Start the server **from its own directory** — the script calls
-`python vlm_server.py` by relative name and has no way to find itself:
-
-```bash
-cd vendor/VAMOS/server
+cd vendor/VAMOS/server       # must start from here
 bash start_server.sh
 ```
 
-First run downloads the `mateoguaman/vamos` weights (several GB), so expect a
-long pause before the port opens. Check it from another terminal:
+The first start downloads the `mateoguaman/vamos` weights (several GB), so
+expect a long pause. From another terminal, check it is up, then run with it:
 
 ```bash
 curl -s http://127.0.0.1:8009/health && echo " — server up"
-```
 
-Then, back in `cyberdog_sim`:
-
-```bash
+conda activate cyberdog_sim
 python -m cyberdog.sim.run_building "room 201" --vamos
 ```
 
-### 4. Check everything works, layer by layer
+`--vamos` can score *worse* than without it on a floor the map already solves;
+see [What is and isn't verified](#what-is-and-isnt-verified) before reading a
+bad run as a bug.
+
+### 7. Check everything works
 
 ```bash
-python tests/selftest.py          # every stage, ~2 min
-python tests/selftest.py lidar    # or just one
-pytest                            # the mapping layer's unit tests
+python tests/selftest.py          # every stage of the stack, ~2 min
+python tests/selftest.py lidar    # or just one stage
+pytest                            # unit tests
 ```
 
 ---
 
-## Running it
+## Troubleshooting
 
-All commands run in `cyberdog_sim`, from the repo root.
+Each traceback's **last** line is the diagnosis — the `File "..."` lines above
+it are only the call chain.
+
+**`No module named 'cyberdog'`**
+The package isn't installed in the active environment. `conda activate
+cyberdog_sim`, then `pip install -e .`. Import names start at `cyberdog`, never
+`src`.
+
+**`No module named 'torch'` (with `--nlu` or during training)**
+The command parser's extra is missing: `pip install -e ".[language]"`.
+
+**`--nlu` fails with an error naming `models/lora` or `adapter_config.json`**
+The trained model is not in the repo. Train it (step 2).
+
+**`XML Error: Error opening file '.../mujoco_menagerie/unitree_go2/go2.xml'`**
+The built scene points at a Go2 model that is not there. Either the menagerie
+moved, or `MENAGERIE_PATH` is set in the conda config but not in *this shell*.
+`echo $MENAGERIE_PATH`; if it prints nothing, `conda activate cyberdog_sim`,
+then rebuild the scene (step 3). The path in the error is the one that was
+*looked for* (the default `~/mujoco_menagerie` when the variable is missing),
+not where your copy is. `build_scene` checks this now and refuses with an
+explanation instead of writing a broken scene.
+
+**`no destination found in '...'`**
+You named a place the map does not carry — `"pee"` rather than `"restroom"`.
+Without `--nlu` the destination must match a name in
+`data/building/locations.json`. Name the place, or add `--nlu`.
+
+**`can't open file '.../vlm_server.py'`**
+`start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`
+first.
+
+**`OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized`**
+Two OpenMP runtimes in one process (conda's and the one inside pip's torch).
+Set `KMP_DUPLICATE_LIB_OK=TRUE`, as in step 6. The repo's own scripts set it
+for you. The cost is thread contention, not wrong results; the clean fix is
+torch from conda-forge so one runtime serves everything.
+
+**`OMP: Warning #20: KMP_DUPLICATE_LIB_OK="": Wrong value, boolean expected.`**
+The variable is set but empty in this shell. `export KMP_DUPLICATE_LIB_OK=TRUE`,
+or re-activate the conda environment.
+
+---
+
+## Command reference
+
+All commands run in `cyberdog_sim`, from the repo root. Flags combine freely.
 
 | Command | What it does |
 |---|---|
@@ -183,110 +261,10 @@ All commands run in `cyberdog_sim`, from the repo root.
 Three of these are also on your `PATH` after `pip install -e .`:
 `cyberdog-building`, `cyberdog-demo`, `cyberdog-record`.
 
-### Saying it in plain English — `--nlu`
-
-Without `--nlu` the destination is matched against `locations.json` by name, so
-it has to *be* one of the names: `restroom`, `cafeteria`, `room 201`. Ask for
-`"pee"` and you get `no destination found` — the rule matcher has never heard of
-it, and is not supposed to have. Slang is the fine-tune's job, and `--nlu` is
-what puts it in the loop.
-
-| Command | What the parser does with it |
-|---|---|
-| `python -m cyberdog.sim.run_building "I need to pee" --nlu` | slang → `restroom` |
-| `python -m cyberdog.sim.run_building "I need to pee on the 2nd floor" --nlu` | slang → `restroom`, floor rules → floor 2 |
-| `python -m cyberdog.sim.run_building "I need to pee, then take me to the cafeteria" --nlu` | splitter → two stops, `restroom` then `cafeteria` |
-| `python -m cyberdog.sim.run_building "I'm starving" --nlu` | slang → `cafeteria` |
-
-Only the destination needs the model. Splitting multi-stop commands and reading
-floor phrases are rules either way — that is where they live in the pipeline —
-so `"on the 2nd floor"` is handled the same with `--nlu` or without it.
-
-### All three at once
-
-The flags compose, and this is the one worth watching: a spoken command, a
-corridor with people in it, and the VLM steering.
-
-```bash
-# slang + a crowd — no server needed
-python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1
-
-# ...and with VAMOS in the steering loop (start the server first, step 3)
-python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1 --vamos
-
-# the same, rendered 4× faster, for a quick look
-python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1 --speed 4
-```
-
-Each prints its own scoring at the end — whether it arrived, how near it came to
-a crate, how often it stopped for somebody, and how close it got to them:
-
-```
-ARRIVED on floor 1 at (33.1, 4.5) after 32s of sim time
-obstacles: up to 20 returns the map could not explain, 0.0s crawling, ...
-collisions: none -- the dog never entered an obstacle's footprint
-people: 1 times it stopped to let someone past, 1.1s waiting in total
-contact: none -- closest it came to anybody was 3.31 m
-```
-
-Read `collisions` and `contact` first: they are scored against ground truth the
-robot is never shown. A run that arrives but reports `CONTACT` is not a pass.
-
-**`--vamos` can score worse than without it** on a floor the map already solves
-— see [What is and isn't verified](#what-is-and-isnt-verified) before reading a
-bad run as a bug.
-
----
-
-## Troubleshooting
-
-Six failures are common on a fresh Mac. Each one's **last** traceback line is
-the diagnosis — the `File "..."` lines above it are only the call chain.
-
-**`No module named 'cyberdog'`**
-The package isn't installed in the active environment. Run `pip install -e .`,
-and check you are in `cyberdog_sim` (`conda activate cyberdog_sim`). Note the
-import path never starts with `src` — `pyproject.toml` declares
-`where = ["src"]`, which makes `src/` the search root, so names begin at
-`cyberdog`.
-
-**`XML Error: Error opening file '.../mujoco_menagerie/unitree_go2/go2.xml'`**
-A stale absolute path baked into `building.xml`, which is a cached build
-artifact, not code. Two causes, and the second is the one that wastes an
-afternoon:
-
-- The menagerie moved. Rebuild the scene.
-- `MENAGERIE_PATH` is set in the environment's config but not in *this shell*,
-  because the shell has not been activated since. Then rebuilding does not help
-  — it writes the same wrong path again, and the same error returns unchanged.
-  `echo $MENAGERIE_PATH`; if it is empty, `conda activate cyberdog_sim` and
-  rebuild. Building now refuses outright in this case rather than writing a
-  broken scene, so a fresh checkout gets the explanation instead of the
-  traceback.
-
-Note the path in the message is the one that was *looked for*, which is the
-fallback `~/mujoco_menagerie` when the variable is missing — it is not where
-your copy is, and chasing it is the wrong trail.
-
-**`no destination found in '...' (try --nlu, or name a place from locations.json)`**
-You asked for somewhere by a name the map does not carry — `"pee"` rather than
-`"restroom"`. Without `--nlu` the destination is a literal match against
-`locations.json`, which has no slang in it by design. Either name the place, or
-add `--nlu` to put the fine-tune in the loop. If `--nlu` then fails on
-`No module named 'torch'`, the command parser's extra is not installed: see
-step 1, `pip install -e ".[language]"`.
-
-**`can't open file '.../vlm_server.py'`**
-`start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`
-first, or use `(cd vendor/VAMOS/server && bash start_server.sh)` to leave your
-shell where it is.
-
-**`OMP: Error #15: Initializing libomp.dylib, but found libomp.dylib already initialized`**
-Two OpenMP runtimes in one process: conda's and the copy bundled in pip's torch.
-Set `KMP_DUPLICATE_LIB_OK=TRUE` as in step 3. OpenMP calls this unsupported, and
-it is — the realistic cost is thread contention, not wrong arithmetic, which is
-an acceptable trade for a PoC inference server. The clean fix is installing
-torch from conda-forge so one runtime serves everything.
+Without `--nlu`, the destination must be a name from
+`data/building/locations.json`. Splitting multi-stop commands and reading floor
+phrases ("on the 2nd floor") are rules, so they work with or without `--nlu`;
+only slang like `"I'm starving"` needs the model.
 
 ---
 
@@ -342,11 +320,6 @@ models/   datasets/   output/      generated or trained — all gitignored
 Nothing the repo tracks is ever written into the source tree: built scenes and
 recorded video go to `output/`, weights to `models/`, generated datasets to
 `datasets/`.
-
-A third environment exists for the command parser —
-`pip install -e ".[language]"` adds torch, transformers and peft, and is what
-`language/`, `main_planner.py` and the `--nlu` flag need. It can share
-`cyberdog_sim` or stand alone.
 
 ---
 

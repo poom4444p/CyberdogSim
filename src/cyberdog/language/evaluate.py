@@ -14,7 +14,7 @@ Running on Linux:
     KMP_DUPLICATE_LIB_OK below is a macOS-only fix and does nothing on Linux.
 """
 import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ["KMP_DUPLICATE_LIB_OK"] = os.environ.get("KMP_DUPLICATE_LIB_OK") or "TRUE"
 
 import argparse
 import json

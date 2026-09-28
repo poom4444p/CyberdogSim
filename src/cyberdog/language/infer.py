@@ -13,7 +13,7 @@
 # Older NVIDIA GPUs without bfloat16 support (pre-Ampere, e.g. GTX 10xx / T4):
 # change torch_dtype=torch.bfloat16 to torch.float16 in load_model().
 import os
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ["KMP_DUPLICATE_LIB_OK"] = os.environ.get("KMP_DUPLICATE_LIB_OK") or "TRUE"
 
 import json
 

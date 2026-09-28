@@ -97,7 +97,7 @@ def main():
 
     # 5. ตั้งค่าการเทรน
     training_args = TrainingArguments(
-        output_dir="./mac_lora_outputs",
+        output_dir=str(paths.LORA_OUTPUTS),
         per_device_train_batch_size=1,
         per_device_eval_batch_size=4,
         gradient_accumulation_steps=4,

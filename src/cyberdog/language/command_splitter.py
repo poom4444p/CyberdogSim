@@ -28,9 +28,10 @@ Running on Linux:
 """
 import re
 
-from cyberdog.language.generate_dataset import LAB_ALIASES, OTHER_ALIASES
+from cyberdog.language.generate_dataset import HELD_OUT_ALIASES, LAB_ALIASES, OTHER_ALIASES
 
-_ALIASES = sorted({a for d in (OTHER_ALIASES, LAB_ALIASES) for names in d.values() for a in names},
+_ALIASES = sorted({a for d in (OTHER_ALIASES, LAB_ALIASES, HELD_OUT_ALIASES)
+                   for names in d.values() for a in names},
                   key=len, reverse=True)
 # Something that names a destination: "the library", "to the caf", "room 310", "310"
 _PLACE = (r"(?:to\s+)?(?:the\s+)?(?:" + "|".join(re.escape(a) for a in _ALIASES)
@@ -38,7 +39,8 @@ _PLACE = (r"(?:to\s+)?(?:the\s+)?(?:" + "|".join(re.escape(a) for a in _ALIASES)
 
 # Movement verbs: "and <verb>" starts a new destination. ("check" is left out
 # on purpose -- "and check if ..." is a question about the same destination.)
-_VERBS = r"(?:go|head|navigate|proceed|move|walk|take\s+me|bring\s+me|get\s+me|visit|stop\s+by)"
+_VERBS = (r"(?:go|head|navigate|proceed|move|walk|take\s+me|bring\s+me|get\s+me|visit|stop\s+by"
+          r"|lead\s+me|guide\s+me|show\s+me)")
 
 _SPLIT = re.compile(
     r"\s*(?:[,;]\s*)?\b(?:and\s+then|then|and\s+after\s+that|after\s+that|afterwards|"
@@ -54,7 +56,8 @@ _LEADING_FIRST = re.compile(r"^\s*(?:first(?:ly)?|to\s+start)\s*,?\s*", re.IGNOR
 # A segment that already reads like a command (verb, or one of the model's
 # slang/need phrases) is passed through as-is; otherwise "Go to" is added.
 _COMMAND_START = re.compile(
-    rf"^\s*(?:please\s+)?(?:{_VERBS}|check\b|i\b|i'm\b|let's\b|we\b|nature's\b|can\s+you|could\s+you)",
+    rf"^\s*(?:please\s+)?(?:{_VERBS}|check\b|i\b|i'm\b|it's\b|let's\b|we\b|nature's\b|can\s+you|could\s+you"
+    r"|where\b|where's\b|which\s+way|how\s+do\s+i)",
     re.IGNORECASE,
 )
 

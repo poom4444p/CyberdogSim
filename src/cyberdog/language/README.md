@@ -68,7 +68,16 @@ room numbers don't drown out everything else:
   **Placeholder names** — swap in the university's real department names
   in `lab_locations` / `LAB_ALIASES` once confirmed.
 - **Other** — `hallway`, `library`, `office`, `main entrance`, `cafeteria`,
-  `restroom`, `server room`.
+  `restroom`, `server room`, `lift` (also "elevator"). The stairs are not
+  here on purpose: `BuildingRouter.hazard_named` catches them with rules
+  before the model runs.
+
+A place the building does not have ("the gym", "the parking lot") comes back
+as `target_location: "unknown"` (`UNKNOWN_LOCATION`), and `run_building --nlu`
+and `main_planner.py` say so and stay put. Before this label existed the
+model mapped any unfamiliar word onto the nearest name it knew, and the dog
+walked confidently to the wrong room. `UNKNOWN_PLACES` lists the training
+examples; none may contain a real alias (`tests/test_dataset.py` checks).
 
 The alias tables `OTHER_ALIASES` / `LAB_ALIASES` live at the top of
 `generate_dataset.py` (module level) because `command_splitter.py` imports
@@ -102,7 +111,13 @@ python -m cyberdog.language.prepare_dataset         # -> datasets/gemma_training
 python -m cyberdog.language.train         # -> models/lora/ (overwrites it)
 python scripts/language/try_parser.py              # interactive: type a command, see the raw output
 python -m cyberdog.language.evaluate --num-samples 100   # batch accuracy report
+python -m cyberdog.language.evaluate --num-samples 100 --held-out   # unseen wording only
 ```
+
+`--held-out` scores only the `HELD_OUT_*` aliases, sentence patterns and
+unknown places in `generate_dataset.py`, which never appear in training
+(`tests/test_dataset.py` fails if one leaks in). It is the number that says
+whether the model generalises rather than memorises; the plain run cannot.
 
 ### Linux / NVIDIA GPU users
 
@@ -213,6 +228,11 @@ python -m cyberdog.language.floor_parser       # 22 cases
   train loss keeps dropping, that's overfitting).
 
 ## Latest results
+
+> **Stale until the next retrain.** The vocabulary has since grown (`lift`,
+> more aliases and phrasings, the `unknown` label, the held-out split); the
+> adapter below predates all of it. Regenerate, retrain, then re-run both
+> evals and replace this table.
 
 Batch eval (`python -m cyberdog.language.evaluate --num-samples 100`) against the current
 `models/lora/`, on freshly generated samples covering all 43 locations

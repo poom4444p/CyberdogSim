@@ -140,6 +140,7 @@ def resolve_stops(router, text, use_nlu=False):
     """
     from cyberdog.language.command_splitter import split_destinations
     from cyberdog.language.floor_parser import extract_floor
+    from cyberdog.language.generate_dataset import UNKNOWN_LOCATION
 
     parse = None
     if use_nlu:
@@ -165,6 +166,9 @@ def resolve_stops(router, text, use_nlu=False):
 
         if parse is not None:
             name = (parse(command).get("target_location") or "").strip().lower()
+            if name == UNKNOWN_LOCATION:
+                raise SystemExit(f"I don't know where that is: {text_i!r} names "
+                                 f"no place in this building. Staying here.")
         else:
             # Longest name first, so the most specific match wins when one
             # location's name contains another's.

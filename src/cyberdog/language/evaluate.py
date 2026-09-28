@@ -28,9 +28,9 @@ def _norm(text):
     return (text or "").strip().lower()
 
 
-def evaluate(num_samples: int, seed: int):
+def evaluate(num_samples: int, seed: int, held_out: bool = False):
     random.seed(seed)
-    samples = generate_synthetic_dataset(num_samples)
+    samples = generate_synthetic_dataset(num_samples, held_out=held_out)
 
     results = []
     counts = {"valid_json": 0, "location": 0, "task": 0, "query": 0, "exact": 0}
@@ -77,9 +77,12 @@ def main():
     parser.add_argument("--seed", type=int, default=123,
                          help="Different from any seed used to build the training data")
     parser.add_argument("--save-failures", type=str, default="eval_failures.json")
+    parser.add_argument("--held-out", action="store_true",
+                        help="Score only aliases, phrasings and unknown places the "
+                             "training set never contained (HELD_OUT_* in generate_dataset.py)")
     args = parser.parse_args()
 
-    samples, results, counts = evaluate(args.num_samples, args.seed)
+    samples, results, counts = evaluate(args.num_samples, args.seed, args.held_out)
     n = len(samples)
 
     print(f"\nSamples evaluated: {n}")
@@ -100,11 +103,17 @@ def main():
     elif not failures:
         print("\nNo failures.")
 
-    print(
-        "\nNote: these samples come from the same templates used to build the training "
-        "set (generate_dataset.py), so this measures correctness on in-distribution "
-        "phrasing, not generalization to novel wording (e.g. question-form commands)."
-    )
+    if args.held_out:
+        print(
+            "\nNote: held-out samples -- every one has an alias, phrasing or unknown place "
+            "the training set never contained, so this measures generalization."
+        )
+    else:
+        print(
+            "\nNote: these samples come from the same templates used to build the training "
+            "set (generate_dataset.py), so this measures in-distribution correctness. "
+            "Run with --held-out to measure generalization to unseen wording."
+        )
 
 
 if __name__ == "__main__":

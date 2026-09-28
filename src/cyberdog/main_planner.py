@@ -51,6 +51,7 @@ def main():
     print(f"\n[1] User Command: \"{args.command}\"")
     from cyberdog.language.command_splitter import split_destinations
     from cyberdog.language.floor_parser import extract_floor
+    from cyberdog.language.generate_dataset import UNKNOWN_LOCATION
     stops = split_destinations(args.command)
     if len(stops) > 1:
         print(f"    Split into {len(stops)} stops:")
@@ -111,6 +112,10 @@ def main():
             print("    Parsed by Input Treating Layer: "
                   + json.dumps(nlu_output, ensure_ascii=False))
             target_name = nlu_output.get("target_location") or ""
+        if target_name.strip().lower() == UNKNOWN_LOCATION:
+            print(f"    I don't know where that is -- \"{stop_text}\" names no place "
+                  f"in this building. Staying here.")
+            return
         if requested_floor is not None and requested_floor not in router.floors:
             print(f"    Error: there is no floor {requested_floor} (you are on floor {here_floor}; "
                   f"the building has floors {router.floors[0]}-{router.floors[-1]}). Stopping.")

@@ -38,18 +38,25 @@ def main():
         # Load torch before the map stack (numpy/PIL) -- libomp crash on macOS otherwise.
         os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
         from cyberdog.language.infer import parse_command
-    from cyberdog.language.generate_dataset import generate_synthetic_dataset
+    from cyberdog.language.generate_dataset import UNKNOWN_LOCATION, generate_synthetic_dataset
     from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute
 
     random.seed(args.seed)
     samples = generate_synthetic_dataset(4000)
-    by_location = {}
+    by_location, unknown = {}, None
     for s in samples:
+        # "unknown" is the model's answer for a place the building lacks, so
+        # it must NOT be on the map; it is checked on the model side only.
+        if s["location"] == UNKNOWN_LOCATION:
+            unknown = unknown or s
+            continue
         by_location.setdefault(s["location"], s)
 
     router = BuildingRouter()
     start = router.resolve("main entrance", 1, (0, 0))
     failures, refused = [], []
+    if UNKNOWN_LOCATION in router.locations:
+        failures.append(f"{UNKNOWN_LOCATION}: is a name in locations.json; it must not be")
 
     for name in sorted(by_location):
         entries = router.locations.get(name)
@@ -88,6 +95,12 @@ def main():
             if not ok or not routed:
                 failures.append(f"model: {text!r} -> {parsed!r} (expected {name!r}, routable={routed})")
         print(f"Model check: {correct}/{len(by_location)} commands parsed to the right location")
+        if unknown is not None:
+            parsed = (parse_command(unknown["text"]).get("target_location") or "").strip().lower()
+            print(f"Unknown check: {unknown['text']!r} -> {parsed!r}")
+            if parsed != UNKNOWN_LOCATION:
+                failures.append(f"model: {unknown['text']!r} -> {parsed!r} "
+                                f"(expected {UNKNOWN_LOCATION!r}: not a place in this building)")
 
     for f in failures:
         print("  FAIL", f)

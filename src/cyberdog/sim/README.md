@@ -649,6 +649,7 @@ were measured first, and none of them was binding in any of the three failures.
   the nearest name it knows. That is why hazard names are checked against the
   map with rules *before* the model runs (`BuildingRouter.hazard_named`), and
   why "take me to the stairs" (or staircase / stairway / stairwell) walks to
-  the corridor outside them and says it goes no closer, on either path. Add
-  `elevator`/`lift` to `cyberdog/language/generate_dataset.py` on the next
-  regeneration.
+  the corridor outside them and says it goes no closer, on either path.
+  `lift`/`elevator` and an `unknown` label are now in
+  `cyberdog/language/generate_dataset.py`; the shipped adapter does not know
+  them until the next regenerate-and-retrain.

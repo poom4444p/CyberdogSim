@@ -65,6 +65,10 @@ def main():
             continue
         for e in entries:
             grid = router.grids[e["floor"]]
+            # A no-go place (the stairwells) is stamped into the grid as an
+            # obstacle on purpose, so its point is blocked by design.
+            if router.hazard_place(name) is not None:
+                continue
             if not grid.is_free(*grid.world_to_grid(*e["xy"])):
                 failures.append(f"{name} (floor {e['floor']}): point is not free space")
         # Places inside a no-go zone (the stairwells) are meant to refuse;

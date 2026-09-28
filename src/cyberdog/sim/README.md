@@ -650,6 +650,7 @@ were measured first, and none of them was binding in any of the three failures.
   map with rules *before* the model runs (`BuildingRouter.hazard_named`), and
   why "take me to the stairs" (or staircase / stairway / stairwell) walks to
   the corridor outside them and says it goes no closer, on either path.
-  `lift`/`elevator` and an `unknown` label are now in
+  `lift`/`elevator`, `stairs` (as a backup to that rule, for "the steps"
+  and other words it cannot match) and an `unknown` label are now in
   `cyberdog/language/generate_dataset.py`; the shipped adapter does not know
   them until the next regenerate-and-retrain.

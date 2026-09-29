@@ -135,7 +135,7 @@ velocity command sent; equal fingerprints mean identical commands.
 | ID | KPI | Threshold | Status |
 |---|---|---|---|
 | C0 | Map-only run repeats itself (same fingerprint twice) — without this C1 proves nothing | bit-for-bit | ✅ checked |
-| C1 | Commanded `(vx, vy, wz)` identical to a map-only run of the same route and seed | bit-for-bit, **100% of ticks** | ✅ checked (room 101, fake server) |
+| C1 | Commanded `(vx, vy, wz)` identical to a map-only run of the same route and seed | bit-for-bit, **100% of ticks** | ✅ checked (room 101, fake and real server) |
 | C2 | Shadow log written per call: candidates, factors, which one *would* have been chosen | present for every call | ✅ checked |
 | C3 | Shadow disagreements: calls where the dream would have steered > 15° off the map route (`steer`), or had nothing pass the gate (`none`) | report only | ✅ printed |
 
@@ -148,7 +148,25 @@ a wall is thrown out as off-map, one hugging a wall by the gate, the clear one
 is chosen, and with nothing surviving or the server down it returns no path.
 
 - [x] Shadow trace verified: the dream never changed a command (fake server)
-- [ ] Same, with the real VAMOS server
+- [x] Same, with the real VAMOS server
+
+Real-server run, 2026-09-29, `room 101`, commit `7f422db`, VAMOS on `mps`,
+answers arriving asynchronously at their measured latency:
+
+| | Map-only | Shadow (real VAMOS) |
+|---|---|---|
+| Commands | 1270 ticks, sha256 `71dec15b85f45b7d` | 1270 ticks, sha256 `71dec15b85f45b7d` |
+| Outcome | ARRIVED, 66 s, no collisions | ARRIVED, 66 s, no collisions |
+| VAMOS answers | — | 29 (30 asked, 1 dropped at the leg's end), 1.6 s old on arrival |
+| Candidates rejected | — | 99, of which 16 by the gate (the rest off-map or behind the dog) |
+| C3 `steer` | — | 2 of 29 calls |
+| C3 `none` | — | 17 of 29 calls |
+
+Log: `output/shadow_real_room101.jsonl`. One run of a sampling model at
+`temperature=1.0`, so C3 is indicative, not a measurement: an earlier
+real-server shadow run of the same route had 0 `steer` and 64 `none` in 90
+calls. On a route the map already solves, real VAMOS mostly offers nothing
+that passes, and rarely anything different.
 
 ---
 

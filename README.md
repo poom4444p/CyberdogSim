@@ -188,11 +188,33 @@ bad run as a bug.
 
 ### 7. Check everything works
 
+Run these from the repo root, in `cyberdog_sim` -- **not** `vamos_mac`. If you
+just started the VLM server (step 6), that terminal is still in `vamos_mac`;
+open a new one or switch back first.
+
 ```bash
+conda activate cyberdog_sim
 python tests/selftest.py          # every stage of the stack, ~2 min
 python tests/selftest.py lidar    # or just one stage
 pytest                            # unit tests
 ```
+
+Or, without changing the active environment:
+
+```bash
+conda run -n cyberdog_sim --no-capture-output python tests/selftest.py
+```
+
+Stages run bottom-up and can be named one at a time: `scene`, `lidar`,
+`perception`, `destination`, `crowd`, `latency`, `dreaming`, `vamos`, `run`.
+Each check prints `[PASS]` or `[FAIL]` with the number it judged on, and the
+run ends with `ALL PASS` or the list of failures. The first failure is usually
+the real one -- a bad scene fails every stage above it.
+
+- The `vamos` stage uses a stand-in server, so it needs neither the VLM server
+  nor the `vamos_mac` environment.
+- `pytest` skips `selftest.py` on purpose (see `pyproject.toml`); run it
+  directly as above.
 
 ---
 
@@ -204,7 +226,10 @@ it are only the call chain.
 **`No module named 'cyberdog'`**
 The package isn't installed in the active environment. `conda activate
 cyberdog_sim`, then `pip install -e .`. Import names start at `cyberdog`, never
-`src`.
+`src`. Most often the wrong environment is active -- `vamos_mac` after starting
+the VLM server. `python -c "import sys; print(sys.executable)"` should print a
+path inside `.../envs/cyberdog_sim/` (`which python` can show a pyenv shim even
+when the right interpreter runs).
 
 **`No module named 'torch'` (with `--nlu` or during training)**
 The command parser's extra is missing: `pip install -e ".[language]"`.
@@ -434,6 +459,13 @@ to be binding.
   and the client sends neither a temperature nor a seed, so two identical
   commands give different paths. `--seed` pins the crowd, not the model. The two
   `room 201` runs above differed by 2 calls and 16 candidates on the same route.
+- **A VAMOS call blocks the control loop**, for about 1.8 s against the real
+  server. Until recently the twin paused the world during the call, so `--vamos` runs
+  never paid for it. Now the dog keeps walking on its last command for the
+  call's measured time (`--vlm-latency S` to fix it, `0` for the old behaviour)
+  with no LiDAR, stop or yield, and the run prints `VLM WAIT:` with the time
+  and distance covered blind. The `--vamos` results above predate this. The fix
+  is to take VAMOS off the control thread, not to tune this number.
 - The collision counter is a **point test** on the dog's centre, not its body, so
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.

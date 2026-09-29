@@ -10,7 +10,7 @@ command and a few seconds.
     python tests/selftest.py lidar      # just one
 
 Stages run bottom-up: scene, lidar, perception, destination, crowd, latency,
-dreaming, run. The first failure is usually the real one -- a bad scene fails
+dreaming, vamos, run. The first failure is usually the real one -- a bad scene fails
 everything above it.
 """
 import math
@@ -573,6 +573,237 @@ def dreaming():
           f"{ms:.1f} ms against a 50 ms tick -- plan() blocks the loop")
 
 
+class _FakeVamos:
+    """A stand-in VAMOS server: five lines fanned at the goal pixel.
+
+    The real one needs its own conda env, a GPU-sized model and samples at
+    temperature 1.0, so it is neither always there nor ever repeatable. This
+    answers the same two endpoints with the same JSON, reading the goal out of
+    the prompt the client sends, and draws what zero-shot VAMOS roughly
+    draws: short paths from the bottom of the image towards the goal, spread
+    sideways. Enough to exercise everything around the model; nothing about
+    how good the model is.
+    """
+
+    def __init__(self, cam):
+        import json
+        import re
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        w, h = cam["width"], cam["height"]
+
+        def fan(gu, gv):
+            u0, v0 = w / 2, h * 0.95
+            return [[[u0 + (gu + du - u0) * k / 9, v0 + (gv - v0) * k / 9]
+                     for k in range(10)] for du in (-60, -30, 0, 30, 60)]
+
+        class Handler(BaseHTTPRequestHandler):
+            def reply(self, body):
+                data = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                self.reply({"status": "ok", "model_loaded": True})
+
+            def do_POST(self):
+                body = self.rfile.read(int(self.headers["Content-Length"]))
+                m = re.search(rb"x=<loc(\d{4})>, y=<loc(\d{4})>", body)
+                if not m:
+                    self.reply({"success": False, "trajectories": []})
+                    return
+                gu = int(m.group(1)) / 1024 * w
+                gv = int(m.group(2)) / 1024 * h
+                self.reply({"success": True, "trajectories": fan(gu, gv)})
+
+            def log_message(self, *a):
+                pass
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self.url = f"http://127.0.0.1:{self.server.server_address[1]}"
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.server.shutdown()
+
+
+def vamos():
+    """VAMOS in the loop without the model: the client's disposing, then shadow mode.
+
+    Two halves, both against a stand-in server (see _FakeVamos), so this runs
+    with nothing else started:
+
+    - plan(): a candidate through a wall is thrown out by the cheap geometric
+      test, one scraping a wall by the dream's gate, a clear one is chosen; with
+      nothing surviving, or the server failing, it returns no path and the map
+      route carries on. And every candidate leaves a verdict behind.
+    - Gate C of docs/dreaming_safety_kpis.md: the same route driven map-only
+      and with --shadow must command the dog identically on every tick, and the
+      shadow log must have one line per VAMOS call. Map-only is driven twice
+      first -- if it does not repeat itself, "identical" means nothing.
+    """
+    import json
+    import re
+    import subprocess
+    import tempfile
+    import requests
+    from cyberdog.planning.checkpoint_projector import load_camera_config, project_to_pixel
+    from cyberdog.sim.clearance import clearance_test
+    from cyberdog.sim.sensing.dreaming import ROBOT_R, Dream
+    from cyberdog.sim.vamos_client import GATE, VamosPolicy
+
+    cam = load_camera_config()
+    clear = clearance_test(1)
+    pose = (24.0, 9.5, 0.0)
+
+    def pixels(ground):
+        """Ground points to the pixel path VAMOS would have returned.
+
+        Fractional pixels, as the server sends: project_to_pixel's are whole,
+        and at 5 m one pixel of v is 5% of the range -- enough to move a line
+        a metre to the side 5 cm into the wall it was drawn beside.
+        """
+        x0, y0, yaw = pose
+        out = []
+        for g in ground:
+            assert project_to_pixel(g, pose, cam)["state"] == "TRACK", f"{g} is out of view"
+            dx, dy = g[0] - x0, g[1] - y0
+            fwd = math.cos(yaw) * dx + math.sin(yaw) * dy
+            left = -math.sin(yaw) * dx + math.cos(yaw) * dy
+            out.append([cam["fx"] * -left / fwd + cam["cx"],
+                        cam["fy"] * cam["camera_height"] / fwd + cam["cy"]])
+        return out
+
+    def line(a, b, n=6):
+        return [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+                for k in range(n + 1)]
+
+    # Down the corridor; into the south wall; and hugging it, 0.2 m off in
+    # clearance units -- free space the whole way (free starts at ROBOT_R =
+    # 0.16), so only the dream can object. Past the x = 27 door, whose jamb
+    # changes the numbers; it scores 0.17-0.39 across seeds.
+    corridor = line((25.0, 9.5), (27.5, 9.5))
+    through = line((25.0, 9.3), (27.0, 7.2))
+    scrape = line((27.6, 8.52), (30.4, 8.52))
+    policy = VamosPolicy(cam, lambda x, y: clear(x, y) >= ROBOT_R,
+                         dream=Dream(clear, 1.0), url="http://127.0.0.1:1")
+
+    def plan(ground_paths):
+        policy._request = lambda image, prompt: [pixels(p) for p in ground_paths]
+        return policy.plan(None, "", pose, (30.0, 9.5), pose=pose)
+
+    chosen, cands, safety = plan([through, scrape, corridor])
+    # Verdicts come back grouped (off-map first), so look them up by path.
+    by_end = {round(p[-1][1], 1): v for p, _, v in policy.verdicts}
+    verdict = {"through": by_end.get(round(through[-1][1], 1)),
+               "scrape": by_end.get(round(scrape[-1][1], 1)),
+               "corridor": by_end.get(round(corridor[-1][1], 1))}
+    check("through a wall: off-map", verdict["through"] == "off-map",
+          f"verdict {verdict['through']}")
+    scrape_f = next((f for p, f, v in policy.verdicts if v == "gate"), None)
+    check("scraping a wall: rejected by the gate", verdict["scrape"] == "gate",
+          f"verdict {verdict['scrape']}" + (f", factor {scrape_f:.2f} < {GATE}"
+                                            if scrape_f is not None else ""))
+    check("clear path chosen", chosen is not None and abs(chosen[-1][1] - 9.5) < 0.2
+          and safety >= GATE,
+          f"safety {safety:.2f}, ends at y = {chosen[-1][1]:.2f}" if chosen
+          else "nothing chosen")
+    check("a verdict for every candidate", len(policy.verdicts) == len(cands) == 3,
+          f"{len(policy.verdicts)} verdicts for {len(cands)} candidates")
+
+    chosen, _, safety = plan([through, scrape])
+    check("nothing survives: no path, map carries on",
+          chosen is None and safety == 0.0,
+          f"chosen {chosen}, safety {safety}")
+
+    def down(image, prompt):
+        raise requests.ConnectionError("server gone")
+    policy._request = down
+    before = policy.stats["failures"]
+    chosen, cands, safety = policy.plan(None, "", pose, (30.0, 9.5), pose=pose)
+    check("server failure: no path, no crash",
+          chosen is None and cands == [] and policy.stats["failures"] == before + 1,
+          f"returned {chosen}, failures {policy.stats['failures'] - before}")
+
+    # -- Gate C: shadow mode ----------------------------------------------
+    # room 101: the floor-1 route past the trolley, so the dream has
+    # something to disagree about, and short enough to drive three times.
+    fake = _FakeVamos(cam)
+    try:
+        log = os.path.join(tempfile.mkdtemp(), "shadow.jsonl")
+        base = [sys.executable, "-m", "cyberdog.sim.run_building", "room 101",
+                "--auto-confirm", "--no-video"]
+        outs = [subprocess.run(base + extra, capture_output=True, text=True)
+                for extra in ([], [], ["--shadow", "--shadow-log", log,
+                                       "--vamos-url", fake.url])]
+        # Steering, with the call charged at the real server's ~1.8 s rather
+        # than the fake's few milliseconds. See Run.wait_for_vlm.
+        steered = subprocess.run(base + ["--vamos", "--vamos-url", fake.url,
+                                         "--vlm-latency", "1.8"],
+                                 capture_output=True, text=True)
+    finally:
+        fake.close()
+
+    def grab(out, prefix):
+        return next((l for l in out.stdout.splitlines() if l.startswith(prefix)), None)
+
+    crashed = [k for k, o in enumerate(outs) if o.returncode]
+    check("runs complete", not crashed,
+          "map-only x2 and shadow" if not crashed else
+          f"run {crashed[0]} exited {outs[crashed[0]].returncode}: "
+          f"{outs[crashed[0]].stderr.strip().splitlines()[-1:]}")
+    if crashed:
+        return
+    a, b, s = (grab(o, "commands:") for o in outs)
+    check("map-only repeats itself", a is not None and a == b,
+          f"{a} / {b}")
+    check("shadow never changes a command", a == s,
+          f"map-only {a.split()[-1]}, shadow {s.split()[-1] if s else None}"
+          if a == s else f"map-only: {a} | shadow: {s}")
+    same = grab(outs[0], "ARRIVED") == grab(outs[2], "ARRIVED")
+    check("shadow arrives where map-only does", same,
+          grab(outs[2], "ARRIVED") or grab(outs[2], "FAILED"))
+
+    with open(log) as f:
+        rows = [json.loads(l) for l in f]
+    stats = grab(outs[2], "VAMOS floor 1:") or ""
+    calls = int(stats.split()[3]) if stats else -1
+    # Candidates can be empty: a call whose paths all projected above the
+    # horizon offered nothing, and that is still a call to log.
+    keys = {"tick", "pose", "map_target", "candidates", "would_choose", "disagree"}
+    complete = all(keys <= r.keys() for r in rows)
+    check("shadow log: a line per VAMOS call", rows and len(rows) == calls and complete,
+          f"{len(rows)} lines, {calls} calls" + ("" if complete else ", some incomplete"))
+    steer = sum(r["disagree"] == "steer" for r in rows)
+    none = sum(r["disagree"] == "none" for r in rows)
+    gated = sum(c["verdict"] == "gate" for r in rows for c in r["candidates"])
+    print(f"  [INFO] shadow: {steer} of {len(rows)} calls would have steered away "
+          f"from the map route, {none} had nothing pass the gate; {gated} "
+          f"candidates rejected by the gate -- the fake server's, not VAMOS's")
+
+    # -- a blocking call costs time ------------------------------------------
+    # The twin used to pause the world while plan() waited, so a --vamos run
+    # never paid for the VLM. 1.8 s is 36 ticks; every call must be charged
+    # them, and the dog must have moved during some of them.
+    wait = grab(steered, "VLM WAIT:")
+    calls = grab(steered, "VAMOS floor 1:")
+    n = int(calls.split()[3]) if calls else -1
+    m = re.search(r"held the loop ([\d.]+)s.* walked ([\d.]+) m", wait or "")
+    blind_s, metres = (float(m.group(1)), float(m.group(2))) if m else (-1.0, -1.0)
+    check("VLM wait charged to the dog", m is not None and n > 0
+          and abs(blind_s - 1.8 * n) < 0.05 * n and metres > 0,
+          wait[len("VLM WAIT: "):] if wait else
+          f"no VLM WAIT line (exit {steered.returncode}: "
+          f"{steered.stderr.strip().splitlines()[-1:]})")
+    print(f"  [INFO] --vamos at 1.8 s per call, fake server: "
+          f"{grab(steered, 'ARRIVED') or grab(steered, 'FAILED')}; "
+          f"{grab(steered, 'COLLISIONS:') or grab(steered, 'collisions:')}")
+
+
 def run():
     """The whole stack, headless, on the routes that exercise each floor.
 
@@ -630,7 +861,7 @@ def run():
 
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
           "destination": destination, "crowd": crowd, "latency": latency,
-          "dreaming": dreaming, "run": run}
+          "dreaming": dreaming, "vamos": vamos, "run": run}
 
 
 if __name__ == "__main__":

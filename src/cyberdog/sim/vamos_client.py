@@ -66,6 +66,10 @@ class VamosPolicy:
         self.timeout = timeout
         self.last = None
         self.safety = 1.0               # factor of the path currently being followed
+        # Last call's candidates, each with what became of it: (path, factor,
+        # verdict), verdict "off-map", "gate" or "pass". Factor is None where
+        # the dream never ran. Shadow mode logs this; nothing steers by it.
+        self.verdicts = []
         self.stats = {"calls": 0, "failures": 0, "rejected": 0,
                       "rejected_by_gate": 0, "safety_sum": 0.0, "chosen": 0}
 
@@ -120,6 +124,7 @@ class VamosPolicy:
         """
         pose = pose if pose is not None else cam_pose
         self.stats["calls"] += 1
+        self.verdicts = []
         try:
             pixel_paths = self._request(image, prompt)
         except (requests.RequestException, ValueError):
@@ -139,18 +144,22 @@ class VamosPolicy:
         # Cheap test first: no sense imagining a path already through a wall.
         walkable = [p for p in paths if self.traversable(p)]
         self.stats["rejected"] += len(paths) - len(walkable)
+        self.verdicts = [(p, None, "off-map") for p in paths if p not in walkable]
 
         scored = []
         for p in walkable:
             if self.dream is None:
                 scored.append((1.0, p, {}))
+                self.verdicts.append((p, None, "pass"))
                 continue
             factor, why = self.dream.factor(p, pose)
             if factor < GATE:
                 self.stats["rejected_by_gate"] += 1
                 self.stats["rejected"] += 1
+                self.verdicts.append((p, factor, "gate"))
                 continue
             scored.append((factor, p, why))
+            self.verdicts.append((p, factor, "pass"))
 
         if not scored:
             self.safety = 0.0

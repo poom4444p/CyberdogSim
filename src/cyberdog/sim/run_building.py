@@ -18,15 +18,20 @@ button -- a human does that, and presses continue.
     python -m cyberdog.sim.run_building "restroom on floor 3" --no-video   # fast, headless
     python -m cyberdog.sim.run_building "server room" --nlu                # through the Gemma layer
     python -m cyberdog.sim.run_building "server room" --vamos              # VLM in the steering loop
+    python -m cyberdog.sim.run_building "server room" --shadow             # VLM + dream, map still drives
     python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 
 Without --nlu the destination is matched against locations.json by name, which
 keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
+import hashlib
+import json
 import math
 import os
+import struct
 import sys
+import time
 
 import numpy as np
 
@@ -59,6 +64,9 @@ ANNOUNCE_R = 2.5          # metres out that a checkpoint's line is spoken
 STEP_V = 0.4              # m/s in and out of the car -- slower than corridor pace
 REPLAN_EVERY = 20         # ticks between VLM calls when --vamos is on
 REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacle
+# Shadow mode: a proposal whose heading is further than this off the map's
+# steering target is logged as the dream wanting to go somewhere else.
+SHADOW_DISAGREE = math.radians(15)
 # Flatter and closer than the single-floor demo: every storey now has a slab
 # over it, and the old -28 degree chase camera sat inside the ceiling, which
 # rendered as solid grey.
@@ -294,7 +302,8 @@ class Run:
     """One drive through the building, with the video panels attached."""
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
-                 auto_confirm=False, speed=1, crowd=0, seed=0):
+                 auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
+                 vamos_url=None, vlm_latency=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -313,6 +322,24 @@ class Run:
         self.tick = 0
         self.writer = self.chase = self.outside = None
         self.policies, self.vamos = {}, vamos
+        # Shadow mode (Gate C in docs/dreaming_safety_kpis.md): VAMOS is asked
+        # and the dream scores its answer on the same schedule as --vamos, but
+        # the map route alone drives. `shadow` is the log file, one JSON line
+        # per call; None is off. --vamos and --shadow are exclusive.
+        if shadow:
+            os.makedirs(os.path.dirname(os.path.abspath(shadow)), exist_ok=True)
+        self.shadow = open(shadow, "w") if shadow else None
+        self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
+        self.vamos_url = vamos_url
+        # How long a steering VAMOS call holds the loop, in seconds; None is
+        # the call's own wall-clock time. See wait_for_vlm.
+        self.vlm_latency = vlm_latency
+        self.blind = {"waits": 0, "ticks": 0, "longest": 0, "metres": 0.0}
+        # Every velocity command sent, fingerprinted. Two runs of the same
+        # route and seed with equal fingerprints commanded the dog identically,
+        # tick for tick -- which is how a shadow run proves it touched nothing.
+        self.commands = hashlib.sha256()
+        self.n_commands = 0
         self.lidar = Lidar(self.robot.model, self.robot.data)
         self.live = {}            # floor -> LiveClearance, one per storey
         self.seen = np.empty((0, 2))   # this tick's unexplained returns
@@ -497,14 +524,83 @@ class Run:
         if floor not in self.policies:
             from cyberdog.sim.sensing.dreaming import Dream
             from cyberdog.sim.vamos_client import VamosPolicy
+            from cyberdog.sim.vamos_client import DEFAULT_URL
             live = self.clearance(floor)
+            url = self.vamos_url or DEFAULT_URL
             p = VamosPolicy(self.cam, lambda x, y: live(x, y) >= ROBOT_R,
-                            dream=Dream(live, self.robot.MAX_V))
+                            dream=Dream(live, self.robot.MAX_V), url=url)
             if not p.available():
-                raise SystemExit("VAMOS server is not answering on 127.0.0.1:8009 -- "
+                raise SystemExit(f"VAMOS server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first")
             self.policies[floor] = p
         return self.policies[floor]
+
+    def log_shadow(self, floor, n, pose, target, proposed, safety):
+        """One shadow-mode call: what VAMOS offered, what the dream made of
+        each candidate, and what it would have steered at against what the map
+        actually did.
+
+        "steer" is a proposal pointing more than SHADOW_DISAGREE off the map's
+        target; "none" is nothing passing the gate, which under --vamos means
+        crawling and asking again. Both are what Gate D is about to measure.
+        """
+        x, y, yaw = pose
+        verdicts = self.policies[floor].verdicts
+        if proposed is None:
+            kind, angle = "none", None
+        else:
+            px, py = path_target(proposed, (x, y))
+            angle = abs(wrap(math.atan2(py - y, px - x)
+                             - math.atan2(target[1] - y, target[0] - x)))
+            kind = "steer" if angle > SHADOW_DISAGREE else "agree"
+        self.shadow_n["calls"] += 1
+        if kind != "agree":
+            self.shadow_n[kind] += 1
+        rnd = lambda pts: [[round(a, 3), round(b, 3)] for a, b in pts]
+        self.shadow.write(json.dumps({
+            "floor": floor, "tick": n, "t": round(self.robot.sim_time, 2),
+            "pose": [round(x, 3), round(y, 3), round(yaw, 4)],
+            "map_target": [round(target[0], 3), round(target[1], 3)],
+            "candidates": [{"path": rnd(p), "factor": None if f is None else round(f, 4),
+                            "verdict": v} for p, f, v in verdicts],
+            "would_choose": next((k for k, (p, _, _) in enumerate(verdicts)
+                                  if p is proposed), None),
+            "safety": round(safety, 4),
+            "disagree": kind,
+            "angle_deg": None if angle is None else round(math.degrees(angle), 1),
+        }) + "\n")
+
+    def wait_for_vlm(self, floor, seconds):
+        """The world carries on while plan() is waiting for the server.
+
+        plan() is called inside the control loop and blocks it, and the twin
+        used to pause physics for the duration -- so a 1.8 s VLM call cost the
+        dog nothing, and every run under --vamos looked as if the model
+        answered instantly. On the robot nothing pauses. The dog keeps
+        executing the last velocity command it was sent (cmd_vel holds until
+        replaced), the people keep walking, and nothing in the loop -- LiDAR,
+        the proximity stop, yielding -- runs until the answer arrives. That is
+        what this replays, tick for tick. Ground truth keeps scoring, so a
+        collision made blind shows up as a collision.
+
+        Under --vamos only. --shadow is a measurement of what VAMOS would say,
+        and on a robot it could only run off the control thread; charging it
+        here would also break Gate C's identical-commands check.
+        """
+        ticks = int(round(seconds / self.robot.CONTROL_DT))
+        x0, y0, _ = self.robot.get_pose()
+        for _ in range(ticks):
+            self.step_crowd()
+            self.robot.step()
+            x, y, _ = self.robot.get_pose()
+            self.blind["metres"] += math.dist((x0, y0), (x, y))
+            x0, y0 = x, y
+            self.score_collision(floor, x, y)
+            self.score_people(floor, x, y)
+            self.frame()
+        self.blind["waits"] += 1
+        self.blind["ticks"] += ticks
+        self.blind["longest"] = max(self.blind["longest"], ticks)
 
     def say(self, line):
         """One line of the Preemptive Voice Engine. Printed here, spoken later."""
@@ -671,7 +767,10 @@ class Run:
             return True, 0
         i = 1 if len(waypoints) > 1 else 0
         said = set()
-        chosen, candidates, safety = None, [], 1.0
+        # `proposed` is what VAMOS last offered and the gate let through;
+        # `chosen` is what steers -- the same thing under --vamos, never
+        # anything under --shadow.
+        proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
         stalled = no_goal = 0
         lean = 0.0                # the side of a detour once it is committed
@@ -785,13 +884,22 @@ class Run:
             # Ask again sooner while nothing has cleared: the view changes as
             # the dog closes in, and a candidate that was not there at 4 m
             # often is at 2 m.
-            due = n % (REPLAN_BLOCKED if chosen is None else REPLAN_EVERY) == 0
-            if self.vamos and state["state"] == "TRACK" and due:
-                chosen, candidates, safety = self.policy(floor).plan(
+            due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
+            asked = (self.vamos or self.shadow) and state["state"] == "TRACK" and due
+            if asked:
+                t0 = time.perf_counter()
+                proposed, candidates, safety = self.policy(floor).plan(
                     self.robot.get_image(), vamos_prompt(state),
                     self.robot.camera_pose(), state["destination"], pose=(x, y, yaw))
+                if self.vamos:
+                    # The rest of this tick then runs on the pose read before
+                    # the call, as the same code on the robot would.
+                    self.wait_for_vlm(floor, time.perf_counter() - t0
+                                      if self.vlm_latency is None else self.vlm_latency)
+            if self.vamos:
+                chosen = proposed
 
-            self.frame(state, chosen, candidates, safety if chosen else None)
+            self.frame(state, proposed, candidates, safety if proposed else None)
 
             if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r:
                 for line in (announcements[-1] if announcements else []):
@@ -822,6 +930,8 @@ class Run:
                 tx, ty = aim
             else:
                 tx, ty = waypoints[i]
+            if asked and self.shadow:
+                self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
 
             # Reported, not acted on: free_destination already decided whether
             # there is a way through, and this is how much room it left.
@@ -929,9 +1039,10 @@ class Run:
                         self.say("They are not moving. Going slowly.")
                     speed *= CRAWL
 
-            self.robot.set_velocity(
-                0.0 if abs(err) > TURN_ONLY else speed * math.cos(err),
-                0.0, K_W * err)
+            cmd = (0.0 if abs(err) > TURN_ONLY else speed * math.cos(err), 0.0, K_W * err)
+            self.commands.update(struct.pack("3d", *cmd))
+            self.n_commands += 1
+            self.robot.set_velocity(*cmd)
             self.robot.step()
 
             if verbose and n % 60 == 0:
@@ -1064,6 +1175,17 @@ def main():
     ap.add_argument("--no-video", action="store_true", help="drive without rendering")
     ap.add_argument("--nlu", action="store_true", help="parse through the Gemma layer")
     ap.add_argument("--vamos", action="store_true", help="VLM in the steering loop")
+    ap.add_argument("--shadow", action="store_true",
+                    help="ask VAMOS and score its paths with the dream, but let the map "
+                         "route drive; every call is logged to --shadow-log")
+    ap.add_argument("--shadow-log", default=str(paths.OUTPUT_DIR / "shadow_log.jsonl"),
+                    metavar="PATH", help="where --shadow writes one JSON line per VAMOS call")
+    ap.add_argument("--vamos-url", default=None, metavar="URL",
+                    help="VAMOS server (default http://127.0.0.1:8009)")
+    ap.add_argument("--vlm-latency", type=float, default=None, metavar="S",
+                    help="with --vamos: seconds each VAMOS call holds the control loop "
+                         "while the dog keeps walking on its last command (default: "
+                         "the call's measured time; 0 is the old paused-world twin)")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
     ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
@@ -1074,6 +1196,8 @@ def main():
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
+    if args.vamos and args.shadow:
+        ap.error("--vamos steers with VAMOS and --shadow never does; pick one")
 
     scene = str(paths.BUILDING_SCENE)
     if not os.path.exists(scene):
@@ -1100,7 +1224,9 @@ def main():
         if len(first) > 1 else 0.0
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
-              crowd=args.pedestrians, seed=args.seed)
+              crowd=args.pedestrians, seed=args.seed,
+              shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
+              vlm_latency=args.vlm_latency)
 
     ok, halted = True, None
     try:
@@ -1142,6 +1268,19 @@ def main():
               f"{st['rejected']} candidates rejected "
               f"({st['rejected_by_gate']} of them by the safety gate), "
               f"mean safety of the paths it followed {mean:.2f}")
+    if args.vamos:
+        bl, dt = run.blind, run.robot.CONTROL_DT
+        print(f"VLM WAIT: {bl['waits']} calls held the loop {bl['ticks'] * dt:.1f}s in "
+              f"total (longest {bl['longest'] * dt:.1f}s); the dog walked "
+              f"{bl['metres']:.1f} m on a stale command with no LiDAR, stop or yield")
+    if run.shadow is not None:
+        run.shadow.close()
+        sn = run.shadow_n
+        print(f"SHADOW: {sn['calls']} VAMOS calls logged, {sn['steer']} would have "
+              f"steered more than {math.degrees(SHADOW_DISAGREE):.0f} deg off the map "
+              f"route, {sn['none']} had nothing pass the gate -> {args.shadow_log}")
+    # Tick for tick what the dog was told to do; compare across runs.
+    print(f"commands: {run.n_commands} ticks, sha256 {run.commands.hexdigest()[:16]}")
     o, h = run.obs, run.hits
     print(f"obstacles: up to {o['seen']} returns the map could not explain, "
           f"{o['crawl'] / FPS:.1f}s crawling, {o['stopped'] / FPS:.1f}s stopped, "

@@ -126,15 +126,29 @@ the start; ties are down to 1 of 50.
 The dream runs on every VAMOS call, but the dog is driven by the map route
 alone. Proves the scorer can be switched on without changing what the dog does.
 
+Where: `python tests/selftest.py vamos`, against a stand-in VAMOS server
+(five lines fanned at the goal pixel), so it needs nothing else running. By
+hand: `run_building <route> --shadow [--shadow-log PATH] [--vamos-url URL]`.
+Every run prints `commands: N ticks, sha256 …`, a fingerprint of every
+velocity command sent; equal fingerprints mean identical commands.
+
 | ID | KPI | Threshold | Status |
 |---|---|---|---|
-| C1 | Commanded `(vx, vy, wz)` identical to a map-only run of the same route and seed | bit-for-bit, **100% of ticks** | ❌ needs `run_building --shadow` |
-| C2 | Shadow log written per call: candidates, factors, which one *would* have been chosen | present for every call | ❌ |
-| C3 | Shadow disagreements: calls where the dream would have steered away from the map route | report only | ❌ |
+| C0 | Map-only run repeats itself (same fingerprint twice) — without this C1 proves nothing | bit-for-bit | ✅ checked |
+| C1 | Commanded `(vx, vy, wz)` identical to a map-only run of the same route and seed | bit-for-bit, **100% of ticks** | ✅ checked (room 101, fake server) |
+| C2 | Shadow log written per call: candidates, factors, which one *would* have been chosen | present for every call | ✅ checked |
+| C3 | Shadow disagreements: calls where the dream would have steered > 15° off the map route (`steer`), or had nothing pass the gate (`none`) | report only | ✅ printed |
 
-C3 is the interesting number: it is what Gate D is about to test.
+C3 is the interesting number: it is what Gate D is about to test. With the
+fake server it says nothing about VAMOS — run `--shadow` against the real
+server for that.
 
-- [ ] Shadow trace verified: the dream never changed a command
+The same stage also checks the client's disposing in `plan()`: a line through
+a wall is thrown out as off-map, one hugging a wall by the gate, the clear one
+is chosen, and with nothing surviving or the server down it returns no path.
+
+- [x] Shadow trace verified: the dream never changed a command (fake server)
+- [ ] Same, with the real VAMOS server
 
 ---
 

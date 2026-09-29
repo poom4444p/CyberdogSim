@@ -55,6 +55,7 @@ from cyberdog.sim.sensing.perception import (LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
                                            closest_approach, conflict)
+from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
 START_FLOOR = 1
@@ -331,10 +332,13 @@ class Run:
         self.shadow = open(shadow, "w") if shadow else None
         self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
         self.vamos_url = vamos_url
-        # How long a steering VAMOS call holds the loop, in seconds; None is
-        # the call's own wall-clock time. See wait_for_vlm.
+        # How long a VAMOS answer takes to arrive, in seconds of sim time; None
+        # is the call's own wall-clock time. See ask_vamos.
         self.vlm_latency = vlm_latency
-        self.blind = {"waits": 0, "ticks": 0, "longest": 0, "metres": 0.0}
+        # The request in flight, if any: (tick it lands on, its paths, tick it
+        # was asked on, body xy then). One at a time, as a GPU serves them.
+        self.pending = None
+        self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0}
         # Every velocity command sent, fingerprinted. Two runs of the same
         # route and seed with equal fingerprints commanded the dog identically,
         # tick for tick -- which is how a shadow run proves it touched nothing.
@@ -570,37 +574,45 @@ class Run:
             "angle_deg": None if angle is None else round(math.degrees(angle), 1),
         }) + "\n")
 
-    def wait_for_vlm(self, floor, seconds):
-        """The world carries on while plan() is waiting for the server.
+    def ask_vamos(self, floor, n, state):
+        """Send VAMOS this tick's frame; the answer lands some ticks later.
 
-        plan() is called inside the control loop and blocks it, and the twin
-        used to pause physics for the duration -- so a 1.8 s VLM call cost the
-        dog nothing, and every run under --vamos looked as if the model
-        answered instantly. On the robot nothing pauses. The dog keeps
-        executing the last velocity command it was sent (cmd_vel holds until
-        replaced), the people keep walking, and nothing in the loop -- LiDAR,
-        the proximity stop, yielding -- runs until the answer arrives. That is
-        what this replays, tick for tick. Ground truth keeps scoring, so a
-        collision made blind shows up as a collision.
+        The VLM takes about 1.8 s and the control loop has 50 ms, so the loop
+        cannot wait for it: plan() used to be called here and block, and the
+        twin paused physics for the duration, which hid that a real dog would
+        walk on for 1.8 s on its last command with no LiDAR, no stop and no
+        yield. Now the loop never waits. The request is made at tick n, from
+        this tick's image, and its answer is released at tick n + latency --
+        in sim time, so a run with --vlm-latency fixed is repeatable where a
+        real thread would land its answer on a different tick every time. On
+        the robot this is a worker thread; the timing is the same.
 
-        Under --vamos only. --shadow is a measurement of what VAMOS would say,
-        and on a robot it could only run off the control thread; charging it
-        here would also break Gate C's identical-commands check.
+        The wall-clock time the HTTP call really took is the default latency:
+        the sim is paused while it runs, then charged for it afterwards.
         """
-        ticks = int(round(seconds / self.robot.CONTROL_DT))
-        x0, y0, _ = self.robot.get_pose()
-        for _ in range(ticks):
-            self.step_crowd()
-            self.robot.step()
-            x, y, _ = self.robot.get_pose()
-            self.blind["metres"] += math.dist((x0, y0), (x, y))
-            x0, y0 = x, y
-            self.score_collision(floor, x, y)
-            self.score_people(floor, x, y)
-            self.frame()
-        self.blind["waits"] += 1
-        self.blind["ticks"] += ticks
-        self.blind["longest"] = max(self.blind["longest"], ticks)
+        t0 = time.perf_counter()
+        cam_pose = self.robot.camera_pose()
+        paths = self.policy(floor).request(self.robot.get_image(),
+                                           vamos_prompt(state), cam_pose)
+        wait = (time.perf_counter() - t0 if self.vlm_latency is None
+                else self.vlm_latency)
+        self.pending = (n + int(round(wait / self.robot.CONTROL_DT)), paths,
+                        n, self.robot.get_pose()[:2])
+        self.vlm["asked"] += 1
+
+    def take_answer(self, floor, n, pose, destination):
+        """The pending answer, if it has landed: judged from where the dog is
+        now, not from where it was asked. Returns plan()'s triple, or None
+        while the answer is still on its way.
+        """
+        if self.pending is None or n < self.pending[0]:
+            return None
+        _, paths, asked_at, xy0 = self.pending
+        self.pending = None
+        self.vlm["answers"] += 1
+        self.vlm["age"] += (n - asked_at) * self.robot.CONTROL_DT
+        self.vlm["moved"] += math.dist(xy0, pose[:2])
+        return self.policy(floor).deliver(paths, pose, destination)
 
     def say(self, line):
         """One line of the Preemptive Voice Engine. Printed here, spoken later."""
@@ -757,6 +769,11 @@ class Run:
         """
         self.floor = floor
         self.robot.set_height(levels.floor_z(floor))
+        # An answer still on its way from the last leg is about a corridor the
+        # dog has left -- another floor, or the far side of a lift ride.
+        if self.pending is not None:
+            self.pending = None
+            self.vlm["dropped"] += 1
         if not waypoints:
             # Asked for where it already is. A* has no checkpoints to give for
             # a route of zero length, and every line below indexes into them --
@@ -884,18 +901,17 @@ class Run:
             # Ask again sooner while nothing has cleared: the view changes as
             # the dog closes in, and a candidate that was not there at 4 m
             # often is at 2 m.
+            # Asked on schedule, answered whenever the answer lands; the loop
+            # carries on either way. `asked` is an answer arriving this tick.
             due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
-            asked = (self.vamos or self.shadow) and state["state"] == "TRACK" and due
+            if ((self.vamos or self.shadow) and state["state"] == "TRACK" and due
+                    and self.pending is None):
+                self.ask_vamos(floor, n, state)
+            answer = self.take_answer(floor, n, (x, y, yaw),
+                                      state.get("destination") or waypoints[-1])
+            asked = answer is not None
             if asked:
-                t0 = time.perf_counter()
-                proposed, candidates, safety = self.policy(floor).plan(
-                    self.robot.get_image(), vamos_prompt(state),
-                    self.robot.camera_pose(), state["destination"], pose=(x, y, yaw))
-                if self.vamos:
-                    # The rest of this tick then runs on the pose read before
-                    # the call, as the same code on the robot would.
-                    self.wait_for_vlm(floor, time.perf_counter() - t0
-                                      if self.vlm_latency is None else self.vlm_latency)
+                proposed, candidates, safety = answer
             if self.vamos:
                 chosen = proposed
 
@@ -918,9 +934,15 @@ class Run:
             # reject a path that is fine for 2 m and leads nowhere at 4 m.
             # Spec L4 step 5 -- the LoRA fine-tune -- is what would let the
             # model make this turn itself; until then the map makes it.
-            on_vamos = bool(chosen) and state["state"] == "TRACK" and not offset
+            #
+            # Only what is left of the path in front of the dog. It is held
+            # until the next answer lands, which can now be a couple of metres
+            # of walking later, and a path walked to its end is spent, not a
+            # reason to turn round for its first point.
+            rest = ahead(chosen, (x, y)) if chosen else []
+            on_vamos = len(rest) >= 2 and state["state"] == "TRACK" and not offset
             if on_vamos:
-                tx, ty = path_target(chosen, (x, y))
+                tx, ty = path_target(rest, (x, y))
             elif offset:
                 # Nothing VAMOS offered survived the gate, but the goal has been
                 # moved clear of what the sensor found, so steer at that rather
@@ -1183,9 +1205,9 @@ def main():
     ap.add_argument("--vamos-url", default=None, metavar="URL",
                     help="VAMOS server (default http://127.0.0.1:8009)")
     ap.add_argument("--vlm-latency", type=float, default=None, metavar="S",
-                    help="with --vamos: seconds each VAMOS call holds the control loop "
-                         "while the dog keeps walking on its last command (default: "
-                         "the call's measured time; 0 is the old paused-world twin)")
+                    help="with --vamos or --shadow: seconds of sim time before a VAMOS "
+                         "answer arrives; the control loop runs on meanwhile (default: "
+                         "the call's measured time; fix it for repeatable runs)")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
     ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
@@ -1268,11 +1290,14 @@ def main():
               f"{st['rejected']} candidates rejected "
               f"({st['rejected_by_gate']} of them by the safety gate), "
               f"mean safety of the paths it followed {mean:.2f}")
-    if args.vamos:
-        bl, dt = run.blind, run.robot.CONTROL_DT
-        print(f"VLM WAIT: {bl['waits']} calls held the loop {bl['ticks'] * dt:.1f}s in "
-              f"total (longest {bl['longest'] * dt:.1f}s); the dog walked "
-              f"{bl['metres']:.1f} m on a stale command with no LiDAR, stop or yield")
+    if args.vamos or args.shadow:
+        v = run.vlm
+        k = max(v["answers"], 1)
+        dropped = v["dropped"] + (run.pending is not None)
+        print(f"VLM ASYNC: {v['asked']} asked, {v['answers']} answered, {dropped} "
+              f"dropped at a leg's end; answers were {v['age'] / k:.1f}s old on "
+              f"arrival, the dog {v['moved'] / k:.2f} m on from where it asked; "
+              f"the control loop never waited")
     if run.shadow is not None:
         run.shadow.close()
         sn = run.shadow_n

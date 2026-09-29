@@ -459,13 +459,16 @@ to be binding.
   and the client sends neither a temperature nor a seed, so two identical
   commands give different paths. `--seed` pins the crowd, not the model. The two
   `room 201` runs above differed by 2 calls and 16 candidates on the same route.
-- **A VAMOS call blocks the control loop**, for about 1.8 s against the real
-  server. Until recently the twin paused the world during the call, so `--vamos` runs
-  never paid for it. Now the dog keeps walking on its last command for the
-  call's measured time (`--vlm-latency S` to fix it, `0` for the old behaviour)
-  with no LiDAR, stop or yield, and the run prints `VLM WAIT:` with the time
-  and distance covered blind. The `--vamos` results above predate this. The fix
-  is to take VAMOS off the control thread, not to tune this number.
+- **VAMOS answers arrive late, and the loop does not wait for them.** A call
+  takes about 1.8 s against the real server. It used to block the control loop
+  while the twin paused the world, which hid that a real dog would walk on
+  blind for that long. Now a request is sent from one tick's image and its
+  answer lands `--vlm-latency` seconds of sim time later (default: the call's
+  measured time). Meanwhile the 50 ms loop keeps its LiDAR, stop and yield. A late
+  answer is cut to what is still ahead of the dog and re-dreamed from where
+  it is now, so a path that has run into something since is rejected on
+  arrival. Runs print `VLM ASYNC:` with how old the answers were and how far
+  the dog had moved. The `--vamos` results above predate this.
 - The collision counter is a **point test** on the dog's centre, not its body, so
   it scores a graze as clean. Margins in the passing runs were around 0.1 m of
   actual trunk clearance.

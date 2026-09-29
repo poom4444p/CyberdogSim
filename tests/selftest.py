@@ -740,8 +740,8 @@ def vamos():
         outs = [subprocess.run(base + extra, capture_output=True, text=True)
                 for extra in ([], [], ["--shadow", "--shadow-log", log,
                                        "--vamos-url", fake.url])]
-        # Steering, with the call charged at the real server's ~1.8 s rather
-        # than the fake's few milliseconds. See Run.wait_for_vlm.
+        # Steering, with answers held back by the real server's ~1.8 s
+        # rather than the fake's few milliseconds. See Run.ask_vamos.
         steered = subprocess.run(base + ["--vamos", "--vamos-url", fake.url,
                                          "--vlm-latency", "1.8"],
                                  capture_output=True, text=True)
@@ -785,23 +785,27 @@ def vamos():
           f"from the map route, {none} had nothing pass the gate; {gated} "
           f"candidates rejected by the gate -- the fake server's, not VAMOS's")
 
-    # -- a blocking call costs time ------------------------------------------
-    # The twin used to pause the world while plan() waited, so a --vamos run
-    # never paid for the VLM. 1.8 s is 36 ticks; every call must be charged
-    # them, and the dog must have moved during some of them.
-    wait = grab(steered, "VLM WAIT:")
-    calls = grab(steered, "VAMOS floor 1:")
-    n = int(calls.split()[3]) if calls else -1
-    m = re.search(r"held the loop ([\d.]+)s.* walked ([\d.]+) m", wait or "")
-    blind_s, metres = (float(m.group(1)), float(m.group(2))) if m else (-1.0, -1.0)
-    check("VLM wait charged to the dog", m is not None and n > 0
-          and abs(blind_s - 1.8 * n) < 0.05 * n and metres > 0,
-          wait[len("VLM WAIT: "):] if wait else
-          f"no VLM WAIT line (exit {steered.returncode}: "
+    # -- VAMOS off the control thread -----------------------------------------
+    # Steering at the real server's ~1.8 s, not the fake's few milliseconds.
+    # The loop must not wait for it: every answer lands 36 ticks after it was
+    # asked for, judged from where the dog has got to by then, and the dog
+    # keeps its LiDAR, stop and yield the whole time -- so the latency may
+    # cost time, but must not cost a collision.
+    line = grab(steered, "VLM ASYNC:")
+    m = re.search(r"(\d+) answered.* ([\d.]+)s old on arrival, the dog ([\d.]+) m on",
+                  line or "")
+    answered, age, moved = ((int(m.group(1)), float(m.group(2)), float(m.group(3)))
+                            if m else (0, -1.0, -1.0))
+    check("VLM answers arrive late, loop runs on",
+          answered > 0 and abs(age - 1.8) < 0.05 and moved > 0,
+          line[len("VLM ASYNC: "):] if line else
+          f"no VLM ASYNC line (exit {steered.returncode}: "
           f"{steered.stderr.strip().splitlines()[-1:]})")
+    hit = grab(steered, "COLLISIONS:") or grab(steered, "CONTACT:")
+    check("late answers cost no collision", line is not None and hit is None,
+          hit or grab(steered, "collisions:") or "no run")
     print(f"  [INFO] --vamos at 1.8 s per call, fake server: "
-          f"{grab(steered, 'ARRIVED') or grab(steered, 'FAILED')}; "
-          f"{grab(steered, 'COLLISIONS:') or grab(steered, 'collisions:')}")
+          f"{grab(steered, 'ARRIVED') or grab(steered, 'FAILED')}")
 
 
 def run():

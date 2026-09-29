@@ -10,8 +10,8 @@ command and a few seconds.
     python tests/selftest.py lidar      # just one
 
 Stages run bottom-up: scene, lidar, perception, destination, crowd, latency,
-run. The first failure is usually the real one -- a bad scene fails everything
-above it.
+dreaming, run. The first failure is usually the real one -- a bad scene fails
+everything above it.
 """
 import math
 import os
@@ -290,6 +290,289 @@ def crowd():
           f"{false_movers} ticks called a stationary crate a mover")
 
 
+def dreaming():
+    """Does the safety factor tell a safe path from an unsafe one, and is it right?
+
+    `latency` times the dream and `run` never uses VAMOS, so until this stage
+    nothing checked the number itself. These are Gate B of
+    docs/dreaming_safety_kpis.md, all on floor 1:
+
+    - discrimination: the README's table, as regression cases.
+    - stopping: half a risky path never scores worse than all of it.
+    - gate accuracy: VAMOS-like candidates, each dreamed and then *driven* --
+      on the twin, with the live loop's limits (MAX_V, MAX_W) and noise drawn
+      from its own generator. A pass whose driven P(collision) is over 0.2 is
+      a false pass; 0.2 is what the README says the gate at 0.5 tolerates.
+    - stability: the same path under different seeds. 24 rollouts is a
+      binomial with a standard error of 0.1 at p = 0.5, so a path near the
+      gate is expected to wobble; a clearly safe or unsafe one must not.
+    - collapsed output: from a hazard pose, five fanned candidates must not
+      all get the same score.
+    - sanity: every factor and P(safe) finite and in [0, 1], on two seeds.
+    - latency: the gate runs inside plan(), which blocks the control loop, so
+      five candidates have to fit in one 50 ms tick.
+
+    Read the gate-accuracy numbers for what they are. The twin is the same
+    kinematic model the dream imagines, so "driven" differs from "dreamed" by
+    the velocity limits and the noise draw, not by physics; it catches the
+    dream disagreeing with the robot it claims to model, not the model
+    disagreeing with the world. The x1.5 line is the stress case: what gets
+    through if the real dog is half as noisy again as the dream assumes.
+    """
+    import random
+    from cyberdog.sim.clearance import clearance_test, free_space_test
+    from cyberdog.sim.control import FOLLOW_D, K_W, TURN_ONLY, wrap
+    from cyberdog.sim.robot.mujoco_robot import MujocoRobot
+    from cyberdog.sim.scene import levels
+    from cyberdog.sim.sensing import dreaming as D
+    from cyberdog.sim.vamos_client import GATE
+
+    clear, free = clearance_test(1), free_space_test(1)
+    r = MujocoRobot(SCENE, start_xy=(24.0, 9.5), start_yaw=0.0,
+                    start_z=levels.floor_z(1))
+
+    def line(a, b, n=8):
+        return [(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n)
+                for k in range(n + 1)]
+
+    def drive(path, pose, rng, noise=1.0):
+        """One real run of `path`: (arrived without touching anything)."""
+        r.reset(pose[:2], pose[2])
+        bias = rng.gauss(0.0, D.YAW_BIAS_SD * noise)
+        scale = 1.0 + rng.gauss(0.0, D.SPEED_SD * noise)
+        length = sum(math.dist(a, b) for a, b in zip(path, path[1:]))
+        steps = int(min(D.TURN_ALLOWANCE_S + D.HORIZON_SLACK * length / r.MAX_V,
+                        D.HORIZON_CAP_S) / D.DT)
+        # Forward-only chasing, as the dream does. The live loop's path_target
+        # re-scans from the start and turns back once the dog is a lookahead
+        # past it; the loop never sees that because it replans every second,
+        # and dropping the passed points is what the replan amounts to.
+        i = 0
+        for _ in range(steps):
+            x, y, yaw = r.get_pose()
+            while i < len(path) - 1 and math.dist(path[i], (x, y)) < FOLLOW_D:
+                i += 1
+            err = wrap(math.atan2(path[i][1] - y, path[i][0] - x) - yaw + bias)
+            r.set_velocity(0.0 if abs(err) > TURN_ONLY else r.MAX_V * scale * math.cos(err),
+                           0.0, K_W * err)
+            r.step()
+            # Slip is a turn the dog did not ask for, so it goes on the pose.
+            x, y, yaw = r.get_pose()
+            yaw += rng.gauss(0.0, D.SLIP_SD * noise)
+            r.data.qpos[3], r.data.qpos[6] = math.cos(yaw / 2), math.sin(yaw / 2)
+            if clear(x, y) < D.ROBOT_R:
+                return False
+            if math.dist((x, y), path[-1]) < D.ARRIVED_R:
+                return True
+        return False
+
+    def driven(path, pose, n, noise=1.0, seed=1):
+        rng = random.Random(seed)
+        return sum(drive(path, pose, rng, noise) for _ in range(n)) / n
+
+    # -- discrimination --------------------------------------------------
+    cases = {
+        "corridor":  (line((24, 9.5), (28, 9.5)), (24, 9.5, 0.0)),
+        "doorway":   (line((9, 10.0), (9, 6.5)), (9, 10.0, -math.pi / 2)),
+        "wall hug":  (line((20, 8.5), (24, 8.5)), (20, 8.5, 0.0)),
+        "near gate": (line((20, 8.58), (24, 8.58)), (20, 8.58, 0.0)),
+        "into wall": (line((24, 9.5), (24, 7.0)), (24, 9.5, -math.pi / 2)),
+        "stairwell": (line((5, 9.5), (1.0, 9.5)), (5, 9.5, math.pi)),
+    }
+    score = {k: D.Dream(clear, r.MAX_V).factor(p, pose)[0]
+             for k, (p, pose) in cases.items()}
+    check("corridor scores full", score["corridor"] >= 0.9,
+          f"{score['corridor']:.2f} down the middle of a 2.8 m corridor")
+    check("doorway passes, below the corridor",
+          GATE <= score["doorway"] < score["corridor"],
+          f"{score['doorway']:.2f} through the room door at x = 9")
+    check("wall hug rejected", score["wall hug"] < GATE,
+          f"{score['wall hug']:.2f} walking 0.5 m off the south wall")
+    check("wall and stairs score zero",
+          score["into wall"] == 0.0 and score["stairwell"] == 0.0,
+          f"into wall {score['into wall']:.2f}, into the stairwell {score['stairwell']:.2f}")
+
+    # -- stopping (B5, B6) ------------------------------------------------
+    # The dream's version of "braking lowers risk": the same path cut off
+    # half-way must never look more dangerous than walking all of it. Same
+    # seed for both, so the rollouts share their noise and the short one is,
+    # up to where it stops, the same walk.
+    def halve(path):
+        return path[:len(path) // 2 + 1]
+
+    risky = ("doorway", "wall hug", "near gate", "into wall", "stairwell")
+    adv, adv_safe = [], []
+    for k in risky:
+        p, pose = cases[k]
+        f_full, w_full = D.Dream(clear, r.MAX_V).factor(p, pose)
+        f_half, w_half = D.Dream(clear, r.MAX_V).factor(halve(p), pose)
+        adv.append(f_half - f_full)
+        adv_safe.append(w_half["p_safe"] - w_full["p_safe"])
+    least = min(zip(adv, risky))
+    check("stopping short lowers risk", sum(adv) / len(adv) >= 0.005,
+          f"half the path scores {sum(adv) / len(adv):+.2f} over the whole, on "
+          f"average over {len(risky)} risky paths; least: {least[1]} {least[0]:+.2f}")
+    # On average, not per path: each side is 24 rollouts, a binomial with a
+    # standard error near 0.09, so one path's two estimates can cross by a
+    # couple of rollouts on noise alone.
+    check("stopping short never raises collision", sum(adv_safe) / len(adv_safe) >= 0.0,
+          f"P(safe) of the half path minus the whole: mean "
+          f"{sum(adv_safe) / len(adv_safe):+.2f}, worst {min(adv_safe):+.2f}")
+
+    # -- gate accuracy ---------------------------------------------------
+    # Candidates shaped like VAMOS's: 2-3 m from the dog, fanning sideways,
+    # up and down the corridor and into its doors, drawn only where the line
+    # itself is free -- what reaches the dream in plan(). At least 128 of
+    # them, and at least 32 hazards: lines that pass closer than ROOMY to a
+    # wall, a door jamb or the stairwell -- where the room term starts to bite
+    # and the gate has something to decide.
+    N_CANDS, N_HAZARDS, HAZARD = 128, 32, D.ROOMY
+    rng = random.Random(7)
+    doors = [9.0, 15.0, 21.0, 27.0, 33.0, 39.0]
+    cands, hazard = [], []
+    while len(cands) < N_CANDS or sum(hazard) < N_HAZARDS:
+        if rng.random() < 0.3:
+            x0 = rng.choice(doors) + rng.uniform(-0.3, 0.3)
+            y0, head = 9.6 + rng.uniform(-0.4, 0.4), rng.choice((-1, 1)) * math.pi / 2
+        else:
+            x0, y0 = rng.uniform(5.0, 42.0), rng.uniform(8.55, 10.45)
+            head = rng.choice((0.0, math.pi))
+        head += rng.gauss(0.0, 0.15)
+        reach, side = rng.uniform(2.0, 3.0), rng.uniform(-0.6, 0.6)
+        end = (x0 + reach * math.cos(head) - side * math.sin(head),
+               y0 + reach * math.sin(head) + side * math.cos(head))
+        path = line((x0, y0), end)
+        dense = line((x0, y0), end, 30)
+        if not all(free(*p) for p in dense):
+            continue
+        near = min(clear(*p) for p in dense) < HAZARD
+        # Open corridor is easy to draw and says little; once the non-hazard
+        # share is full, only hazards are kept.
+        if near or len(cands) - sum(hazard) < N_CANDS - N_HAZARDS:
+            cands.append((path, (x0, y0, head)))
+            hazard.append(near)
+
+    N_DRIVE = 30
+    rows = []
+    for k, (path, pose) in enumerate(cands):
+        f, why = D.Dream(clear, r.MAX_V, seed=k).factor(path, pose)
+        rows.append((f, why["p_safe"], driven(path, pose, N_DRIVE),
+                     driven(path, pose, N_DRIVE, noise=1.5)))
+    passed = [t for t in rows if t[0] >= GATE]
+    # 30 drives screen, 200 confirm. At 30 a candidate that truly collides
+    # 15% of the time reads over 20% about one time in four, and with 128
+    # candidates that is a false alarm every run; 200 has a standard error
+    # under 0.03.
+    suspects = [k for k, t in enumerate(rows) if t[0] >= GATE and 1 - t[2] > 0.2]
+    bad = [k for k in suspects if 1 - driven(*cands[k], 200, seed=99) > 0.2]
+    bad15 = [t for t in passed if 1 - t[3] > 0.2]
+    missed = [t for t in rows if t[0] < GATE and t[2] == 1.0]
+    mae = sum(abs(t[1] - t[2]) for t in rows) / len(rows)
+    bias = sum(t[1] - t[2] for t in rows) / len(rows)
+    worst = max(rows, key=lambda t: t[1] - t[2])
+    check("enough candidates, enough hazards",
+          len(cands) >= N_CANDS and sum(hazard) >= N_HAZARDS,
+          f"{len(cands)} candidates, {sum(hazard)} within {HAZARD} m of a no-go "
+          f"(need {N_CANDS} and {N_HAZARDS})")
+    check("gate: no false passes", not bad,
+          f"{len(bad)} of {len(passed)} passed candidates collide more than 20% "
+          f"of the time when driven ({len(rows)} candidates, {N_DRIVE} drives "
+          f"each; {len(suspects)} suspects re-driven 200 times)")
+    check("dream calibrated to the twin", mae <= 0.10,
+          f"P(safe) off by {mae:.2f} on average, bias {bias:+.2f} "
+          f"({'over' if bias > 0 else 'under'}confident); worst: dreamed "
+          f"{worst[1]:.2f}, driven {worst[2]:.2f}")
+    print(f"  [INFO] rejected though every drive was clean: {len(missed)} of "
+          f"{len(rows) - len(passed)} -- by design when the room is tight")
+    print(f"  [INFO] noise x1.5: {len(bad15)} of {len(passed)} passed candidates "
+          f"collide more than 20% of the time")
+
+    # -- stability -------------------------------------------------------
+    spread = {}
+    for k in ("corridor", "doorway", "near gate", "into wall"):
+        p, pose = cases[k]
+        fs = [D.Dream(clear, r.MAX_V, seed=s).factor(p, pose)[0] for s in range(20)]
+        mean = sum(fs) / len(fs)
+        sd = (sum((f - mean) ** 2 for f in fs) / len(fs)) ** 0.5
+        flips = min(sum(f >= GATE for f in fs), sum(f < GATE for f in fs))
+        spread[k] = (mean, sd, flips)
+    steady = [k for k in ("corridor", "into wall") if spread[k][2]]
+    check("clear-cut paths never flip", not steady,
+          "corridor and into-wall give the same verdict on all 20 seeds"
+          if not steady else f"{', '.join(steady)} flipped across seeds")
+    for k in ("doorway", "near gate"):
+        mean, sd, flips = spread[k]
+        print(f"  [INFO] {k}: {mean:.2f} +/- {sd:.2f} over 20 seeds, "
+              f"verdict flips on {flips} of 20")
+    # What a flip at the edge costs: the near-gate path is let through on an
+    # unlucky draw, and this is how often it then hits something.
+    edge = 1 - driven(*cases["near gate"], 200)
+    print(f"  [INFO] near gate, driven 200 times: P(collision) {edge:.2f} -- "
+          f"what the gate lets through when it flips")
+
+    # -- collapsed output (B15) ------------------------------------------
+    # A scorer that gives five different paths the same number is not
+    # choosing between them. VAMOS fans five lines out of one pose, so do
+    # that from each hazard pose. Five 1.00s is the right answer where all
+    # five are roomy, so that is counted apart as saturated, not collapsed.
+    def fan(pose, reach):
+        x0, y0, head = pose
+        out = []
+        for side in (-0.6, -0.3, 0.0, 0.3, 0.6):
+            end = (x0 + reach * math.cos(head) - side * math.sin(head),
+                   y0 + reach * math.sin(head) + side * math.cos(head))
+            if all(free(*p) for p in line((x0, y0), end, 30)):
+                out.append(line((x0, y0), end))
+        return out
+
+    collapsed = saturated = frames = 0
+    for (path, pose), near in zip(cands, hazard):
+        five = fan(pose, math.dist(path[0], path[-1]))
+        if not near or len(five) < 2:
+            continue
+        fs = [D.Dream(clear, r.MAX_V).factor(p, pose)[0] for p in five]
+        frames += 1
+        if max(fs) - min(fs) < 1e-4:
+            if min(fs) >= 1.0:
+                saturated += 1
+            else:
+                collapsed += 1
+    check("scores differ between candidates", frames and collapsed / frames <= 0.25,
+          f"{collapsed} of {frames} hazard frames gave every candidate the same "
+          f"score below 1.00")
+    # Ties below 1.00 used to be most of the hazard frames' ties: room was
+    # the closest approach including the start, which every candidate shares.
+    # dreaming.START_R fixed that; what is left is candidates that genuinely
+    # walk the same tight spot.
+    print(f"  [INFO] {saturated} of {frames} hazard frames all 1.00 (roomy, "
+          f"nothing to choose)")
+
+    # -- sanity (B16) ----------------------------------------------------
+    # Every number the gate reads, on two seeds: finite and a probability.
+    odd = []
+    for k, (path, pose) in enumerate(cands):
+        for s in (k, k + 1000):
+            f, why = D.Dream(clear, r.MAX_V, seed=s).factor(path, pose)
+            for name, v in (("factor", f), ("p_safe", why["p_safe"])):
+                if not (math.isfinite(v) and 0.0 <= v <= 1.0):
+                    odd.append(f"candidate {k} seed {s} {name} = {v}")
+    check("scores finite and in [0, 1]", not odd,
+          f"{len(cands)} candidates x 2 seeds" if not odd
+          else f"{len(odd)} bad, first: {odd[0]}")
+
+    # -- latency ---------------------------------------------------------
+    dream = D.Dream(clear, r.MAX_V)
+    five = [c[0] for c in cands[:5]]
+    poses = [c[1] for c in cands[:5]]
+    t = time.perf_counter()
+    for _ in range(10):
+        for p, pose in zip(five, poses):
+            dream.factor(p, pose)
+    ms = (time.perf_counter() - t) / 10 * 1000
+    check("five candidates fit a control tick", ms < 1000 / 20,
+          f"{ms:.1f} ms against a 50 ms tick -- plan() blocks the loop")
+
+
 def run():
     """The whole stack, headless, on the routes that exercise each floor.
 
@@ -346,7 +629,8 @@ def run():
 
 
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
-          "destination": destination, "crowd": crowd, "latency": latency, "run": run}
+          "destination": destination, "crowd": crowd, "latency": latency,
+          "dreaming": dreaming, "run": run}
 
 
 if __name__ == "__main__":

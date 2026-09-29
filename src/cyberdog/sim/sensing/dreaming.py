@@ -62,6 +62,14 @@ ROBOT_R = 0.16                  # clearance below this counts as a collision
 ROOMY = 0.40                    # clearance at or above this scores full marks
 FLOOR = 0.40                    # score of a run that survives but scrapes
 
+# Room is the closest approach, but not to where the dog already is. From a
+# pose next to a wall, the closest point of every walk is the first one, which
+# every candidate shares -- so the one that steers away from the wall used to
+# tie with the one that hugs it. Inside START_R of the pose, only getting
+# closer than the start counts; past it, everything does. Collisions are
+# still checked on every step.
+START_R = 0.5                   # metres, about a body length
+
 
 class Dream:
     """Imagined rollouts of one candidate path, scored for safety."""
@@ -114,6 +122,7 @@ class Dream:
         x, y, yaw = pose
         yaw_bias = self.rng.gauss(0.0, YAW_BIAS_SD)
         speed = self.max_v * (1.0 + self.rng.gauss(0.0, SPEED_SD))
+        start, start_clear = (x, y), self.clearance(x, y)
         min_clear = float("inf")
 
         # Index of the point being chased. It only ever moves forward: a
@@ -134,12 +143,19 @@ class Dream:
             y += v * math.sin(yaw) * DT
 
             clear = self.clearance(x, y)
-            min_clear = min(min_clear, clear)
+            if clear < start_clear or math.dist(start, (x, y)) >= START_R:
+                min_clear = min(min_clear, clear)
             if clear < ROBOT_R:
                 return False, min_clear, False
+            # A walk that ends before leaving START_R without closing in has
+            # nothing counted: it kept the room it started with.
             if math.dist((x, y), path[-1]) < ARRIVED_R:
-                return True, min_clear, True
-        return True, min_clear, False
+                return True, _or(min_clear, start_clear), True
+        return True, _or(min_clear, start_clear), False
+
+
+def _or(v, default):
+    return v if math.isfinite(v) else default
 
 
 def _wrap(a):

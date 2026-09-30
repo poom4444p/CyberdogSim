@@ -169,20 +169,29 @@ the server's measured response time, which varies, and runs drift.
 ### Gate D (VAMOS vs map-only)
 
 The promotion test in `docs/dreaming_safety_kpis.md`: every route × at least
-3 pedestrian seeds, once without and once with `--vamos`. Both runs of a pair
-use the same command and seed:
+3 pedestrian seeds, once without and once with `--vamos` (same command, same
+crowd), scored on D1–D8. Start the VAMOS server first, then:
+
+```bash
+python scripts/gate_d.py                                   # 7 routes x seeds 1 2 3 = 42 runs, ~20 min
+python scripts/gate_d.py --seeds 1 2 3 4 5                 # more seeds
+python scripts/gate_d.py --routes "room 101" --seeds 1     # one pair, a quick check
+```
+
+It prints one line per run as it finishes, then the D1–D8 table and
+`Gate D: PASS` or `FAIL` (exit code 0 or 1). Every run's full output is kept
+under `output/gate_d/<time>/`, with `summary.json` beside it. The candidate
+runs always use `--vlm-latency 1.8`, so a rerun gives the same numbers. A
+candidate run in which VAMOS was never called, or a call failed, counts
+against D8: it would otherwise pass by quietly being the baseline.
+
+One pair by hand, to look at a single result:
 
 ```bash
 python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video
 python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video \
     --vamos --vlm-latency 1.8
 ```
-
-Routes: `restroom`, `cafeteria`, `room 201`, `room 101`,
-`electrical engineering lab`, `biology lab`, `chemistry lab`. That is 42 runs
-for 3 seeds. Add up collisions, handler and pedestrian contact, arrivals and
-time for each arm. The thresholds are in the KPI doc (D1–D8). There is no
-script for this yet.
 
 ---
 

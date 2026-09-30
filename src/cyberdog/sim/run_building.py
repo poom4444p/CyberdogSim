@@ -47,14 +47,14 @@ from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-from cyberdog.sim.scene import build_scene, levels, lift, obstacles, pedestrians
+from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
-from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
-                                           closest_approach, conflict)
+from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
+                                           Tracker, closest_approach, conflict)
 from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
@@ -166,6 +166,8 @@ HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
 SWING_T = 0.8             # seconds a command is rolled forward over
 SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
 SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
+                          # kept by any step easing adds. PED_NEAR plus a margin.
 
 # Doorways. The route goes through each one's middle, but the dog is not always
 # on the route when it gets there -- stepped round a person, or on a VAMOS
@@ -406,7 +408,6 @@ class Run:
         # finds these with the LiDAR or not at all; this is how we check.
         self.hits = {"ticks": 0, "boxes": set()}
         self.handler_hits = {"ticks": 0, "boxes": set()}
-        self.faces = {}           # floor -> distance to the real wall faces
         self.dog_geoms, self.touchable = self.body_contacts()
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
         # People. Not in any grid either, and unlike the crates they move, so
@@ -790,52 +791,46 @@ class Run:
             return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
         return target, False
 
-    def wall_faces(self, floor):
-        """(distance field, res, ox, oy): metres to the nearest real wall face.
-
-        Not the clearance field, which is measured from the planner's inflated
-        walls and so reads 0 everywhere within 0.25 m of one -- the person's
-        shoulder lives in exactly that band, and there a turn that grazes the
-        wall and one that swings them into it look the same.
-        """
-        if floor not in self.faces:
-            from scipy import ndimage
-            occ, res, ox, oy = build_scene.wall_grid(floor)
-            occ = occ.copy()
-            H, W = occ.shape
-            for x0, x1, y0, y1 in lift.SHAFT_WALLS.values():
-                occ[max(int(H - 1 - (y1 - oy) / res), 0):int(H - 1 - (y0 - oy) / res) + 1,
-                    max(int((x0 - ox) / res), 0):int((x1 - ox) / res) + 1] = True
-            self.faces[floor] = (ndimage.distance_transform_edt(~occ) * res, res, ox, oy)
-        return self.faces[floor]
-
     def handler_room(self, live, x, y, yaw):
         """What the dog can know of the room around the person, for a dog pose:
-        walls from the map, crates from the LiDAR's standing field."""
+        walls from the map, measured to their real faces rather than the
+        planner's inflated ones (clearance.wall_face_field -- the person's
+        shoulder lives in the inflation band), and crates from the LiDAR's
+        standing field."""
         px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
-        dist, res, ox, oy = self.wall_faces(live.floor)
-        r, c = int(dist.shape[0] - 1 - (py - oy) / res), int((px - ox) / res)
-        wall = float(dist[r, c]) if 0 <= r < dist.shape[0] and 0 <= c < dist.shape[1] else 0.0
-        return min(wall, live.detected_at(px, py))
+        return min(live.wall_at(px, py), live.detected_at(px, py))
 
-    def swing(self, live, pose, cmd, dt=0.1):
+    def swing(self, live, pose, cmd, people=(), dt=0.1):
         """Roll `cmd` forward SWING_T: (least room around the person, whether
-        the dog itself stays clear)."""
+        the dog itself stays clear -- of everything by ROBOT_R, and of where
+        each of `people` is heading by SWING_PEOPLE)."""
         x, y, yaw = pose
         vx, _, w = cmd
         worst, clear = INF, True
-        for _ in range(int(round(SWING_T / dt))):
+        for k in range(1, int(round(SWING_T / dt)) + 1):
             yaw += w * dt
             x += vx * math.cos(yaw) * dt
             y += vx * math.sin(yaw) * dt
             worst = min(worst, self.handler_room(live, x, y, yaw))
-            clear = clear and live(x, y) >= ROBOT_R
+            clear = (clear and live(x, y) >= ROBOT_R
+                     and all(math.dist((x, y), p.predict(k * dt)) >= SWING_PEOPLE
+                             for p in people))
         return worst, clear
 
-    def spare_handler(self, live, pose, cmd, limit):
+    def spare_handler(self, live, pose, cmd, limit, people=()):
         """`cmd`, with its turn eased where it would swing the person into
         something. See HANDLER_ROOM. `limit` is the speed every other rule
-        has already allowed; easing never walks faster than it."""
+        has already allowed; easing never walks faster than it.
+
+        `people` are the person-sized tracks. Easing walks on where the
+        command would have pivoted, and on seeds 4 and 12 of `room 201
+        --pedestrians 3` that walked the dog to 0.42 m of somebody standing
+        beside it. So an eased command that walks further than the original
+        must keep SWING_PEOPLE from where each of them is heading, or the
+        turn goes ahead as commanded. Only then: holding every eased command
+        to it, whether or not it added a step, turned the dog's easing off
+        wherever anyone was near, and put the person on the handle back
+        against walls on 5 seeds of 12."""
         now = self.handler_room(live, *pose)
         worst, _ = self.swing(live, pose, cmd)
         if worst >= HANDLER_ROOM or worst >= now:
@@ -845,7 +840,7 @@ class Run:
         best = None
         for f in SWING_EASE:
             alt = (v, vy, w * f)
-            room, clear = self.swing(live, pose, alt)
+            room, clear = self.swing(live, pose, alt, people if v > vx else ())
             if not clear:
                 continue
             if room >= HANDLER_ROOM or room >= now:
@@ -1336,7 +1331,8 @@ class Run:
             turn_only = DOOR_ERR if at_door else TURN_ONLY
             cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
             if speed > 0.0:
-                cmd = self.spare_handler(live, (x, y, yaw), cmd, speed)
+                people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
+                cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)
             self.commands.update(struct.pack("3d", *cmd))
             self.n_commands += 1
             self.robot.set_velocity(*cmd)

@@ -528,17 +528,29 @@ to be binding.
   It does **not** step back first: that was tried, and reversing pushes the
   rigid handle into the person holding it.
 
-  Over 12 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
-  nothing. The person on the handle touches something on 2 (seed 4, 0.3 s
-  against the cart; seed 10, 0.7 s against a wall), down from up to 5.8 s on
-  seed 8. **Pedestrian contact is the cost:** 5 seeds get within 0.55 m of
-  somebody (4, 8, 10, 11, 12; closest 0.35–0.45 m), against 3 before turns
-  were eased, because an eased turn keeps walking where the dog would have
-  pivoted away. Keeping 0.6 m from people while easing, or not easing near
-  them, were both tried: each put the dog itself into a wall on seed 8 for
-  6.5 s and the person back against walls on 5 seeds. People heading west
-  keep to the north lane (y = 10.40), which is also the dog's lane (y ≈
-  10.10), and pedestrians do not yet overtake on the left.
+  Over 20 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
+  nothing. The person on the handle touches something on 3 (seed 10, 0.5 s
+  against a wall; 11, 1.2 s against the cart; 18, 2.1 s against the crate),
+  down from up to 5.8 s on seed 8 before turns were eased. 8 seeds come
+  within 0.55 m of a pedestrian, 8.4 s in all (closest 0.33 m, seed 16).
+  Two things brought that down from 12.6 s:
+  - Easing a turn keeps walking where the dog would have pivoted, and on
+    seeds 4 and 12 that walked it towards somebody standing beside it. A step
+    easing adds must now keep 0.7 m from where each person-sized track is
+    heading (`SWING_PEOPLE`), or the turn goes ahead as commanded.
+  - `free_destination` could put the avoidance goal on the far side of a
+    wall: a point shifted 1.6 m sideways out of the corridor is open floor
+    in the room behind it, and the line to it was only checked against what
+    the LiDAR found. Seed 8 aimed 1.2 m past the floor-2 north wall and
+    walked into it for 6.5 s. Lines to candidate goals may no longer enter a
+    wall -- tested against the real wall faces (`clearance.wall_face_field`),
+    because in a doorway the inflated walls cover nearly the whole opening.
+
+  What is left is not easing: people walking into a dog that is standing
+  and waiting (seed 8), going round somebody who has stopped (10), and
+  overtaking in the same lane (11) -- people heading west keep to the north
+  lane (y = 10.40), which is also the dog's lane (y ≈ 10.10), and
+  pedestrians do not yet overtake on the left.
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone

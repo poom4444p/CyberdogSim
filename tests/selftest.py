@@ -840,8 +840,8 @@ def run():
     # corridor wall under it until routes kept right (mapping/lane.py) and
     # stopped cutting through door frames (AStarPlanner's free-segment rule).
     #
-    # The person on the handle is reported, not judged, yet: two routes still
-    # brush them against something (README, known limits).
+    # The person on the handle is judged too, route by route: a HANDLER: line
+    # is a failure (see the check at the bottom of the loop).
     cases = [("restroom", "arrives", []), ("cafeteria", "arrives", []),
              ("room 201", "arrives", []),
              # The floor-1 route, past the trolley. It used to stop short, back

@@ -188,9 +188,17 @@ shipped.
 | D7 | Minimum clearance to crates and people | report, mean and worst |
 | D8 | Missing metrics | **0** — a missing collision line is not zero collisions |
 
-Before D2 means much: the collision counter is a point test on the dog's
-centre (README, known limits), so a graze scores clean. Replace it with a
-trunk-footprint test first.
+D2 counts MuJoCo contacts between the whole Go2 body (trunk, hips, legs)
+and the walls, crates, lift and stairs, so a graze counts. It replaced a
+point test on the dog's centre against the crates only. Its first finding,
+map-only scraping the south wall on three routes, is fixed: routes keep
+right and no longer cut door frames, and the map-only baseline is clean on
+all 8 routes.
+
+Add to D2 before Gate D: the person on the handle (`HANDLER:`). They are
+still brushed on 2 of 8 map-only routes, down from 7 (README, known
+limits). A guide that keeps its own body clear while swinging its user into
+a door frame has not passed.
 
 - [ ] D1–D8 all pass
 - [ ] Promotion is an explicit decision; never promote from selftest alone

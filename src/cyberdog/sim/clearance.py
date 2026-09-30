@@ -71,6 +71,18 @@ def clearance_field(floor=1):
                     if z.contains_point(ox + (c + 0.5) * res,
                                         oy + (H - 1 - r + 0.5) * res):
                         blocked[r, c] = True
+        # The lift shaft's walls, which the scene has and the grid does not --
+        # grown by the grid's own inflation, so they read like every other wall.
+        import yaml
+        from cyberdog.sim.scene.lift import SHAFT_WALLS
+        with open(paths.MAP_CONFIG) as f:
+            grow = float(yaml.safe_load(f)["map"].get("grid_inflation", 0.0))
+        for x0, x1, y0, y1 in SHAFT_WALLS.values():
+            r0 = max(int(H - 1 - (y1 + grow - oy) / res), 0)
+            r1 = min(int(H - 1 - (y0 - grow - oy) / res) + 1, H)
+            c0 = max(int((x0 - grow - ox) / res), 0)
+            c1 = min(int((x1 + grow - ox) / res) + 1, W)
+            blocked[r0:r1, c0:c1] = True
         # Distance from every free cell to the nearest blocked one, in metres.
         _CLEARANCE[floor] = (ndimage.distance_transform_edt(~blocked) * res,
                              res, ox, oy)

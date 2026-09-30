@@ -262,15 +262,29 @@ class AStarPlanner:
         projection = line_start + t * line_vec
         return float(np.linalg.norm(point - projection))
 
+    @staticmethod
+    def _segment_free(grid: OccupancyGrid, a, b) -> bool:
+        """Does the straight line a -> b stay in the grid's free cells?"""
+        n = max(int(math.dist(a, b) / (grid.resolution / 2)), 1)
+        return all(grid.is_free(*grid.world_to_grid(a[0] + (b[0] - a[0]) * k / n,
+                                                     a[1] + (b[1] - a[1]) * k / n))
+                   for k in range(n + 1))
+
     def rdp_simplify(
-        self, points: List[Tuple[float, float]], epsilon: Optional[float] = None
+        self, points: List[Tuple[float, float]], epsilon: Optional[float] = None,
+        grid: Optional[OccupancyGrid] = None,
     ) -> List[Tuple[float, float]]:
         """Ramer-Douglas-Peucker polyline simplification.
-        
+
         Args:
             points: List of (x, y) points.
             epsilon: Tolerance in meters. Uses self.rdp_epsilon if None.
-        
+            grid: If given, a span is only replaced by a straight line that
+                stays in its free cells. Within epsilon is not the same as
+                within the building: at a doorway 0.3 m of tolerance is most
+                of the gap between the route and the door frame, and the
+                simplified line through `room 101`'s door clipped its jamb.
+
         Returns:
             Simplified list of (x, y) points.
         """
@@ -293,13 +307,14 @@ class AStarPlanner:
         max_dist = distances.max()
         max_idx = distances.argmax() + 1
 
-        if max_dist > epsilon:
+        if max_dist > epsilon or (grid is not None
+                                  and not self._segment_free(grid, start, end)):
             # Recurse on both halves
             left = self.rdp_simplify(
-                [tuple(p) for p in pts[:max_idx + 1]], epsilon
+                [tuple(p) for p in pts[:max_idx + 1]], epsilon, grid
             )
             right = self.rdp_simplify(
-                [tuple(p) for p in pts[max_idx:]], epsilon
+                [tuple(p) for p in pts[max_idx:]], epsilon, grid
             )
             return left[:-1] + right
         else:
@@ -513,8 +528,8 @@ class AStarPlanner:
         # Convert grid path to world coordinates
         raw_path = [grid.grid_to_world(r, c) for r, c in grid_path]
 
-        # Simplify
-        polyline = self.rdp_simplify(raw_path)
+        # Simplify, never across anything the grid calls blocked
+        polyline = self.rdp_simplify(raw_path, grid=grid)
 
         # Compute total distance
         total_dist = 0.0
@@ -540,17 +555,21 @@ class AStarPlanner:
         behavior_layer: BehaviorLayer,
         start: Tuple[float, float],
         goal: Tuple[float, float],
+        reshape=None,
     ) -> Optional[Route]:
         """Plan a route with behavior-layer-aware checkpoints.
-        
+
         Like plan(), but checkpoints include zone transitions and announcements.
-        
+
         Args:
             grid: Occupancy grid for pathfinding.
             behavior_layer: Behavior layer for zone queries.
             start: (x, y) start position in world coordinates.
             goal: (x, y) goal position in world coordinates.
-        
+            reshape: Optional function from the dense A* path (world points)
+                to the path to simplify instead -- the router's keep-right
+                lane (mapping/lane.py).
+
         Returns:
             Route object with zone-aware checkpoints, or None if no path found.
         """
@@ -565,9 +584,11 @@ class AStarPlanner:
 
         # Convert grid path to world coordinates
         raw_path = [grid.grid_to_world(r, c) for r, c in grid_path]
+        if reshape is not None:
+            raw_path = reshape(raw_path)
 
-        # Simplify
-        polyline = self.rdp_simplify(raw_path)
+        # Simplify, never across anything the grid calls blocked
+        polyline = self.rdp_simplify(raw_path, grid=grid)
 
         # Compute total distance
         total_dist = 0.0

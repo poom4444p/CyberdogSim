@@ -47,11 +47,11 @@ from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
+from cyberdog.sim.scene import build_scene, levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
-from cyberdog.sim.sensing.perception import (LiveClearance, free_destination,
+from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
                                            closest_approach, conflict)
@@ -120,11 +120,68 @@ PATIENCE = 3.0            # seconds a person may stand still before the dog
                           # that pause is about a second -- and short enough
                           # that a person who has genuinely stopped does not
                           # end the run.
+PASS_NEED = 0.60          # going round someone who has stopped: room kept from
+                          # what the LiDAR sees, instead of the crates' 0.35.
+                          # About 0.8 m centre to centre -- the 0.9 m people
+                          # give each other in passing. A crate's 0.35 took
+                          # the dog past a standing person at 0.50 m, at full
+                          # speed, 9 cm from their shoulder.
+PASS_V = 0.40             # m/s while within PASS_R of them: walking past
+PASS_R = 2.0              # somebody, not overtaking them
+# No stepping back from them first. It was tried: reversing pushes the rigid
+# handle into the person holding it, and nothing the dog senses knows they
+# are there -- seed 8 of room 201 backed them into a wall for 9 s. A standoff
+# with a pedestrian is broken on their side instead (pedestrians.GIVE_WAY).
 YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
                           # this long, creep and keep asking. Reachable only
                           # by a queue of people arriving one after another.
 PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
                           # as a contact. Scoring only, never shown the robot.
+
+# The person being guided. They walk behind the dog holding a rigid handle
+# (RDog's), so they are always straight behind it along its heading: the
+# handle does not swivel. Not in the scene -- nothing the robot senses knows
+# they are there -- and scored the way the dog's body is: touching a wall, a
+# crate, the lift or the stairs counts. A route the dog clears can still walk
+# them into something: on a pivot the handle swings them sideways through
+# whatever is beside the dog.
+HANDLER_BEHIND = 1.1      # metres, dog centre to theirs: the Go2's 0.41 m of
+                          # body behind its centre, ~0.4 m of handle, an arm
+HANDLER_R = 0.25          # metres, half a person's shoulder width
+HANDLER_H = (0.4, 1.0)    # heights tested: crate height, and hip/hand height
+HANDLER_RAYS = 12
+
+# Easing a turn that would swing them into something. The dog knows the
+# handle is rigid and how long it is, so it knows where the person will be
+# after any turn -- and every handler contact measured was a turn: a pivot
+# beside the crate it had just gone round (`electrical engineering lab`, the
+# cart on `room 201` with people), a left turn past the lift (`cafeteria`),
+# and a sharp left into the floor-2 restroom from the north lane after going
+# round somebody, which put the person 1.1 m behind into the north wall. So
+# each command is rolled forward SWING_T and, where it would take the person
+# closer than HANDLER_ROOM to a wall or anything the LiDAR has found, the turn
+# is eased and the dog keeps walking: a wider arc drags them round instead of
+# swinging them sideways.
+HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
+SWING_T = 0.8             # seconds a command is rolled forward over
+SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
+SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+
+# Doorways. The route goes through each one's middle, but the dog is not always
+# on the route when it gets there -- stepped round a person, or on a VAMOS
+# path, which cuts corners. From
+# FUNNEL_D out it steers at a point FUNNEL_LEAD ahead of itself on the door's
+# axis, so it closes on the line before the frame instead of arriving at the
+# frame and pivoting to find it. That pivot was the floor-2 restroom: 0.5 m
+# east of the axis at the threshold, turning to line up, with the crate beside
+# the door on the person's side.
+FUNNEL_D = 2.0            # metres before a doorway the funnel takes over
+FUNNEL_LEAD = 0.8         # metres ahead on the axis it steers at
+FUNNEL_PAST = 0.4         # metres beyond the doorway's far side it lets go
+DOOR_NEAR = 1.0           # metres before a doorway where it lines up before walking:
+DOOR_ERR = 0.25           # rad of heading error it will walk with there, against
+                          # TURN_ONLY's 0.8 anywhere else. Walking while turning
+                          # at the threshold is the body's corner meeting the frame.
 
 # Backing out of a graze. The proximity stop below sets the speed to zero, and
 # that used to be all it did -- which is a deadlock, because clearance cannot
@@ -261,13 +318,11 @@ def plan_stops(router, stops):
         if target is None:
             raise SystemExit(f"there is no {name} on floor {requested} (it is on "
                              f"floor(s) {', '.join(map(str, router.floors_of(name)))})")
-        planned = router.plan(floor, xy, target)
+        planned = router.plan(floor, xy, target, lift_stop=lift.WAIT_XY)
         if planned is None:
             raise SystemExit(f"no route to {name}")
         for j, (f, route) in enumerate(planned):
-            pts = [(float(c.position[0]), float(c.position[1]))
-                   for c in route.checkpoints]
-            says = [list(c.announcements) for c in route.checkpoints]
+            pts, says = router.walk_line(f, route)
             # A cross-floor stop comes back as a leg to the lift and a leg out
             # of it; neither should be driven into the car itself.
             if len(planned) > 1 and j == 0:
@@ -350,7 +405,10 @@ class Run:
         # Ground truth, for scoring only -- never shown to the robot. The dog
         # finds these with the LiDAR or not at all; this is how we check.
         self.hits = {"ticks": 0, "boxes": set()}
-        self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0}
+        self.handler_hits = {"ticks": 0, "boxes": set()}
+        self.faces = {}           # floor -> distance to the real wall faces
+        self.dog_geoms, self.touchable = self.body_contacts()
+        self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
         # People. Not in any grid either, and unlike the crates they move, so
         # one scan cannot describe them -- `tracker` is what two scans give.
         self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
@@ -363,6 +421,7 @@ class Run:
                              "python -m cyberdog.sim.scene.build_scene --building")
         self.tracker = Tracker(self.robot.CONTROL_DT)
         self.waiting_for = None        # the track being yielded to, if any
+        self.passing = None            # where the person being gone round stands
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
@@ -645,18 +704,191 @@ class Run:
                                     xy[1] + dy * (d * k / steps) / span)
                    for k in range(first, steps + 1))
 
+    def body_contacts(self):
+        """(the dog's geoms, {scene geom: what it is}) for collision scoring.
+
+        The dog's geoms are everything under the body with the free joint:
+        trunk, hips, legs, feet. The scene's are everything the body must not
+        touch -- walls, crates, the lift shaft and roof, stair steps. Left out:
+        what it stands on (`ground`, the `slab`s, the lift car's `lift_plate`),
+        where contact is walking, and the people, whose geoms do not collide at
+        all and are scored by distance instead (PED_NEAR).
+        """
+        import mujoco
+        m = self.robot.model
+        root = next(m.jnt_bodyid[j] for j in range(m.njnt)
+                    if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE)
+
+        def ours(b):
+            while b:
+                if b == root:
+                    return True
+                b = m.body_parentid[b]
+            return False
+
+        dog, scene = set(), {}
+        for g in range(m.ngeom):
+            if ours(m.geom_bodyid[g]):
+                dog.add(g)
+                continue
+            name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+            if (name == "ground" or name.startswith("slab") or name == "lift_plate"
+                    or not m.geom_contype[g] and not m.geom_conaffinity[g]):
+                continue
+            scene[g] = (name.split("_", 1)[1] if name.startswith("obs")
+                        else "stairs" if name.startswith("step")
+                        else "lift" if name.startswith("lift")
+                        else "wall")
+        return dog, scene
+
     def score_collision(self, floor, x, y):
-        """Ground truth: is the dog standing inside an obstacle right now?
+        """Ground truth: is any part of the dog touching a wall or an obstacle?
+
+        MuJoCo's own contacts between the Go2's geoms and the scene's, so the
+        whole body counts -- trunk, hips, swinging legs -- not just the point
+        at its centre. The point test this replaced scored a trunk scraping a
+        crate as clean as long as the centre stayed outside the box, and never
+        looked at walls at all.
 
         Scoring only, and never fed back into the robot -- the dog finds these
         with the LiDAR or it does not find them. A run that reports arrival
-        while this counter climbed is a run that walked through a crate, which
-        is precisely the failure that was invisible before.
+        while this counter climbed is a run that walked into something.
         """
-        for bx0, bx1, by0, by1, _h, name in obstacles.boxes(floor):
-            if bx0 <= x <= bx1 and by0 <= y <= by1:
-                self.hits["ticks"] += 1
-                self.hits["boxes"].add(f"floor {floor} {name}")
+        d = self.robot.data
+        touched = set()
+        for c in d.contact[:d.ncon]:
+            g1, g2 = int(c.geom1), int(c.geom2)
+            other = g2 if g1 in self.dog_geoms else g1 if g2 in self.dog_geoms else None
+            if other in self.touchable:
+                touched.add(self.touchable[other])
+        if touched:
+            self.hits["ticks"] += 1
+            self.hits["boxes"].update(f"floor {floor} {what}" for what in touched)
+
+    def handler_at(self):
+        """Where the person on the handle is: straight behind, along the heading."""
+        x, y, yaw = self.robot.get_pose()
+        return x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
+
+    @staticmethod
+    def funnel(gates, xy, target):
+        """(`target`, or a point on the axis of the doorway just ahead; whether
+        the dog is within DOOR_NEAR of that doorway). See FUNNEL_D."""
+        for entry, exit_, (ux, uy) in gates:
+            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if s > depth + FUNNEL_PAST:
+                continue                          # through this one already
+            if s < -FUNNEL_D:
+                break                             # not there yet
+            # Not a door the dog is walking past on its way somewhere else:
+            # only when it is within a funnel's width of the axis.
+            lateral = (xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux
+            if abs(lateral) > FUNNEL_D:
+                break
+            ahead = min(s + FUNNEL_LEAD, depth + FUNNEL_PAST)
+            return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
+        return target, False
+
+    def wall_faces(self, floor):
+        """(distance field, res, ox, oy): metres to the nearest real wall face.
+
+        Not the clearance field, which is measured from the planner's inflated
+        walls and so reads 0 everywhere within 0.25 m of one -- the person's
+        shoulder lives in exactly that band, and there a turn that grazes the
+        wall and one that swings them into it look the same.
+        """
+        if floor not in self.faces:
+            from scipy import ndimage
+            occ, res, ox, oy = build_scene.wall_grid(floor)
+            occ = occ.copy()
+            H, W = occ.shape
+            for x0, x1, y0, y1 in lift.SHAFT_WALLS.values():
+                occ[max(int(H - 1 - (y1 - oy) / res), 0):int(H - 1 - (y0 - oy) / res) + 1,
+                    max(int((x0 - ox) / res), 0):int((x1 - ox) / res) + 1] = True
+            self.faces[floor] = (ndimage.distance_transform_edt(~occ) * res, res, ox, oy)
+        return self.faces[floor]
+
+    def handler_room(self, live, x, y, yaw):
+        """What the dog can know of the room around the person, for a dog pose:
+        walls from the map, crates from the LiDAR's standing field."""
+        px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
+        dist, res, ox, oy = self.wall_faces(live.floor)
+        r, c = int(dist.shape[0] - 1 - (py - oy) / res), int((px - ox) / res)
+        wall = float(dist[r, c]) if 0 <= r < dist.shape[0] and 0 <= c < dist.shape[1] else 0.0
+        return min(wall, live.detected_at(px, py))
+
+    def swing(self, live, pose, cmd, dt=0.1):
+        """Roll `cmd` forward SWING_T: (least room around the person, whether
+        the dog itself stays clear)."""
+        x, y, yaw = pose
+        vx, _, w = cmd
+        worst, clear = INF, True
+        for _ in range(int(round(SWING_T / dt))):
+            yaw += w * dt
+            x += vx * math.cos(yaw) * dt
+            y += vx * math.sin(yaw) * dt
+            worst = min(worst, self.handler_room(live, x, y, yaw))
+            clear = clear and live(x, y) >= ROBOT_R
+        return worst, clear
+
+    def spare_handler(self, live, pose, cmd, limit):
+        """`cmd`, with its turn eased where it would swing the person into
+        something. See HANDLER_ROOM. `limit` is the speed every other rule
+        has already allowed; easing never walks faster than it."""
+        now = self.handler_room(live, *pose)
+        worst, _ = self.swing(live, pose, cmd)
+        if worst >= HANDLER_ROOM or worst >= now:
+            return cmd
+        vx, vy, w = cmd
+        v = max(vx, min(SWING_V, limit))
+        best = None
+        for f in SWING_EASE:
+            alt = (v, vy, w * f)
+            room, clear = self.swing(live, pose, alt)
+            if not clear:
+                continue
+            if room >= HANDLER_ROOM or room >= now:
+                best = (room, alt)
+                break
+            if best is None or room > best[0]:
+                best = (room, alt)
+        if best is None or best[0] <= worst:
+            return cmd
+        self.obs["eased"] += 1
+        return best[1]
+
+    def score_handler(self, floor):
+        """Ground truth for the person: is their body touching anything?
+
+        They are not in the MuJoCo scene, so this asks the scene with rays: a
+        ring of HANDLER_RAYS at each of HANDLER_H, and a hit within HANDLER_R
+        of their centre is a touch. A ray starting inside a solid box sees
+        nothing of it, so one more straight down from above the crates: landing
+        on something before the floor means they are standing in it. Scoring
+        only, like score_collision.
+        """
+        import mujoco
+        m, d = self.robot.model, self.robot.data
+        px, py = self.handler_at()
+        z0 = levels.floor_z(floor)
+        gid = np.zeros(1, np.int32)
+        touched = set()
+
+        def ray(p, v, reach):
+            dist = mujoco.mj_ray(m, d, np.array(p, float), np.array(v, float),
+                                 None, 1, -1, gid)
+            if 0 <= dist <= reach and int(gid[0]) in self.touchable:
+                touched.add(self.touchable[int(gid[0])])
+
+        for h in HANDLER_H:
+            for k in range(HANDLER_RAYS):
+                a = 2 * math.pi * k / HANDLER_RAYS
+                ray((px, py, z0 + h), (math.cos(a), math.sin(a), 0.0), HANDLER_R)
+        ray((px, py, z0 + 1.5), (0.0, 0.0, -1.0), 1.45)
+        if touched:
+            self.handler_hits["ticks"] += 1
+            self.handler_hits["boxes"].update(f"floor {floor} {what}" for what in touched)
 
     # -- the crowd ------------------------------------------------------
     def place_crowd(self):
@@ -730,6 +962,7 @@ class Run:
                 return held
             if self.held_still >= PATIENCE * FPS:
                 self.say("They have stopped. I will go around them.")
+                self.passing = (held.x, held.y)
                 self.waiting_for, self.waited, self.held_still = None, 0, 0
                 return None
 
@@ -774,6 +1007,7 @@ class Run:
         if self.pending is not None:
             self.pending = None
             self.vlm["dropped"] += 1
+        self.passing = None
         if not waypoints:
             # Asked for where it already is. A* has no checkpoints to give for
             # a route of zero length, and every line below indexes into them --
@@ -784,6 +1018,7 @@ class Run:
             return True, 0
         i = 1 if len(waypoints) > 1 else 0
         said = set()
+        gates = self.router.gates(floor, waypoints)
         # `proposed` is what VAMOS last offered and the gate let through;
         # `chosen` is what steers -- the same thing under --vamos, never
         # anything under --shadow.
@@ -832,6 +1067,7 @@ class Run:
             live.exclude([(t.x, t.y, t.r) for t in walking])
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
+            self.score_handler(floor)
             self.score_people(floor, x, y)
 
             # Picked from the body, projected from the lens -- see
@@ -875,8 +1111,33 @@ class Run:
                     if q is not None and line_clear((x, y), q, live.static_at, ROBOT_R):
                         probe = q
                         break
-                aim, offset = free_destination(state["destination"], (x, y), live,
-                                               probe=probe, prefer=lean)
+                # And not across a corner either. The destination is 2-4 m along
+                # the route, so near a turn it is round the corner, and the
+                # straight line to it cuts across whatever the route goes past.
+                # `chemistry lab` turns into a south door 1.2 m after the
+                # cartons: the line from the lane to the far side of the turn
+                # crossed them, avoidance sent the dog round their east end,
+                # and it pivoted beside them with its body in them. If the
+                # route itself -- the dog to the corner, the corner to the
+                # destination -- is clear of everything the LiDAR has found,
+                # there is nothing to go round: follow it.
+                #
+                # Round a person who has stopped, the room is a person's, not a
+                # crate's. Where there is not that much, the crate's will do --
+                # slowly, below -- rather than no way past at all.
+                need = PASS_NEED if self.passing else perception.DESTINATION_CLEAR
+                dest, corner = state["destination"], waypoints[i]
+                around = (math.dist((x, y), corner) + math.dist(corner, dest)
+                          > math.dist((x, y), dest) + 0.1)
+                if (around and line_clear((x, y), corner, live.detected_at, need)
+                        and line_clear(corner, dest, live.detected_at, need, skip=0.0)):
+                    aim, offset = dest, 0.0
+                else:
+                    aim, offset = free_destination(dest, (x, y), live, probe=probe,
+                                                   prefer=lean, need=need)
+                    if aim is None and self.passing:
+                        aim, offset = free_destination(dest, (x, y), live,
+                                                       probe=probe, prefer=lean)
                 # Which way round it went, kept until the thing is out of
                 # sight: a detour that changes its mind halfway is a swerve,
                 # and the announcement below has already told the person which
@@ -952,6 +1213,9 @@ class Run:
                 tx, ty = aim
             else:
                 tx, ty = waypoints[i]
+            at_door = False
+            if not offset:
+                (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
             if asked and self.shadow:
                 self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
 
@@ -1044,6 +1308,14 @@ class Run:
                         return False, n
                 else:
                     stalled, halted = 0, False
+            if self.passing is not None:
+                # Walking past somebody, not striding: the person on the handle
+                # passes them at the same distance a moment later.
+                px, py = self.passing
+                if math.dist((x, y), (px, py)) < PASS_R:
+                    speed = min(speed, PASS_V)
+                elif (px - x) * math.cos(yaw) + (py - y) * math.sin(yaw) < 0:
+                    self.passing = None          # behind the dog, and clear
             if person is not None:
                 # Waiting is not being stuck, and the give-up timer must not
                 # think it is. Without this the dog announces that it cannot
@@ -1061,7 +1333,10 @@ class Run:
                         self.say("They are not moving. Going slowly.")
                     speed *= CRAWL
 
-            cmd = (0.0 if abs(err) > TURN_ONLY else speed * math.cos(err), 0.0, K_W * err)
+            turn_only = DOOR_ERR if at_door else TURN_ONLY
+            cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
+            if speed > 0.0:
+                cmd = self.spare_handler(live, (x, y, yaw), cmd, speed)
             self.commands.update(struct.pack("3d", *cmd))
             self.n_commands += 1
             self.robot.set_velocity(*cmd)
@@ -1312,9 +1587,16 @@ def main():
           f"least clearance ahead {o['min_clear']:.2f} m")
     # Ground truth, and the only line here the robot cannot flatter itself on.
     if h["ticks"]:
-        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s inside {', '.join(sorted(h['boxes']))}")
+        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s touching {', '.join(sorted(h['boxes']))}")
     else:
-        print("collisions: none -- the dog never entered an obstacle's footprint")
+        print("collisions: none -- no part of the dog touched a wall or an obstacle")
+    hh = run.handler_hits
+    if hh["ticks"]:
+        print(f"HANDLER: {hh['ticks'] / FPS:.1f}s with the person on the handle touching "
+              f"{', '.join(sorted(hh['boxes']))}")
+    else:
+        print("handler: none -- the person on the handle never touched a wall or an obstacle")
+    print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
     # Also when there are none: a yield in an empty building is a false
     # positive, and it should be as visible as a collision is.
     if args.pedestrians or run.ped["yields"]:

@@ -17,6 +17,23 @@ map:
   # inflation leaves ~0.55 m of them, so the remainder must stay under ~0.25 m.
   grid_inflation: 0.25      # meters
 
+  # Which side of a corridor routes keep to, and how far the dog's centre
+  # stays from that wall's face. Right, as pedestrians do in Denmark. The
+  # person follows behind on the handle and is the wider of the two (~0.5 m
+  # against the Go2's 0.38 m), and on a left turn out of the lane they swing
+  # ~0.35 m towards this wall (turn_radius below). So: their half-width
+  # 0.25 + that swing + a margin. At 0.6 they brushed the wall at every door
+  # across the corridor. Where a corridor is too narrow, the route takes the
+  # middle. side: right | left | none (A*'s shortest line). See mapping/lane.py.
+  lane:
+    side: right
+    wall_distance: 0.75     # meters, dog centre to wall face
+    max_corridor: 3.5       # meters wall to wall; anything wider is a room or lobby, no lane
+    # Corners are walked as arcs of this radius where they fit. The person on
+    # the rigid handle swings outside a turn by sqrt(r^2 + 1.1^2) - r: 1.1 m
+    # for a pivot, 0.3 m at 1.7 m. 0 keeps the sharp corners.
+    turn_radius: 1.5        # meters
+
   # Ground plane extraction
   ground_z_min: -0.3        # meters, points below this are ground
   ground_z_max: 0.1         # meters, points above this are obstacles

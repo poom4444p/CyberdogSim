@@ -469,9 +469,60 @@ to be binding.
   it is now, so a path that has run into something since is rejected on
   arrival. Runs print `VLM ASYNC:` with how old the answers were and how far
   the dog had moved. The `--vamos` results above predate this.
-- The collision counter is a **point test** on the dog's centre, not its body, so
-  it scores a graze as clean. Margins in the passing runs were around 0.1 m of
-  actual trunk clearance.
+- **Collisions are whole-body, and routes keep right.** `COLLISIONS:` is
+  MuJoCo's contacts between the whole Go2 body and the walls, crates, lift and
+  stairs. It used to be a point test on the dog's centre against the crates
+  only, which hid the dog scraping the south corridor wall on `restroom`,
+  `room 101` and `room 201` for up to 13 s. A\*'s shortest line ran along the
+  edge of the free space, 0.25 m from the wall face. Three fixes, and all 8
+  routes are now clean:
+  - Routes keep to the right-hand side of corridors, 0.75 m from the wall, as
+    pedestrians do in Denmark (`lane` in `config/map_config.yaml`,
+    `mapping/lane.py`). Rooms and lobbies have no lane.
+  - Line simplification and checkpoint extraction never replace a stretch of
+    route with a straight line that leaves free space. The dropped doorway
+    point was cutting `room 101`'s door frame.
+  - Avoidance follows the route round a corner when the route itself is
+    clear, instead of detouring from a straight line that cuts across an
+    obstacle. That line walked `chemistry lab` into the cartons once it kept
+    right.
+- **The person on the handle is scored.** They are modelled 1.1 m straight
+  behind the dog on a rigid handle, with a 0.25 m radius. `HANDLER:` reports
+  their contact with walls, crates, lift and stairs. On a turn of radius r
+  they swing √(r² + 1.1²) − r outside the dog's path, so a sharp corner puts
+  them into whatever is beside it. Contact started on 7 of 8 routes and is now
+  down to 2, both small:
+  - `cafeteria`, 0.5 s: turning left straight out of the main entrance door
+    swings them into the lift entrance, 1.6 m away.
+  - `electrical engineering lab`, 0.1 s: turning into the north door brings
+    them to within about 1 cm of the floor-2 crate's corner.
+
+  What fixed the rest: the dog follows the whole route, not only its
+  announcement checkpoints (these skipped the lane's bends). Corners are
+  arcs of up to 1.5 m radius (`lane.turn_radius`). The lane is 0.75 m from
+  the wall, to leave room for the swing. Legs to and from the lift start at
+  the waiting point outside it. Across a lobby the route blends into the lane
+  instead of making an S-bend. The self-test reports person contact without
+  failing on it.
+- **People.** Pedestrians keep right, and cross the corridor all run long,
+  from the left and the right, straight or on a slant. Before, every walker
+  became a corridor-walker after its first leg, so nobody near the dog was
+  crossing at all, and up to half came head-on down the dog's own side.
+  Someone the dog is standing in front of steps round it after 2 s
+  (`GIVE_WAY`), which ends standoffs where each waited for the other. When
+  the dog goes round someone who has stopped, it keeps 0.6 m from them, not
+  a crate's 0.35 m, and walks at 0.4 m/s.
+  It does **not** step back first: that was tried, and reversing pushes the
+  rigid handle into the person holding it.
+
+  Over 12 seeds of `room 201 --pedestrians 3`, all arrive, and 9 have no
+  contact with a pedestrian. Seeds 11 and 12 get within 0.38–0.48 m of a
+  person who is walking the same way and overtaking. People heading west keep
+  to the north lane (y = 10.40), which is also the dog's lane (y ≈ 10.10),
+  and pedestrians do not yet overtake on the left. Seed 8 gets within 0.52 m
+  while going round someone. Going round people can also bring the person on
+  the handle against a wall or crate (up to 5.8 s on seed 8; 1.4 s against
+  the cart on seed 1, the self-test's seed).
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone

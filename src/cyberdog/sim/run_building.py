@@ -361,7 +361,7 @@ class Run:
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
-                 vamos_url=None, vlm_latency=None):
+                 vamos_url=None, vlm_latency=None, vamos_sample=False):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -389,6 +389,7 @@ class Run:
         self.shadow = open(shadow, "w") if shadow else None
         self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
         self.vamos_url = vamos_url
+        self.vamos_sample = vamos_sample
         # How long a VAMOS answer takes to arrive, in seconds of sim time; None
         # is the call's own wall-clock time. See ask_vamos.
         self.vlm_latency = vlm_latency
@@ -592,7 +593,8 @@ class Run:
             live = self.clearance(floor)
             url = self.vamos_url or DEFAULT_URL
             p = VamosPolicy(self.cam, lambda x, y: live(x, y) >= ROBOT_R,
-                            dream=Dream(live, self.robot.MAX_V), url=url)
+                            dream=Dream(live, self.robot.MAX_V), url=url,
+                            sample=self.vamos_sample)
             if not p.available():
                 raise SystemExit(f"VAMOS server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first")
@@ -1479,6 +1481,10 @@ def main():
                     help="with --vamos or --shadow: seconds of sim time before a VAMOS "
                          "answer arrives; the control loop runs on meanwhile (default: "
                          "the call's measured time; fix it for repeatable runs)")
+    ap.add_argument("--vamos-sample", action="store_true",
+                    help="with --vamos or --shadow: let VAMOS sample its paths "
+                         "(temperature 1.0, different every run) instead of beam "
+                         "search, which gives the same paths for the same frame")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
     ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
@@ -1519,7 +1525,7 @@ def main():
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
-              vlm_latency=args.vlm_latency)
+              vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample)
 
     ok, halted = True, None
     try:

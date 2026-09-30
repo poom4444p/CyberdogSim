@@ -455,10 +455,15 @@ to be binding.
   nearly every candidate goes through the entrance wall, so its paths are barely
   on screen. Give it a floor-1 destination (`room 101`, `cafeteria`) to watch it
   steer down a corridor.
-- `--vamos` is **not reproducible.** The VLM server samples at `temperature=1.0`
-  and the client sends neither a temperature nor a seed, so two identical
-  commands give different paths. `--seed` pins the crowd, not the model. The two
-  `room 201` runs above differed by 2 calls and 16 candidates on the same route.
+- `--vamos` **is reproducible with `--vlm-latency` fixed.** The client asks for
+  its 5 candidates by beam search (`num_beams=5`, `temperature=0`) rather than
+  the server's default sampling at `temperature=1.0`, which gave 5 different
+  paths for the same frame on every call. Beam search gives the same 5, still
+  distinct, at the same 1.6 s. `second floor restroom --nlu --vamos
+  --pedestrians 4 --seed 2 --vlm-latency 1.8` now repeats tick for tick (same
+  `commands:` sha256). Without `--vlm-latency` an answer lands after the
+  call's measured time, which varies, so runs still drift. `--vamos-sample`
+  goes back to sampling.
 - **VAMOS answers arrive late, and the loop does not wait for them.** A call
   takes about 1.8 s against the real server. It used to block the control loop
   while the twin paused the world, which hid that a real dog would walk on

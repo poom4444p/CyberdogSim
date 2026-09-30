@@ -71,13 +71,23 @@ class VamosPolicy:
     """Asks the VLM for paths, scores them, returns the winner in map frame."""
 
     def __init__(self, cam, is_free, dream=None, url=DEFAULT_URL, num_samples=5,
-                 timeout=120):
+                 timeout=120, sample=False):
         self.cam = cam
         self.is_free = is_free          # (x, y) -> bool, stands in for the affordance MLP
         self.dream = dream              # dreaming.Dream, or None for geometry only
         self.url = url
         self.num_samples = num_samples
         self.timeout = timeout
+        # Beam search unless asked to sample. The server's default is
+        # temperature 1.0 with no seed, so the same frame gave five different
+        # paths every call and no two --vamos runs of one route were alike --
+        # the same command brushed a wall on one run and not the next, and a
+        # paired A/B (Gate D) compared noise. num_beams=num_samples at
+        # temperature 0 returns the five most likely paths, the same five
+        # every time, still distinct, at the same 1.6 s (measured, room 201
+        # from the floor-2 lift). Plain temperature 0 is greedy and can only
+        # return one.
+        self.sample = sample
         self.last = None
         self.safety = 1.0               # factor of the path currently being followed
         # Last call's candidates, each with what became of it: (path, factor,
@@ -101,7 +111,9 @@ class VamosPolicy:
             f"{self.url}/predict",
             files={"image": ("frame.png", buf, "image/png")},
             data={"text_prompt": prompt, "num_samples": self.num_samples,
-                  "max_tokens": 20},
+                  "max_tokens": 20,
+                  **({} if self.sample else {"temperature": 0,
+                                             "num_beams": self.num_samples})},
             timeout=self.timeout)
         r.raise_for_status()
         d = r.json()

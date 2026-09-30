@@ -223,7 +223,7 @@ If a value cannot be measured, write **N/A**, never 0.
 ## Fair comparison protocol
 
 - [ ] Freeze route, pedestrian seed, scene build (`output/scene_cache/building.xml` hash), code commit, `Dream` seed, `--speed`
-- [ ] **Pin the VLM.** The VAMOS server samples at `temperature=1.0` and the client sends no seed, so `--vamos` is not reproducible today. Send `temperature=0` (or a fixed seed) before running Gate D, or run ≥ 5 repeats per pair and report the spread
+- [x] **Pin the VLM.** The client asks for its candidates by beam search (`num_beams=5`, `temperature=0`), so the same frame gives the same 5 paths. Run both arms with a fixed `--vlm-latency` (e.g. 1.8): with it, a `--vamos` run repeats tick for tick; without it, answers land after the measured call time and runs drift. Do not pass `--vamos-sample` in a campaign
 - [ ] Several seeds per route; report mean + dispersion or 95% CI
 - [ ] A run that times out or is stopped by hand is **incomplete** — neither an arrival nor a clean run
 - [ ] The trained parser in `models/lora/` is read-only during a campaign; experiments write under `output/`

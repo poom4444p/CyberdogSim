@@ -533,29 +533,39 @@ to be binding.
   It does **not** step back first: that was tried, and reversing pushes the
   rigid handle into the person holding it.
 
-  Over 20 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
-  nothing. The person on the handle touches something on 3 (seed 10, 0.5 s
-  against a wall; 11, 1.2 s against the cart; 18, 2.1 s against the crate),
-  down from up to 5.8 s on seed 8 before turns were eased. 8 seeds come
-  within 0.55 m of a pedestrian, 8.4 s in all (closest 0.33 m, seed 16).
-  Two things brought that down from 12.6 s:
-  - Easing a turn keeps walking where the dog would have pivoted, and on
-    seeds 4 and 12 that walked it towards somebody standing beside it. A step
-    easing adds must now keep 0.7 m from where each person-sized track is
-    heading (`SWING_PEOPLE`), or the turn goes ahead as commanded.
-  - `free_destination` could put the avoidance goal on the far side of a
-    wall: a point shifted 1.6 m sideways out of the corridor is open floor
-    in the room behind it, and the line to it was only checked against what
-    the LiDAR found. Seed 8 aimed 1.2 m past the floor-2 north wall and
-    walked into it for 6.5 s. Lines to candidate goals may no longer enter a
-    wall -- tested against the real wall faces (`clearance.wall_face_field`),
-    because in a doorway the inflated walls cover nearly the whole opening.
+  Over 40 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
+  nothing. The person on the handle touches something on 6 (5.8 s in all,
+  every one a wall -- never a box), and 7 seeds come within 0.55 m of a
+  pedestrian (8.5 s in all). Before the fixes below: 7 seeds and
+  7.5 s on the handle, 5 of them against the cart or crate, and 13 seeds and
+  18.3 s of pedestrian contact.
+  - **Easing a turn keeps clear of people** (`SWING_PEOPLE`). It walks on
+    where the dog would have pivoted, and on seeds 4 and 12 that walked it
+    towards somebody standing beside it. A step easing adds keeps 0.7 m from
+    where each person-sized track is heading, or the turn goes ahead.
+  - **No avoidance goal behind a wall.** A point shifted 1.6 m sideways out
+    of the corridor is open floor in the room behind it, and the line to it
+    was only checked against what the LiDAR found; seed 8 walked into the
+    floor-2 north wall for 6.5 s. Lines may no longer enter a wall, tested
+    against the real wall faces (`clearance.wall_face_field`).
+  - **Straight past a box leaves room for the person** (`PERSON_LINE`). The
+    dog passed the floor-2 cart and crate 0.23 m clear, enough for itself;
+    the person follows the same line 1.1 m behind and is 0.25 m across the
+    shoulders. A line now counts as clear, no detour needed, only with 0.35 m
+    to spare; with less, the dog leans away. Rounding a corner still needs
+    only the dog's 0.20 m (`LINE_NEED`).
+  - **The front of the dog is guarded** (`NOSE_MIN`, `SWING_NOSE`). The
+    proximity stop reads the centre, and the Go2 is twice as long as it is
+    wide: seed 8 kept 0.25 m at the centre and put a front leg on the cart's
+    corner. Walking on is refused while either front corner is within 0.15 m
+    of something and closing -- the dog turns first -- both in the command
+    and in an eased one.
 
-  What is left is not easing: people walking into a dog that is standing
-  and waiting (seed 8), going round somebody who has stopped (10), and
-  overtaking in the same lane (11) -- people heading west keep to the north
-  lane (y = 10.40), which is also the dog's lane (y ≈ 10.10), and
-  pedestrians do not yet overtake on the left.
+  What is left is not boxes: people walking into a dog that is standing and
+  waiting, going round somebody who has stopped, overtaking in the same
+  lane -- people heading west keep to the north lane (y = 10.40), which is
+  also the dog's lane (y ≈ 10.10), and pedestrians do not yet overtake on
+  the left -- and the person against a wall on a turn round somebody.
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone

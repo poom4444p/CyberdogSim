@@ -166,6 +166,19 @@ HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
 SWING_T = 0.8             # seconds a command is rolled forward over
 SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
 SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+SWING_NOSE = 0.30         # metres ahead of the dog's centre its front legs reach.
+                          # An eased command walks on while the turn waits, so
+                          # the front of the body has to stay clear too, not
+                          # only the centre: seed 8 of room 201 --pedestrians 3
+                          # kept 0.18 m at the centre and put its front legs on
+                          # the floor-2 cart's corner.
+NOSE_MIN = 0.15           # metres from the dog's front (SWING_NOSE ahead) to
+                          # anything the LiDAR found, below which it turns
+                          # before it walks on. The proximity stop reads the
+                          # centre, and the Go2 is twice as long as it is wide:
+                          # seed 8 again, centre 0.25 m clear of the cart, front
+                          # 0.10 m, walking on at 0.6 m/s while turning.
+NOSE_HALF_W = 0.15        # metres either side of the centreline, the front legs
 SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
 
@@ -821,6 +834,27 @@ class Run:
         px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
         return min(live.wall_at(px, py), live.detected_at(px, py))
 
+    @staticmethod
+    def nose_closing(live, pose, cmd, dt=0.1):
+        """Is a front corner of the dog within NOSE_MIN of something, and would
+        this command bring that corner closer still? Walking away is fine.
+
+        Corners, not the middle of the front: turning away from a crate swings
+        the middle clear while the corner on the crate's side is still closing
+        -- seed 8's front-left leg, on the cart, with the dog turning right."""
+        def corners(x, y, yaw):
+            fx, fy = x + SWING_NOSE * math.cos(yaw), y + SWING_NOSE * math.sin(yaw)
+            return [live.detected_at(fx + side * -math.sin(yaw), fy + side * math.cos(yaw))
+                    for side in (-NOSE_HALF_W, 0.0, NOSE_HALF_W)]
+        x, y, yaw = pose
+        now = corners(x, y, yaw)
+        if min(now) >= NOSE_MIN:
+            return False
+        yaw += cmd[2] * dt
+        x += cmd[0] * math.cos(yaw) * dt
+        y += cmd[0] * math.sin(yaw) * dt
+        return any(a < NOSE_MIN and b < a for a, b in zip(now, corners(x, y, yaw)))
+
     def swing(self, live, pose, cmd, people=(), dt=0.1):
         """Roll `cmd` forward SWING_T: (least room around the person, whether
         the dog itself stays clear -- of everything by ROBOT_R, and of where
@@ -834,6 +868,8 @@ class Run:
             y += vx * math.sin(yaw) * dt
             worst = min(worst, self.handler_room(live, x, y, yaw))
             clear = (clear and live(x, y) >= ROBOT_R
+                     and live.detected_at(x + SWING_NOSE * math.cos(yaw),
+                                          y + SWING_NOSE * math.sin(yaw)) >= ROBOT_R
                      and all(math.dist((x, y), p.predict(k * dt)) >= SWING_PEOPLE
                              for p in people))
         return worst, clear
@@ -1362,6 +1398,8 @@ class Run:
 
             turn_only = DOOR_ERR if at_door else TURN_ONLY
             cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
+            if cmd[0] > 0.0 and self.nose_closing(live, (x, y, yaw), cmd):
+                cmd = (0.0, 0.0, cmd[2])
             if speed > 0.0:
                 people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
                 cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)

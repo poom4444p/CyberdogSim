@@ -148,9 +148,11 @@ for s in $(seq 1 20); do
 done
 ```
 
-A seed that prints nothing arrived clean. Measured at commit `859bbf5`: all 20
-arrive with no dog collisions, 3 have handler contact, 8 have pedestrian
-contact (8.4 s in total).
+A seed that prints nothing arrived clean. Use more seeds than you think: on
+20, one change looked like a regression that 40 showed was one seed. Change
+`seq 1 20` to `seq 1 40` above. Measured over 40 seeds after the box-pinch
+fixes: all arrive, no dog collisions, 6 seeds with handle contact (5.8 s, all
+walls), 7 with pedestrian contact (8.5 s).
 
 ### With VAMOS
 

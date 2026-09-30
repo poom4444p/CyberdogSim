@@ -65,6 +65,14 @@ LINE_NEED = 0.20        # ...and the room the way there merely has to survive.
                         # Above ROBOT_R (0.16) so it is still a margin, but not
                         # so far above that rounding an obstacle's corner --
                         # which is the whole manoeuvre -- reads as impossible.
+PERSON_LINE = 0.35      # ...and the room a line must keep to count as clear
+                        # with no detour at all. The person on the handle
+                        # walks the same line 1.1 m behind and is 0.25 m
+                        # across the shoulders: a straight pass at LINE_NEED
+                        # put them 2-3 cm into the floor-2 cart and crate
+                        # (room 201 --pedestrians 3, seeds 11 and 18, and the
+                        # Gate D pair that failed D2). Rounding a corner still
+                        # needs only LINE_NEED; walking straight past does not.
 CLUSTER_PAD = 0.25      # margin around a moving thing when taking it out of
                         # the planning field: its track is a centroid and a
                         # radius, and the returns off a coat sleeve are a
@@ -407,7 +415,11 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         a wall on every line into the room and stopped there."""
         return line_clear(a, b, live.wall_at, 1e-6, skip=skip)
 
-    if reachable(far) and reachable(goal):
+    def roomy(p):
+        """Room for the person on the handle, too -- see PERSON_LINE."""
+        return line_clear(xy, p, live.detected_at, PERSON_LINE)
+
+    if reachable(far) and reachable(goal) and roomy(far) and roomy(goal):
         return destination, 0.0
 
     dx, dy = far[0] - xy[0], far[1] - xy[1]

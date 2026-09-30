@@ -7,6 +7,7 @@ same crowd. Then D1-D8, each arm summed over all pairs.
     python scripts/gate_d.py                    # 7 routes x seeds 1 2 3
     python scripts/gate_d.py --seeds 1 2 3 4 5
     python scripts/gate_d.py --routes "room 101" cafeteria --seeds 1
+    python scripts/gate_d.py --resume output/gate_d/<time>   # finish one that stopped
 
 Needs the building scene and, for the candidate arm, the VAMOS server (main
 README, step 6). Every run's full output is kept under output/gate_d/<time>/,
@@ -27,7 +28,8 @@ import statistics
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
+from pathlib import Path
 
 import requests
 
@@ -127,6 +129,13 @@ def parse(out):
     }
 
 
+def usable(r):
+    """A run worth keeping on --resume: it reported everything, and a
+    candidate run really had VAMOS answering the whole way through."""
+    return (not r["missing"] and r["exit"] == 0
+            and (r["arm"] == "map" or (r["vamos_calls"] and not r["vamos_failed"])))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--routes", nargs="+", default=ROUTES)
@@ -136,7 +145,19 @@ def main():
     # One: the server answers one request at a time anyway, and at two
     # (5-beam search on MPS) it died a third of the way through a campaign.
     ap.add_argument("--vamos-jobs", type=int, default=1, help="--vamos runs at a time")
+    # The server has died part-way through three campaigns, after 6-21
+    # candidate runs. Resuming keeps every run that finished cleanly and
+    # drives only the rest, into the same directory.
+    ap.add_argument("--resume", metavar="DIR",
+                    help="finish the campaign in DIR (an output/gate_d/<time> directory): "
+                         "reuse its complete runs, redo the rest; routes and seeds come from it")
     args = ap.parse_args()
+
+    kept = {}
+    if args.resume:
+        prev = json.loads((Path(args.resume) / "summary.json").read_text())
+        args.routes, args.seeds = prev["routes"], prev["seeds"]
+        kept = {(r["arm"], r["route"], r["seed"]): r for r in prev["runs"] if usable(r)}
 
     if not server_up(args.vamos_url):
         raise SystemExit(f"VAMOS server is not answering on {args.vamos_url} -- "
@@ -145,18 +166,31 @@ def main():
         raise SystemExit("no building scene yet -- run: "
                          "python -m cyberdog.sim.scene.build_scene --building")
 
-    log_dir = paths.OUTPUT_DIR / "gate_d" / time.strftime("%Y%m%d-%H%M%S")
+    log_dir = (Path(args.resume) if args.resume
+               else paths.OUTPUT_DIR / "gate_d" / time.strftime("%Y%m%d-%H%M%S"))
     log_dir.mkdir(parents=True, exist_ok=True)
     floors = {r: intended_floor(r) for r in args.routes}
     pairs = [(r, s) for r in args.routes for s in args.seeds]
     print(f"Gate D: {len(args.routes)} routes x seeds {args.seeds} = {len(pairs)} pairs, "
           f"{2 * len(pairs)} runs; logs in {log_dir}")
+    if args.resume:
+        print(f"resuming: {len(kept)} complete runs kept, "
+              f"{2 * len(pairs) - len(kept)} to drive")
+
+    def job(pool, k, vamos):
+        """The kept result, if this run finished cleanly last time; else drive it."""
+        prev = kept.get(("vamos" if vamos else "map", *k))
+        if prev is not None:
+            f = Future()
+            f.set_result(prev)
+            return f
+        return pool.submit(drive, *k, vamos, args.vamos_url, log_dir)
 
     t0 = time.time()
     with ThreadPoolExecutor(args.jobs) as base_pool, \
             ThreadPoolExecutor(args.vamos_jobs) as cand_pool:
-        base = {k: base_pool.submit(drive, *k, False, args.vamos_url, log_dir) for k in pairs}
-        cand = {k: cand_pool.submit(drive, *k, True, args.vamos_url, log_dir) for k in pairs}
+        base = {k: job(base_pool, k, False) for k in pairs}
+        cand = {k: job(cand_pool, k, True) for k in pairs}
         done = 0
         for k in pairs:
             for arm, fut in (("map", base[k]), ("vamos", cand[k])):
@@ -194,7 +228,8 @@ def main():
     down = sum("server down" in cand[k]["missing"] for k in pairs)
     if down:
         print(f"VAMOS server went down: {down} candidate runs not driven. "
-              f"Gate D below is INCOMPLETE -- restart the server and run again.\n")
+              f"Gate D below is INCOMPLETE -- restart the server, then finish it with:\n"
+              f"    python scripts/gate_d.py --resume {log_dir}\n")
     missing = sum(bool(r["missing"]) for r in list(base.values()) + list(cand.values()))
     # A candidate run whose VAMOS calls all failed drove on the map alone, and
     # would pass Gate D by being the baseline. Counted as missing data.

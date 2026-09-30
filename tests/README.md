@@ -178,7 +178,14 @@ crowd), scored on D1–D8. Start the VAMOS server first, then:
 python scripts/gate_d.py                                   # 7 routes x seeds 1 2 3 = 42 runs, ~20 min
 python scripts/gate_d.py --seeds 1 2 3 4 5                 # more seeds
 python scripts/gate_d.py --routes "room 101" --seeds 1     # one pair, a quick check
+python scripts/gate_d.py --resume output/gate_d/<time>     # finish a campaign that stopped
 ```
+
+The VAMOS server has died part-way through long campaigns (after 6–21
+candidate runs). When that happens the script says so and prints the
+`--resume` command: restart the server and run it. It keeps every run that
+finished cleanly (a candidate run only if VAMOS answered every call) and
+drives the rest into the same directory, with the same routes and seeds.
 
 It prints one line per run as it finishes, then the D1–D8 table and
 `Gate D: PASS` or `FAIL` (exit code 0 or 1). Every run's full output is kept

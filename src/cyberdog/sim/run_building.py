@@ -180,6 +180,13 @@ SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
 FUNNEL_D = 2.0            # metres before a doorway the funnel takes over
 FUNNEL_LEAD = 0.8         # metres ahead on the axis it steers at
 FUNNEL_PAST = 0.4         # metres beyond the doorway's far side it lets go
+DOOR_MAP_D = 4.0          # metres from a doorway on the route inside which the
+                          # map's route steers, not a VAMOS path. The route
+                          # starts crossing the corridor for a door about this
+                          # far out; a VAMOS path kept the dog in its lane past
+                          # that point, left a sharp turn at the door, and the
+                          # turn-easing for the person on the handle made it
+                          # overshoot: chemistry lab, +14 s over map-only.
 DOOR_NEAR = 1.0           # metres before a doorway where it lines up before walking:
 DOOR_ERR = 0.25           # rad of heading error it will walk with there, against
                           # TURN_ONLY's 0.8 anywhere else. Walking while turning
@@ -774,6 +781,16 @@ class Run:
         return x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
 
     @staticmethod
+    def door_near(gates, xy, reach):
+        """Is a doorway on the route, not yet walked through, within `reach`?"""
+        for entry, exit_, (ux, uy) in gates:
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy > depth + FUNNEL_PAST:
+                continue                          # through this one already
+            return math.dist(xy, entry) < reach
+        return False
+
+    @staticmethod
     def funnel(gates, xy, target):
         """(`target`, or a point on the axis of the doorway just ahead; whether
         the dog is within DOOR_NEAR of that doorway). See FUNNEL_D."""
@@ -1078,6 +1095,7 @@ class Run:
             # crate is five candidate paths into the crate -- measured, before
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
+            no_way = False            # the map has a route destination and no clear aim
             # Whenever the route has a destination -- not only when the camera
             # can see it. This used to read `if state["state"] == "TRACK"`, and
             # that is a camera test standing in for a safety one: ALIGN means
@@ -1145,6 +1163,7 @@ class Run:
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
                 no_goal = no_goal + 1 if aim is None else 0
+                no_way = aim is None
                 blocked = no_goal >= BLOCKED_TICKS
                 # Re-aiming the VLM is still a TRACK-only affair: a goal pixel
                 # is what VAMOS consumes, and during an alignment turn there is
@@ -1198,7 +1217,8 @@ class Run:
             # of walking later, and a path walked to its end is spent, not a
             # reason to turn round for its first point.
             rest = ahead(chosen, (x, y)) if chosen else []
-            on_vamos = len(rest) >= 2 and state["state"] == "TRACK" and not offset
+            on_vamos = (len(rest) >= 2 and state["state"] == "TRACK" and not offset
+                        and not self.door_near(gates, (x, y), DOOR_MAP_D))
             if on_vamos:
                 tx, ty = path_target(rest, (x, y))
             elif offset:
@@ -1221,9 +1241,17 @@ class Run:
             self.obs["min_clear"] = min(self.obs["min_clear"],
                                         self.clear_ahead(live, (x, y), (tx, ty)))
             # Stepping round something is not being stuck: only count it as
-            # searching when there is no detour to follow either.
+            # searching when there is no detour to follow either -- and no
+            # clear way on the route itself. This used to crawl whenever VAMOS
+            # had nothing and the LiDAR saw anything at all, a crate 8 m off or
+            # somebody at the far end of the corridor, while free_destination
+            # had already found the route clear and the map-only dog walked it
+            # at full pace. Gate D, 21 pairs: 266.7 s of crawling under
+            # --vamos against 0.0 s map-only, and the candidate slower on every
+            # pair (chemistry lab +33 s). VAMOS offering nothing is not a
+            # reason to slow down; the map having no way past is.
             searching = (self.vamos and chosen is None and not offset
-                         and len(live.points) > 0)
+                         and len(live.points) > 0 and no_way)
             touching = live.detected_at(x, y) < ROBOT_R
 
             err = wrap(math.atan2(ty - y, tx - x) - yaw)

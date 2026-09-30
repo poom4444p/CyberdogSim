@@ -179,6 +179,11 @@ NOSE_MIN = 0.15           # metres from the dog's front (SWING_NOSE ahead) to
                           # seed 8 again, centre 0.25 m clear of the cart, front
                           # 0.10 m, walking on at 0.6 m/s while turning.
 NOSE_HALF_W = 0.15        # metres either side of the centreline, the front legs
+UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for somebody,
+                          # and only to take the person on the handle off a wall.
+                          # Frozen mid-pivot to wait, the dog held its user 8 cm
+                          # into the floor-3 north wall for 7 s (Gate D, chemistry
+                          # lab seed 9, --vamos): 7.5 of the arm's 11.2 s of D2.
 SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
 
@@ -834,6 +839,22 @@ class Run:
         px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
         return min(live.wall_at(px, py), live.detected_at(px, py))
 
+    def unpin(self, live, pose, dt=0.3):
+        """Yaw rate while standing still for somebody: 0, unless the person on
+        the handle is within HANDLER_ROOM of something and turning slowly one
+        way gives them more room. Waiting is not turning (see the person
+        branch), except to stop pressing someone into a wall."""
+        x, y, yaw = pose
+        now = self.handler_room(live, x, y, yaw)
+        if now >= HANDLER_ROOM:
+            return 0.0
+        best, w_best = now + 0.02, 0.0
+        for w in (UNPIN_W, -UNPIN_W):
+            room = self.handler_room(live, x, y, yaw + w * dt)
+            if room > best:
+                best, w_best = room, w
+        return w_best
+
     @staticmethod
     def nose_closing(live, pose, cmd, dt=0.1):
         """Is a front corner of the dog within NOSE_MIN of something, and would
@@ -1388,7 +1409,7 @@ class Run:
                 # somebody walking past is what a dog does and is not what a
                 # handle attached to a person's arm should do.
                 if self.waited < YIELD_MAX * FPS:
-                    speed, err = 0.0, 0.0
+                    speed, err = 0.0, self.unpin(live, (x, y, yaw)) / K_W
                 else:
                     # They are not going anywhere. Neither can the dog stand
                     # here for ever, so creep and keep asking.

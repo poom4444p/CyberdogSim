@@ -600,7 +600,9 @@ class Run:
             live = self.clearance(floor)
             url = self.vamos_url or DEFAULT_URL
             p = VamosPolicy(self.cam, lambda x, y: live(x, y) >= ROBOT_R,
-                            dream=Dream(live, self.robot.MAX_V), url=url,
+                            dream=Dream(live, self.robot.MAX_V,
+                                        person=lambda x, y, yaw: self.handler_room(
+                                            live, x, y, yaw)), url=url,
                             sample=self.vamos_sample)
             if not p.available():
                 raise SystemExit(f"VAMOS server is not answering on {url} -- "

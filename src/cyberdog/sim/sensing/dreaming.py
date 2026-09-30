@@ -70,12 +70,22 @@ FLOOR = 0.40                    # score of a run that survives but scrapes
 # still checked on every step.
 START_R = 0.5                   # metres, about a body length
 
+# The person on the handle, when the caller says where they are (`person`):
+# a rollout that brings them within PERSON_R of a surface -- they are 0.25 m
+# across the shoulders, so that is touching -- is a collision, the same as the
+# dog's own body. Without this a path could be safe for the dog and still swing
+# its user into a trolley: Gate D, `room 101` seed 1, 1.6 s against the floor-1
+# trolley on a VAMOS path the gate had passed. As with the dog's start, a person
+# who begins closer than that only counts as hit by getting closer still.
+PERSON_R = 0.25
+
 
 class Dream:
     """Imagined rollouts of one candidate path, scored for safety."""
 
-    def __init__(self, clearance, max_v, n=N_DREAMS, seed=0):
+    def __init__(self, clearance, max_v, n=N_DREAMS, seed=0, person=None):
         self.clearance = clearance          # (x, y) -> metres to the nearest no-go
+        self.person = person                # (x, y, yaw) -> room around the person
         self.max_v = max_v
         self.n = n
         self.rng = random.Random(seed)      # seeded: the same frame dreams the same
@@ -124,6 +134,8 @@ class Dream:
         speed = self.max_v * (1.0 + self.rng.gauss(0.0, SPEED_SD))
         start, start_clear = (x, y), self.clearance(x, y)
         min_clear = float("inf")
+        person_floor = (min(PERSON_R, self.person(x, y, yaw)) - 1e-6
+                        if self.person else None)
 
         # Index of the point being chased. It only ever moves forward: a
         # lookahead that re-scans the whole path from the start will, once the
@@ -146,6 +158,8 @@ class Dream:
             if clear < start_clear or math.dist(start, (x, y)) >= START_R:
                 min_clear = min(min_clear, clear)
             if clear < ROBOT_R:
+                return False, min_clear, False
+            if self.person and self.person(x, y, yaw) < person_floor:
                 return False, min_clear, False
             # A walk that ends before leaving START_R without closing in has
             # nothing counted: it kept the room it started with.

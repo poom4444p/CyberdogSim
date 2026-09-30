@@ -201,6 +201,46 @@ passed. The map-only baseline is clean on all 8 routes (down from 7 of 8),
 and `selftest.py run` now fails on any contact. With pedestrians it is not
 yet zero: 2 of 12 seeds of `room 201 --pedestrians 3` (README, known limits).
 
+Run it with `python scripts/gate_d.py` (7 routes × seeds 1–3, VAMOS by beam
+search at `--vlm-latency 1.8`). Campaigns so far, 2026-09-30:
+
+| KPI | map-only | `--vamos`, first run | `--vamos`, after the fixes below | |
+|---|---|---|---|---|
+| D1 pairs complete | 21 | 21 | 21 | PASS |
+| D2 collisions + handle (s) | 0.0 | 1.7 | 0.5 | FAIL |
+| D3 pedestrian contact (s) | 2.0 | 2.8 | 2.9 | FAIL |
+| D4 stair / no-go entries | 0 | 0 | 0 | PASS |
+| D5 arrivals | 21/21 | 21/21 | 21/21 | PASS |
+| D6 mean time (s) | 53.3 | 65.8 (+23%) | 55.9 (+5%) | FAIL → PASS |
+| D8 missing / VAMOS unused | – | 0 / 0 | 0 / 0 | PASS |
+
+Logs: `output/gate_d/20260930-141041` (first) and `…-145515` (after).
+The fixes:
+
+- **No crawling because VAMOS had nothing.** The dog slowed to 30% whenever
+  no VAMOS path passed and the LiDAR saw anything, even with the route
+  clear: 266.7 s of crawling over the 21 candidate runs, 0 s map-only. It
+  now crawls only when the map has no way past either.
+- **The route steers into doors** (within 4 m, `DOOR_MAP_D`). A VAMOS path
+  kept the dog in its lane past the point the route crosses for a door, and
+  the turn left at the door overshot: chemistry lab +32 s, now +0.
+- **The dream counts the person on the handle** (`dreaming.PERSON_R`). A
+  VAMOS path that swings them into something is a colliding rollout. The
+  first run's 1.6 s against the floor-1 trolley (`room 101` seed 1) is gone.
+
+What is left is one pair each. D2: `room 201` seed 1, 0.5 s of the person
+against the floor-2 cart, squeezing past it after a pedestrian stepped into
+the gap. D3: the same run (1.5 s) and `room 101` seed 3 (1.4 s, against the
+baseline's 2.0 s on that pair). The cart-and-pedestrian pinch shows up in
+map-only runs on other seeds too, so it is a crowd problem more than a
+VAMOS one -- but the gate is candidate ≤ baseline, and it is not.
+
+The VAMOS server stopped mid-campaign twice (`gate_d.py` now detects it
+and reports the gate incomplete). With free memory down to 0.1 GB while it
+and four map-only runs share the machine, memory is the likely cause; the
+campaign that completed ran with the server's output logged, and it did not
+fail that time.
+
 - [ ] D1–D8 all pass
 - [ ] Promotion is an explicit decision; never promote from selftest alone
 

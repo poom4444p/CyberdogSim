@@ -491,19 +491,32 @@ to be binding.
   their contact with walls, crates, lift and stairs. On a turn of radius r
   they swing √(r² + 1.1²) − r outside the dog's path, so a sharp corner puts
   them into whatever is beside it. Contact started on 7 of 8 routes and is now
-  down to 2, both small:
-  - `cafeteria`, 0.5 s: turning left straight out of the main entrance door
-    swings them into the lift entrance, 1.6 m away.
-  - `electrical engineering lab`, 0.1 s: turning into the north door brings
-    them to within about 1 cm of the floor-2 crate's corner.
+  **0 of 8**, and the self-test fails on any (`person on the handle
+  untouched`).
 
-  What fixed the rest: the dog follows the whole route, not only its
-  announcement checkpoints (these skipped the lane's bends). Corners are
-  arcs of up to 1.5 m radius (`lane.turn_radius`). The lane is 0.75 m from
-  the wall, to leave room for the swing. Legs to and from the lift start at
-  the waiting point outside it. Across a lobby the route blends into the lane
-  instead of making an S-bend. The self-test reports person contact without
-  failing on it.
+  What fixed it: the dog follows the whole route, not only its announcement
+  checkpoints (these skipped the lane's bends). Corners are arcs of up to
+  1.5 m radius (`lane.turn_radius`). The lane is 0.75 m from the wall, to
+  leave room for the swing. Legs to and from the lift start at the waiting
+  point outside it. Across a lobby the route blends into the lane instead of
+  making an S-bend. Then three things in `run_building.py`:
+  - **Turns are checked for the person** (`spare_handler`). Every contact
+    left was a turn: a pivot beside the crate just gone round, a left turn
+    past the lift. Each command is rolled forward 0.8 s; where it would bring
+    the person within 0.35 m of a wall or a detected obstacle, the turn is
+    eased and the dog keeps walking, so the arc widens. Walls are measured to
+    their real faces, not the planner's inflated ones.
+  - **The lift shaft's side walls are on the map** (`lift.SHAFT_WALLS`, folded
+    into `clearance.py`). They were in the scene and not the grid, 0.5 m into
+    floor the map called open, and the LiDAR's returns off them were thrown
+    away as "already mapped".
+  - **Doors are entered on their axis** (`funnel`). From 2 m out the dog
+    steers onto the doorway's centre line, and in the last metre it lines up
+    before it walks. A dog off the route -- round a person, or on a VAMOS
+    path -- used to reach the frame 0.5 m off-centre and pivot there, which
+    swung the person into the floor-2 crate beside the restroom door.
+    Reshaping the route to meet doors square was tried and made it worse for
+    doors on the lane's own side of the corridor; the funnel alone does it.
 - **People.** Pedestrians keep right, and cross the corridor all run long,
   from the left and the right, straight or on a slant. Before, every walker
   became a corridor-walker after its first leg, so nobody near the dog was
@@ -515,14 +528,17 @@ to be binding.
   It does **not** step back first: that was tried, and reversing pushes the
   rigid handle into the person holding it.
 
-  Over 12 seeds of `room 201 --pedestrians 3`, all arrive, and 9 have no
-  contact with a pedestrian. Seeds 11 and 12 get within 0.38–0.48 m of a
-  person who is walking the same way and overtaking. People heading west keep
-  to the north lane (y = 10.40), which is also the dog's lane (y ≈ 10.10),
-  and pedestrians do not yet overtake on the left. Seed 8 gets within 0.52 m
-  while going round someone. Going round people can also bring the person on
-  the handle against a wall or crate (up to 5.8 s on seed 8; 1.4 s against
-  the cart on seed 1, the self-test's seed).
+  Over 12 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
+  nothing. The person on the handle touches something on 2 (seed 4, 0.3 s
+  against the cart; seed 10, 0.7 s against a wall), down from up to 5.8 s on
+  seed 8. **Pedestrian contact is the cost:** 5 seeds get within 0.55 m of
+  somebody (4, 8, 10, 11, 12; closest 0.35–0.45 m), against 3 before turns
+  were eased, because an eased turn keeps walking where the dog would have
+  pivoted away. Keeping 0.6 m from people while easing, or not easing near
+  them, were both tried: each put the dog itself into a wall on seed 8 for
+  6.5 s and the person back against walls on 5 seeds. People heading west
+  keep to the north lane (y = 10.40), which is also the dog's lane (y ≈
+  10.10), and pedestrians do not yet overtake on the left.
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone

@@ -195,10 +195,11 @@ map-only scraping the south wall on three routes, is fixed: routes keep
 right and no longer cut door frames, and the map-only baseline is clean on
 all 8 routes.
 
-Add to D2 before Gate D: the person on the handle (`HANDLER:`). They are
-still brushed on 2 of 8 map-only routes, down from 7 (README, known
-limits). A guide that keeps its own body clear while swinging its user into
-a door frame has not passed.
+D2 also counts the person on the handle (`HANDLER:`): a guide that keeps
+its own body clear while swinging its user into a door frame has not
+passed. The map-only baseline is clean on all 8 routes (down from 7 of 8),
+and `selftest.py run` now fails on any contact. With pedestrians it is not
+yet zero: 2 of 12 seeds of `room 201 --pedestrians 3` (README, known limits).
 
 - [ ] D1–D8 all pass
 - [ ] Promotion is an explicit decision; never promote from selftest alone

@@ -883,9 +883,13 @@ def run():
             label += f" (known limit: {expect})"
         check(f"route: {label}", got == expect,
               f"{got}" + ("" if got == expect else f", expected {expect}"))
+        # The person on the handle, who is on no map and in no scene: a route
+        # the dog clears can still swing them into a crate or a door frame.
+        # Reported only while every route still brushed them somewhere; with
+        # all of them clean it is a failure like any other contact.
         handler = next((l for l in out.splitlines() if l.startswith("HANDLER:")), None)
-        if handler:
-            print(f"  [INFO]   person on the handle: {handler[len('HANDLER: '):]}")
+        check(f"route: {label}: person on the handle untouched", handler is None,
+              handler[len("HANDLER: "):] if handler else "never touched a wall or an obstacle")
 
 
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,

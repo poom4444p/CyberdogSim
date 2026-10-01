@@ -433,7 +433,7 @@ class Run:
         # Ground truth, for scoring only -- never shown to the robot. The dog
         # finds these with the LiDAR or not at all; this is how we check.
         self.hits = {"ticks": 0, "boxes": set()}
-        self.handler_hits = {"ticks": 0, "boxes": set()}
+        self.handler_hits = {"ticks": 0, "boxes": set(), "since": None}
         self.dog_geoms, self.touchable = self.body_contacts()
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
         # People. Not in any grid either, and unlike the crates they move, so
@@ -959,6 +959,20 @@ class Run:
                 a = 2 * math.pi * k / HANDLER_RAYS
                 ray((px, py, z0 + h), (math.cos(a), math.sin(a), 0.0), HANDLER_R)
         ray((px, py, z0 + 1.5), (0.0, 0.0, -1.0), 1.45)
+        # When and where each touch starts and ends, so a total can be traced
+        # back to the moment it happened.
+        x, y, yaw = self.robot.get_pose()
+        if touched and self.handler_hits["since"] is None:
+            self.handler_hits["since"] = self.robot.sim_time
+            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch starts: dog "
+                  f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
+                  f"({px:.2f}, {py:.2f}), touching {', '.join(sorted(touched))}")
+        elif not touched and self.handler_hits["since"] is not None:
+            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch ends after "
+                  f"{self.robot.sim_time - self.handler_hits['since']:.1f}s: dog "
+                  f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
+                  f"({px:.2f}, {py:.2f})")
+            self.handler_hits["since"] = None
         if touched:
             self.handler_hits["ticks"] += 1
             self.handler_hits["boxes"].update(f"floor {floor} {what}" for what in touched)

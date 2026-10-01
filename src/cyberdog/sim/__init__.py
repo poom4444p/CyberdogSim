@@ -7,6 +7,8 @@ Shared pieces, which the entry points and each other all read:
     clearance.py   static clearance from the map (walls + no-go zones)
     overlay.py     drawing onto the camera frame
     vamos_client.py  the VLM as a service: 5 candidate paths -> 1 chosen
+    handle.py      the Smart Handle and the safety mux: the person's tug,
+                   pull and push, last before the motors
 
 Subpackages:
 

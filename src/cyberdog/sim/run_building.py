@@ -44,6 +44,7 @@ from cyberdog.planning.checkpoint_projector import (load_camera_config,
                                                     vamos_prompt)
 from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
                                   wrap)
+from cyberdog.sim.handle import HandleScript, SafetyMux
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
@@ -381,12 +382,20 @@ class HazardStop(Exception):
     """
 
 
+class HandleStop(HazardStop):
+    """A tug on the handle stopped the dog and nobody pressed continue.
+
+    Only a scripted handle can know that no continue is coming; the run ends
+    here, standing where the person stopped it, rather than at MAX_TICKS.
+    """
+
+
 class Run:
     """One drive through the building, with the video panels attached."""
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
-                 vamos_url=None, vlm_latency=None, vamos_sample=False):
+                 vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -428,6 +437,11 @@ class Run:
         self.commands = hashlib.sha256()
         self.n_commands = 0
         self.lidar = Lidar(self.robot.model, self.robot.data)
+        # The person's override, last before the motors (handle.py). With no
+        # handle the mux reads zero force every tick and passes commands on
+        # unchanged.
+        self.handle = handle or HandleScript()
+        self.mux = SafetyMux()
         self.live = {}            # floor -> LiveClearance, one per storey
         self.seen = np.empty((0, 2))   # this tick's unexplained returns
         # Ground truth, for scoring only -- never shown to the robot. The dog
@@ -706,6 +720,41 @@ class Run:
     def say(self, line):
         """One line of the Preemptive Voice Engine. Printed here, spoken later."""
         print(f"    [voice] {line}")
+
+    def handle_tick(self):
+        """Read the handle for this tick, and say what a tug or continue did.
+
+        Before the command goes out, so a tug stops the dog on the tick it is
+        felt: one control tick, 50 ms at 20 Hz, inside the spec's 100 ms.
+        """
+        t, dt = self.robot.sim_time, self.robot.CONTROL_DT
+        event = self.mux.update(self.handle.force(t), self.handle.pressed(t, dt), dt)
+        x, y, _ = self.robot.get_pose()
+        if event == "tug":
+            print(f"    t={t:6.1f}s  HANDLE tug at ({x:.2f}, {y:.2f}): stopped until continue")
+            self.say("Stopped. Press continue when you are ready.")
+        elif event == "continue":
+            print(f"    t={t:6.1f}s  HANDLE continue at ({x:.2f}, {y:.2f})")
+            self.say("Carrying on.")
+        if self.mux.stopped and not self.handle.will_continue(t):
+            self.robot.set_velocity(0.0, 0.0, 0.0)
+            raise HandleStop(f"by a tug on the handle at t={t:.1f}s on floor "
+                             f"{self.floor}; nobody pressed continue")
+
+    def handle_wait(self):
+        """The scripted moves into and out of the lift stop for a tug too.
+
+        They set the pose directly and never reach the mux, so this stands the
+        dog where it is, still filming, until continue.
+        """
+        self.handle_tick()
+        while self.mux.stopped:
+            x, y, yaw = self.robot.get_pose()
+            self.robot.place((x, y), yaw)
+            self.mux.stats["stopped_ticks"] += 1
+            self.step_crowd()
+            self.frame()
+            self.handle_tick()
 
     @staticmethod
     def clear_ahead(live, xy, target, d=LOOKAHEAD, skip=perception.SKIP):
@@ -1438,6 +1487,9 @@ class Run:
             if speed > 0.0:
                 people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
                 cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)
+            # Last: the person on the handle overrules everything above.
+            self.handle_tick()
+            cmd = self.mux.apply(cmd, self.robot.MAX_V)
             self.commands.update(struct.pack("3d", *cmd))
             self.n_commands += 1
             self.robot.set_velocity(*cmd)
@@ -1485,6 +1537,7 @@ class Run:
         dyaw = wrap(yaw - yaw0)
         ticks = max(int(math.dist((x, y), to_xy) / (STEP_V * self.robot.CONTROL_DT)), 1)
         for k in range(1, ticks + 1):
+            self.handle_wait()
             t = k / ticks
             self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t),
                              yaw0 + dyaw * t, z=z)
@@ -1496,6 +1549,7 @@ class Run:
         d = wrap(to_yaw - from_yaw)
         xy = self.robot.get_pose()[:2]
         for k in range(1, int(seconds / self.robot.CONTROL_DT) + 1):
+            self.handle_wait()
             self.robot.place(xy, from_yaw + d * k / (seconds / self.robot.CONTROL_DT), z=z)
             self.step_crowd()
             self.frame()
@@ -1503,6 +1557,7 @@ class Run:
     def hold(self, seconds):
         """Stand still, still filming."""
         for _ in range(int(seconds / self.robot.CONTROL_DT)):
+            self.handle_tick()
             self.robot.place(self.robot.get_pose()[:2], self.robot.get_pose()[2])
             self.step_crowd()
             self.frame()
@@ -1595,11 +1650,18 @@ def main():
                          "they are on no map, and the dog stops for them")
     ap.add_argument("--seed", type=int, default=0,
                     help="which crowd -- the same seed is the same people every run")
+    ap.add_argument("--handle", default="", metavar="EVENTS",
+                    help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
+                         '"pull@20-25", "push@26-28" (see sim/handle.py)')
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
     if args.vamos and args.shadow:
         ap.error("--vamos steers with VAMOS and --shadow never does; pick one")
+    try:
+        handle = HandleScript(args.handle)
+    except ValueError as bad:
+        ap.error(str(bad))
 
     scene = str(paths.BUILDING_SCENE)
     if not os.path.exists(scene):
@@ -1628,7 +1690,8 @@ def main():
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
-              vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample)
+              vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
+              handle=handle)
 
     ok, halted = True, None
     try:
@@ -1659,9 +1722,12 @@ def main():
     run.close()
 
     x, y, _ = run.robot.get_pose()
-    if halted is not None:
+    if isinstance(halted, HandleStop):
+        print(f"STOPPED {halted}")
+    elif halted is not None:
         print(f"HALTED {halted}")
-    print(f"{'ARRIVED' if ok else 'FAILED'} on floor {run.floor} at ({x:.1f}, {y:.1f}) "
+    outcome = "ARRIVED" if ok else "STOPPED" if isinstance(halted, HandleStop) else "FAILED"
+    print(f"{outcome} on floor {run.floor} at ({x:.1f}, {y:.1f}) "
           f"after {run.robot.sim_time:.0f}s of sim time")
     for floor, p in sorted(run.policies.items()):
         st = p.stats
@@ -1702,6 +1768,12 @@ def main():
     else:
         print("handler: none -- the person on the handle never touched a wall or an obstacle")
     print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
+    if args.handle:
+        hs = run.mux.stats
+        print(f"handle: {hs['tugs']} tug(s), {hs['continues']} continue(s), "
+              f"{hs['stopped_ticks'] / FPS:.1f}s stopped by the person, "
+              f"{hs['slowed_ticks'] / FPS:.1f}s slowed by a pull, "
+              f"lowest pace {hs['lowest_pace']:.0%} of top speed")
     # Also when there are none: a yield in an empty building is a false
     # positive, and it should be as visible as a collision is.
     if args.pedestrians or run.ped["yields"]:

@@ -17,7 +17,7 @@ conda activate cyberdog_sim
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`107 passed`, `ALL PASS`).
+clean (`132 passed`, `ALL PASS`).
 
 ## Before the first run
 
@@ -54,6 +54,7 @@ pytest -q                               # quieter
 | `test_router_approach.py` | Where the dog stands when asked for a no-go place like the stairs, on every floor | 5 |
 | `test_overlay_labels.py` | Room labels in the video: projected where the camera sees them, never overlapping | 16 |
 | `test_dataset.py` | The command parser's training vocabulary (no model needed) | 14 |
+| `test_handle.py` | The Smart Handle mock and the safety mux: a tug stops and latches until continue, a pull lowers the pace, a push only undoes a pull, and no force leaves every command unchanged | 25 |
 
 ## 2. Location check (`test_locations.py`)
 
@@ -99,6 +100,7 @@ every stage above it.
 | `crowd` | A person is told apart from a crate, and the dog stops for someone coming towards it | ~2 s |
 | `dreaming` | The path safety score (Gate B of `docs/dreaming_safety_kpis.md`): safe vs unsafe, calibrated against real drives, stable across seeds | ~40 s |
 | `vamos` | The VAMOS client against a **fake** server, and shadow mode (Gate C): steering and shadow runs give identical commands | ~20 s |
+| `handle` | The person on the handle overrules the dog: a tug stops it where it stands until continue (walking and boarding the lift), with no continue the run ends there, and an idle handle changes no command | ~5 s |
 | `run` | The whole stack on 8 routes across all 3 floors. Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~25 s |
 
 The `vamos` stage runs its own stand-in server. It needs neither the real

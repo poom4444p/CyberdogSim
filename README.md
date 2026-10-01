@@ -278,6 +278,7 @@ All commands run in `cyberdog_sim`, from the repo root. Flags combine freely.
 | `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog stops for them |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
+| `python -m cyberdog.sim.run_building restroom --handle "tug@10,continue@15"` | The person on the handle: a tug at 10 s stops the dog until continue at 15 s; `pull@T1-T2` slows it, `push@T1-T2` undoes a pull (`sim/handle.py`) |
 | `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer (needs `.[language]`) |
 | `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
 | `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |

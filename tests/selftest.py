@@ -892,9 +892,71 @@ def run():
               handler[len("HANDLER: "):] if handler else "never touched a wall or an obstacle")
 
 
+def handle():
+    """The person on the handle overrules the dog (spec L6 s1, s4).
+
+    The mux itself is unit-tested (tests/test_handle.py); this is it in the
+    loop, on ground truth the run prints:
+
+    - a tug stops the dog on the tick it is felt, it stays exactly where it
+      stopped until continue, and then it carries on and arrives;
+    - with no continue coming, the run ends standing where it was stopped;
+    - a tug during the scripted walk into the lift holds it there too;
+    - a handle with nothing on it changes nothing: the same commands, to the
+      bit, as no handle at all.
+    """
+    import re
+    import subprocess
+
+    base = [sys.executable, "-m", "cyberdog.sim.run_building", "--auto-confirm",
+            "--no-video"]
+    runs = {"plain": ["restroom"],
+            "idle": ["restroom", "--handle", "continue@999"],
+            "tug": ["restroom", "--handle", "tug@10,continue@15"],
+            "never": ["restroom", "--handle", "tug@10"],
+            # 8.6 s is in the scripted walk into the floor-1 lift.
+            "lift": ["room 201", "--handle", "tug@8.6,continue@11.6"]}
+    procs = {k: subprocess.Popen(base + a, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                 text=True) for k, a in runs.items()}
+    out = {k: p.communicate()[0] for k, p in procs.items()}
+    crashed = [k for k, p in procs.items() if p.returncode]
+    check("runs complete", not crashed, ", ".join(runs) if not crashed
+          else f"{crashed} exited non-zero")
+    if crashed:
+        return
+
+    def sha(o):
+        m = re.search(r"sha256 ([0-9a-f]+)", o)
+        return m.group(1) if m else None
+
+    def at(o, what):
+        m = re.search(rf"HANDLE {what} at \(([-\d.]+), ([-\d.]+)\)", o)
+        return (float(m.group(1)), float(m.group(2))) if m else None
+
+    check("no force, no change", sha(out["idle"]) == sha(out["plain"]) is not None,
+          f"commands {sha(out['idle'])} with an idle handle, {sha(out['plain'])} without")
+
+    for name in ("tug", "lift"):
+        o = out[name]
+        tug, cont = at(o, "tug"), at(o, "continue")
+        held = tug is not None and cont is not None and math.dist(tug, cont) < 0.005
+        check(f"{name}: stands still from tug to continue", held,
+              f"tug at {tug}, continue at {cont}")
+        check(f"{name}: carries on and arrives", "ARRIVED" in o and "Carrying on." in o,
+              "arrived" if "ARRIVED" in o else "did not arrive")
+
+    o = out["never"]
+    tug = at(o, "tug")
+    m = re.search(r"STOPPED on floor \d at \(([-\d.]+), ([-\d.]+)\)", o)
+    end = (float(m.group(1)), float(m.group(2))) if m else None
+    check("no continue: run ends where it was stopped",
+          end is not None and tug is not None and math.dist(tug, end) < 0.06,
+          f"tug at {tug}, run ended at {end}")
+
+
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
           "destination": destination, "crowd": crowd, "latency": latency,
-          "dreaming": dreaming, "vamos": vamos, "run": run}
+          "dreaming": dreaming, "vamos": vamos, "handle": handle, "run": run}
 
 
 if __name__ == "__main__":

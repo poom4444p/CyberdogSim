@@ -81,6 +81,17 @@ def hole(n):
     return None if n <= 1 else CAR
 
 
+# The shaft's two side walls, (x0, x1, y0, y1), on every floor. Not in the
+# occupancy grid -- the scene draws them on top of it -- so the clearance field
+# adds them itself (sim/clearance.py): they stand 0.5 m into floor the grid
+# calls open, and the person on the handle was swung into the south one's
+# corner on the way out of the floor-1 entrance.
+SHAFT_WALLS = {
+    "lift_s": (CAR[0] - WALL_T, CAR[1], CAR[2] - WALL_T, CAR[2]),
+    "lift_n": (CAR[0] - WALL_T, CAR[1], CAR[3], CAR[3] + WALL_T),
+}
+
+
 def shaft_geoms(floors):
     """The three fixed walls of the shaft, full height of the stack.
 
@@ -89,14 +100,10 @@ def shaft_geoms(floors):
     given doors -- the dog is kinematic and would walk through them anyway,
     and an open face is what lets the chase camera watch the car rise.
     """
-    x0, x1, y0, y1 = CAR
     zb = floor_z(min(floors)) - SLAB_THICK
     zt = floor_z(max(floors)) + CAR_H
     rgba = "0.38 0.40 0.45 1"
-    return [
-        _box("lift_s", x0 - WALL_T, x1, y0 - WALL_T, y0, zb, zt, rgba),
-        _box("lift_n", x0 - WALL_T, x1, y1, y1 + WALL_T, zb, zt, rgba),
-    ]
+    return [_box(name, *rect, zb, zt, rgba) for name, rect in SHAFT_WALLS.items()]
 
 
 def car_geoms():

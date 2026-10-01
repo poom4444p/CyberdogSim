@@ -20,13 +20,20 @@ the robot. The dog sees them with the LiDAR like anything else, and
 Two kinds, because they fail differently:
 
     along     walks the length of the corridor in a side lane, head-on or
-              overtaking. Passes the dog at about 0.9 m. The one that must NOT
-              trigger a stop every time, or the dog never finishes a run in a
-              building with people in it.
-    crossing  walks from one wall to the other, across the route. The one that
-              must. It is clear of the dog's line when first seen and in it
-              four seconds later, which is exactly the case a single scan
-              cannot call.
+              overtaking. Keeps right, as people do here and as the dog does,
+              so head-on they pass it on its left at about 0.9 m. The one
+              that must NOT trigger a stop every time, or the dog never
+              finishes a run in a building with people in it.
+    crossing  walks from one wall to the other, across the route -- straight
+              over, or on a slant towards a door further along, from the left
+              or the right. The one that must. It is clear of the dog's line
+              when first seen and in it four seconds later, which is exactly
+              the case a single scan cannot call.
+
+Both, all run long. Every walker used to become an `along` one after its first
+leg, so a few seconds in nobody near the dog was crossing at all -- measured
+over three seeds, not one tick in any of them -- and with lanes picked at
+random, up to half the head-on walkers came down the dog's own side.
 
 Reaching the end of a leg is not an exit. They turn and carry on down the
 corridor, because a person who walks into a wall and evaporates is not a
@@ -49,11 +56,13 @@ different seed is a different day in the same building.
 Politeness, and its limits. A walker pauses when the dog is right in front of
 it (NOTICE below) -- real people look where they are going, and without it an
 oblivious crosser walks into a dog that correctly stopped to let it past,
-which scores as a collision the robot could not have avoided. That is the
-only thing they know about the dog. They do not step round it, they do not
-slow down early, and they will happily walk into the side of it if it is not
-in front of them. Making them any cleverer would be quietly solving the
-robot's problem for it.
+which scores as a collision the robot could not have avoided. And if the dog
+stays in their way for GIVE_WAY seconds, they step round it, as anybody
+would -- otherwise a crosser and a dog that has correctly stopped for them
+wait for each other until the run ends. That is all they know about the dog.
+They do not slow down early, and they will happily walk into the side of it
+if it is not in front of them. Making them any cleverer would be quietly
+solving the robot's problem for it.
 """
 import math
 import random
@@ -78,13 +87,23 @@ FOOT = 0.10             # bottom of the capsule -- above perception's MIN_H
 # Where they may walk. The corridor's real walls, inset by a shoulder so a
 # person is never inside one.
 LANE_Y = (8.15 + RADIUS + 0.05, 10.85 - RADIUS - 0.05)
-SIDE_LANES = (8.60, 10.40)      # the two along-corridor lanes
+SIDE_LANES = (8.60, 10.40)      # the two along-corridor lanes: south, north
+CROSS_P = 0.4           # chance a finished leg is followed by a crossing
+CROSS_DRIFT = 2.0       # metres a crossing may slant along the corridor
 # Clear of the stairwells (x < 2.5) and the lift car (x > 45.6) at both ends.
 LANE_X = (4.0, 44.0)
 
 SPEED = (0.85, 1.45)    # m/s, a walking pace
 PAUSE = (1.0, 4.0)      # seconds between finishing one leg and starting another
 NOTICE = 0.75           # they stop if the dog is this close, ahead of them
+GIVE_WAY = 2.0          # ...and after this many seconds of it, step round it.
+                        # Without it a crosser who stopped because the dog was
+                        # in their way waited for the dog, which was waiting
+                        # for them: seed 8 of room 201 ended in that standoff.
+                        # Shorter than the dog's own PATIENCE, as it is for
+                        # people: someone walking gives way before a guide dog
+                        # with a blind person behind it has to.
+SIDESTEP = 0.9          # metres off their line, the room people give in passing
 # Where a finished walker may reappear. Not next to the dog: a person who
 # materialises three metres in front of it is a teleport, and the tracker --
 # correctly -- reads a teleport as something moving very fast indeed.
@@ -114,7 +133,25 @@ class Walker:
         self.t = phase                  # 0..1 along a -> b
         self.waiting = 0.0              # seconds left before this leg starts
         self.done = False               # walked it; wants a new one
+        self.held = 0.0                 # seconds stood behind the dog
         self._place()
+
+    def _step_round(self, dx, dy):
+        """Give way: a sidestep off their line, away from the dog at (dx, dy).
+
+        Crowd sends them on from wherever it ends, as after any leg. To the
+        other side if the wall leaves no room on this one.
+        """
+        hx, hy = self.heading()
+        left = hx * dy - hy * dx > 0             # the dog is on their left
+        for side in ((-1.0, 1.0) if left else (1.0, -1.0)):
+            nx, ny = -hy * side, hx * side       # side = +1: their left
+            tx = max(LANE_X[0], min(LANE_X[1], self.x + nx * SIDESTEP + hx * 0.3))
+            ty = max(LANE_Y[0], min(LANE_Y[1], self.y + ny * SIDESTEP + hy * 0.3))
+            if math.dist((tx, ty), (self.x, self.y)) >= SIDESTEP / 2:
+                break
+        self.a, self.b, self.t = (self.x, self.y), (tx, ty), 0.0
+        self.held = 0.0
 
     @property
     def length(self):
@@ -136,13 +173,17 @@ class Walker:
             return
 
         # The one thing they know about the robot: do not walk into the thing
-        # directly in front of you.
+        # directly in front of you -- and do not stand behind it for ever.
         if dog is not None:
             hx, hy = self.heading()
             dx, dy = dog[0] - self.x, dog[1] - self.y
             d = math.hypot(dx, dy)
             if d < NOTICE and (dx * hx + dy * hy) > 0:
+                self.held += dt
+                if self.held >= GIVE_WAY:
+                    self._step_round(dx, dy)
                 return
+        self.held = 0.0
 
         self.t += self.speed * dt / (self.length or 1.0)
         if self.t >= 1.0:
@@ -179,27 +220,42 @@ class Crowd:
             kind = "crossing" if rng.random() < 0.65 else "along"
             if kind == "crossing":
                 x = rng.uniform(*LANE_X)
-                if self._blocked(x, boxes):
+                x1 = self._slant(rng, x)
+                if self._blocked(x, boxes, x1):
                     continue
-                a, b = (x, LANE_Y[0]), (x, LANE_Y[1])
+                a, b = (x, LANE_Y[0]), (x1, LANE_Y[1])
                 if rng.random() < 0.5:
-                    a, b = b, a
+                    a, b = (x1, LANE_Y[1]), (x, LANE_Y[0])
             else:
-                y = rng.choice(SIDE_LANES)
                 x0 = rng.uniform(LANE_X[0], LANE_X[1] - 12.0)
-                a, b = (x0, y), (x0 + rng.uniform(12.0, 20.0), y)
+                x1 = x0 + rng.uniform(12.0, 20.0)
                 if rng.random() < 0.5:
-                    a, b = b, a
+                    x0, x1 = x1, x0
+                y = self.keep_right(x1 - x0)
+                a, b = (x0, y), (x1, y)
             return Walker(a, b, rng.uniform(*SPEED), rng.uniform(*PAUSE),
                           kind, phase=rng.random())
         return None
 
     @staticmethod
-    def _blocked(x, boxes, margin=0.5):
+    def _blocked(x, boxes, x1=None, margin=0.5):
         """A crossing lane that runs through a crate: the person would walk
-        through it, which looks like a bug and is one."""
-        return any(bx0 - margin <= x <= bx1 + margin
+        through it, which looks like a bug and is one. `x1` is the far end of
+        a slanted crossing; the whole span between is tested."""
+        lo, hi = (x, x) if x1 is None else (min(x, x1), max(x, x1))
+        return any(bx0 - margin <= hi and lo <= bx1 + margin
                    for bx0, bx1, _y0, _y1, _h, _n in boxes)
+
+    @staticmethod
+    def _slant(rng, x):
+        """Where a crossing starting at `x` ends, along the corridor."""
+        return max(LANE_X[0], min(LANE_X[1], x + rng.uniform(-CROSS_DRIFT, CROSS_DRIFT)))
+
+    @staticmethod
+    def keep_right(dx):
+        """The side lane for walking the corridor in direction `dx`: the one
+        on the walker's right. East (+x) has south on its right."""
+        return SIDE_LANES[0] if dx > 0 else SIDE_LANES[1]
 
     def step(self, dt, dog=None):
         for w in self.walkers:
@@ -231,21 +287,38 @@ class Crowd:
         has reached a wall does.
         """
         rng = self._rng
-        lane = min(SIDE_LANES, key=lambda y: abs(y - w.y))
+        # Sometimes over to the other side instead -- to a door opposite, or
+        # a little further along. Starting from wherever they stand, so it is
+        # still a turn and not a jump, and from whichever wall that is: the
+        # dog meets crossers from its left and from its right.
+        if rng.random() < CROSS_P:
+            x1 = self._slant(rng, w.x)
+            if not self._blocked(w.x, obstacles.boxes(self.floor), x1):
+                far = LANE_Y[1] if w.y < sum(LANE_Y) / 2 else LANE_Y[0]
+                w.reset((w.x, w.y), (x1, far), rng.uniform(*SPEED),
+                        rng.uniform(*PAUSE), "crossing")
+                w.waiting = rng.uniform(*TURN)
+                return
         span = rng.uniform(*ONWARD)
 
         # Carry on the way they were already headed. Sending them at the
         # middle of the corridor instead -- which is what picking the
         # direction from their position does -- walks the whole crowd into
         # the centre and leaves them pacing there, which is the moving wall
-        # this module exists not to build. A crossing leg has no x direction
-        # of its own, so that one tosses a coin.
-        dx = w.b[0] - w.a[0]
-        way = 1.0 if dx > 0 else -1.0 if dx < 0 else rng.choice((-1.0, 1.0))
+        # this module exists not to build. Off a crossing, which ends at a
+        # wall, the way that has that wall on their right: the other way puts
+        # their keep-right lane across the corridor, and the 8-20 m diagonal
+        # to it is a walker head-on down the dog's side the whole way.
+        if w.kind == "crossing":
+            way = -1.0 if w.y > sum(LANE_Y) / 2 else 1.0
+        else:
+            dx = w.b[0] - w.a[0]
+            way = 1.0 if dx > 0 else -1.0 if dx < 0 else rng.choice((-1.0, 1.0))
         x = w.x + way * span
         if not LANE_X[0] <= x <= LANE_X[1]:     # out of corridor: turn round
             x = w.x - way * span
         x = max(LANE_X[0], min(LANE_X[1], x))
+        lane = self.keep_right(x - w.x)
 
         w.reset((w.x, w.y), (x, lane), rng.uniform(*SPEED),
                 rng.uniform(*PAUSE), "along")

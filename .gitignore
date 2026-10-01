@@ -19,6 +19,7 @@ MUJOCO_LOG.TXT
 
 # --- trained weights: share separately (shared drive / Hugging Face) --------
 models/
+mac_lora_outputs/
 # --- datasets: regenerate with cyberdog.language.generate_dataset + prepare_dataset
 datasets/
 

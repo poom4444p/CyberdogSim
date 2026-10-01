@@ -18,15 +18,20 @@ button -- a human does that, and presses continue.
     python -m cyberdog.sim.run_building "restroom on floor 3" --no-video   # fast, headless
     python -m cyberdog.sim.run_building "server room" --nlu                # through the Gemma layer
     python -m cyberdog.sim.run_building "server room" --vamos              # VLM in the steering loop
+    python -m cyberdog.sim.run_building "server room" --shadow             # VLM + dream, map still drives
     python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 
 Without --nlu the destination is matched against locations.json by name, which
 keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
+import hashlib
+import json
 import math
 import os
+import struct
 import sys
+import time
 
 import numpy as np
 
@@ -39,6 +44,7 @@ from cyberdog.planning.checkpoint_projector import (load_camera_config,
                                                     vamos_prompt)
 from cyberdog.sim.control import (GOAL_R, K_W, TURN_ONLY, advance, path_target,
                                   wrap)
+from cyberdog.sim.handle import HandleScript, SafetyMux
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
@@ -46,10 +52,11 @@ from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
-from cyberdog.sim.sensing.perception import (LiveClearance, free_destination,
+from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
-from cyberdog.sim.sensing.tracking import (CLEAR_R, MISS_R, Tracker,
-                                           closest_approach, conflict)
+from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
+                                           Tracker, closest_approach, conflict)
+from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
 START_FLOOR = 1
@@ -59,6 +66,9 @@ ANNOUNCE_R = 2.5          # metres out that a checkpoint's line is spoken
 STEP_V = 0.4              # m/s in and out of the car -- slower than corridor pace
 REPLAN_EVERY = 20         # ticks between VLM calls when --vamos is on
 REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacle
+# Shadow mode: a proposal whose heading is further than this off the map's
+# steering target is logged as the dream wanting to go somewhere else.
+SHADOW_DISAGREE = math.radians(15)
 # Flatter and closer than the single-floor demo: every storey now has a slab
 # over it, and the old -28 degree chase camera sat inside the ceiling, which
 # rendered as solid grey.
@@ -111,11 +121,95 @@ PATIENCE = 3.0            # seconds a person may stand still before the dog
                           # that pause is about a second -- and short enough
                           # that a person who has genuinely stopped does not
                           # end the run.
+PASS_NEED = 0.60          # going round someone who has stopped: room kept from
+                          # what the LiDAR sees, instead of the crates' 0.35.
+                          # About 0.8 m centre to centre -- the 0.9 m people
+                          # give each other in passing. A crate's 0.35 took
+                          # the dog past a standing person at 0.50 m, at full
+                          # speed, 9 cm from their shoulder.
+PASS_V = 0.40             # m/s while within PASS_R of them: walking past
+PASS_R = 2.0              # somebody, not overtaking them
+# No stepping back from them first. It was tried: reversing pushes the rigid
+# handle into the person holding it, and nothing the dog senses knows they
+# are there -- seed 8 of room 201 backed them into a wall for 9 s. A standoff
+# with a pedestrian is broken on their side instead (pedestrians.GIVE_WAY).
 YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
                           # this long, creep and keep asking. Reachable only
                           # by a queue of people arriving one after another.
 PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
                           # as a contact. Scoring only, never shown the robot.
+
+# The person being guided. They walk behind the dog holding a rigid handle
+# (RDog's), so they are always straight behind it along its heading: the
+# handle does not swivel. Not in the scene -- nothing the robot senses knows
+# they are there -- and scored the way the dog's body is: touching a wall, a
+# crate, the lift or the stairs counts. A route the dog clears can still walk
+# them into something: on a pivot the handle swings them sideways through
+# whatever is beside the dog.
+HANDLER_BEHIND = 1.1      # metres, dog centre to theirs: the Go2's 0.41 m of
+                          # body behind its centre, ~0.4 m of handle, an arm
+HANDLER_R = 0.25          # metres, half a person's shoulder width
+HANDLER_H = (0.4, 1.0)    # heights tested: crate height, and hip/hand height
+HANDLER_RAYS = 12
+
+# Easing a turn that would swing them into something. The dog knows the
+# handle is rigid and how long it is, so it knows where the person will be
+# after any turn -- and every handler contact measured was a turn: a pivot
+# beside the crate it had just gone round (`electrical engineering lab`, the
+# cart on `room 201` with people), a left turn past the lift (`cafeteria`),
+# and a sharp left into the floor-2 restroom from the north lane after going
+# round somebody, which put the person 1.1 m behind into the north wall. So
+# each command is rolled forward SWING_T and, where it would take the person
+# closer than HANDLER_ROOM to a wall or anything the LiDAR has found, the turn
+# is eased and the dog keeps walking: a wider arc drags them round instead of
+# swinging them sideways.
+HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
+SWING_T = 0.8             # seconds a command is rolled forward over
+SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
+SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+SWING_NOSE = 0.30         # metres ahead of the dog's centre its front legs reach.
+                          # An eased command walks on while the turn waits, so
+                          # the front of the body has to stay clear too, not
+                          # only the centre: seed 8 of room 201 --pedestrians 3
+                          # kept 0.18 m at the centre and put its front legs on
+                          # the floor-2 cart's corner.
+NOSE_MIN = 0.15           # metres from the dog's front (SWING_NOSE ahead) to
+                          # anything the LiDAR found, below which it turns
+                          # before it walks on. The proximity stop reads the
+                          # centre, and the Go2 is twice as long as it is wide:
+                          # seed 8 again, centre 0.25 m clear of the cart, front
+                          # 0.10 m, walking on at 0.6 m/s while turning.
+NOSE_HALF_W = 0.15        # metres either side of the centreline, the front legs
+UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for somebody,
+                          # and only to take the person on the handle off a wall.
+                          # Frozen mid-pivot to wait, the dog held its user 8 cm
+                          # into the floor-3 north wall for 7 s (Gate D, chemistry
+                          # lab seed 9, --vamos): 7.5 of the arm's 11.2 s of D2.
+SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
+                          # kept by any step easing adds. PED_NEAR plus a margin.
+
+# Doorways. The route goes through each one's middle, but the dog is not always
+# on the route when it gets there -- stepped round a person, or on a VAMOS
+# path, which cuts corners. From
+# FUNNEL_D out it steers at a point FUNNEL_LEAD ahead of itself on the door's
+# axis, so it closes on the line before the frame instead of arriving at the
+# frame and pivoting to find it. That pivot was the floor-2 restroom: 0.5 m
+# east of the axis at the threshold, turning to line up, with the crate beside
+# the door on the person's side.
+FUNNEL_D = 2.0            # metres before a doorway the funnel takes over
+FUNNEL_LEAD = 0.8         # metres ahead on the axis it steers at
+FUNNEL_PAST = 0.4         # metres beyond the doorway's far side it lets go
+DOOR_MAP_D = 4.0          # metres from a doorway on the route inside which the
+                          # map's route steers, not a VAMOS path. The route
+                          # starts crossing the corridor for a door about this
+                          # far out; a VAMOS path kept the dog in its lane past
+                          # that point, left a sharp turn at the door, and the
+                          # turn-easing for the person on the handle made it
+                          # overshoot: chemistry lab, +14 s over map-only.
+DOOR_NEAR = 1.0           # metres before a doorway where it lines up before walking:
+DOOR_ERR = 0.25           # rad of heading error it will walk with there, against
+                          # TURN_ONLY's 0.8 anywhere else. Walking while turning
+                          # at the threshold is the body's corner meeting the frame.
 
 # Backing out of a graze. The proximity stop below sets the speed to zero, and
 # that used to be all it did -- which is a deadlock, because clearance cannot
@@ -252,13 +346,11 @@ def plan_stops(router, stops):
         if target is None:
             raise SystemExit(f"there is no {name} on floor {requested} (it is on "
                              f"floor(s) {', '.join(map(str, router.floors_of(name)))})")
-        planned = router.plan(floor, xy, target)
+        planned = router.plan(floor, xy, target, lift_stop=lift.WAIT_XY)
         if planned is None:
             raise SystemExit(f"no route to {name}")
         for j, (f, route) in enumerate(planned):
-            pts = [(float(c.position[0]), float(c.position[1]))
-                   for c in route.checkpoints]
-            says = [list(c.announcements) for c in route.checkpoints]
+            pts, says = router.walk_line(f, route)
             # A cross-floor stop comes back as a leg to the lift and a leg out
             # of it; neither should be driven into the car itself.
             if len(planned) > 1 and j == 0:
@@ -290,11 +382,20 @@ class HazardStop(Exception):
     """
 
 
+class HandleStop(HazardStop):
+    """A tug on the handle stopped the dog and nobody pressed continue.
+
+    Only a scripted handle can know that no continue is coming; the run ends
+    here, standing where the person stopped it, rather than at MAX_TICKS.
+    """
+
+
 class Run:
     """One drive through the building, with the video panels attached."""
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
-                 auto_confirm=False, speed=1, crowd=0, seed=0):
+                 auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
+                 vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -313,13 +414,42 @@ class Run:
         self.tick = 0
         self.writer = self.chase = self.outside = None
         self.policies, self.vamos = {}, vamos
+        # Shadow mode (Gate C in docs/dreaming_safety_kpis.md): VAMOS is asked
+        # and the dream scores its answer on the same schedule as --vamos, but
+        # the map route alone drives. `shadow` is the log file, one JSON line
+        # per call; None is off. --vamos and --shadow are exclusive.
+        if shadow:
+            os.makedirs(os.path.dirname(os.path.abspath(shadow)), exist_ok=True)
+        self.shadow = open(shadow, "w") if shadow else None
+        self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
+        self.vamos_url = vamos_url
+        self.vamos_sample = vamos_sample
+        # How long a VAMOS answer takes to arrive, in seconds of sim time; None
+        # is the call's own wall-clock time. See ask_vamos.
+        self.vlm_latency = vlm_latency
+        # The request in flight, if any: (tick it lands on, its paths, tick it
+        # was asked on, body xy then). One at a time, as a GPU serves them.
+        self.pending = None
+        self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0}
+        # Every velocity command sent, fingerprinted. Two runs of the same
+        # route and seed with equal fingerprints commanded the dog identically,
+        # tick for tick -- which is how a shadow run proves it touched nothing.
+        self.commands = hashlib.sha256()
+        self.n_commands = 0
         self.lidar = Lidar(self.robot.model, self.robot.data)
+        # The person's override, last before the motors (handle.py). With no
+        # handle the mux reads zero force every tick and passes commands on
+        # unchanged.
+        self.handle = handle or HandleScript()
+        self.mux = SafetyMux()
         self.live = {}            # floor -> LiveClearance, one per storey
         self.seen = np.empty((0, 2))   # this tick's unexplained returns
         # Ground truth, for scoring only -- never shown to the robot. The dog
         # finds these with the LiDAR or not at all; this is how we check.
         self.hits = {"ticks": 0, "boxes": set()}
-        self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0}
+        self.handler_hits = {"ticks": 0, "boxes": set(), "since": None}
+        self.dog_geoms, self.touchable = self.body_contacts()
+        self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
         # People. Not in any grid either, and unlike the crates they move, so
         # one scan cannot describe them -- `tracker` is what two scans give.
         self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
@@ -332,6 +462,7 @@ class Run:
                              "python -m cyberdog.sim.scene.build_scene --building")
         self.tracker = Tracker(self.robot.CONTROL_DT)
         self.waiting_for = None        # the track being yielded to, if any
+        self.passing = None            # where the person being gone round stands
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
@@ -497,18 +628,133 @@ class Run:
         if floor not in self.policies:
             from cyberdog.sim.sensing.dreaming import Dream
             from cyberdog.sim.vamos_client import VamosPolicy
+            from cyberdog.sim.vamos_client import DEFAULT_URL
             live = self.clearance(floor)
+            url = self.vamos_url or DEFAULT_URL
             p = VamosPolicy(self.cam, lambda x, y: live(x, y) >= ROBOT_R,
-                            dream=Dream(live, self.robot.MAX_V))
+                            dream=Dream(live, self.robot.MAX_V,
+                                        person=lambda x, y, yaw: self.handler_room(
+                                            live, x, y, yaw)), url=url,
+                            sample=self.vamos_sample)
             if not p.available():
-                raise SystemExit("VAMOS server is not answering on 127.0.0.1:8009 -- "
+                raise SystemExit(f"VAMOS server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first")
             self.policies[floor] = p
         return self.policies[floor]
 
+    def log_shadow(self, floor, n, pose, target, proposed, safety):
+        """One shadow-mode call: what VAMOS offered, what the dream made of
+        each candidate, and what it would have steered at against what the map
+        actually did.
+
+        "steer" is a proposal pointing more than SHADOW_DISAGREE off the map's
+        target; "none" is nothing passing the gate, which under --vamos means
+        crawling and asking again. Both are what Gate D is about to measure.
+        """
+        x, y, yaw = pose
+        verdicts = self.policies[floor].verdicts
+        if proposed is None:
+            kind, angle = "none", None
+        else:
+            px, py = path_target(proposed, (x, y))
+            angle = abs(wrap(math.atan2(py - y, px - x)
+                             - math.atan2(target[1] - y, target[0] - x)))
+            kind = "steer" if angle > SHADOW_DISAGREE else "agree"
+        self.shadow_n["calls"] += 1
+        if kind != "agree":
+            self.shadow_n[kind] += 1
+        rnd = lambda pts: [[round(a, 3), round(b, 3)] for a, b in pts]
+        self.shadow.write(json.dumps({
+            "floor": floor, "tick": n, "t": round(self.robot.sim_time, 2),
+            "pose": [round(x, 3), round(y, 3), round(yaw, 4)],
+            "map_target": [round(target[0], 3), round(target[1], 3)],
+            "candidates": [{"path": rnd(p), "factor": None if f is None else round(f, 4),
+                            "verdict": v} for p, f, v in verdicts],
+            "would_choose": next((k for k, (p, _, _) in enumerate(verdicts)
+                                  if p is proposed), None),
+            "safety": round(safety, 4),
+            "disagree": kind,
+            "angle_deg": None if angle is None else round(math.degrees(angle), 1),
+        }) + "\n")
+
+    def ask_vamos(self, floor, n, state):
+        """Send VAMOS this tick's frame; the answer lands some ticks later.
+
+        The VLM takes about 1.8 s and the control loop has 50 ms, so the loop
+        cannot wait for it: plan() used to be called here and block, and the
+        twin paused physics for the duration, which hid that a real dog would
+        walk on for 1.8 s on its last command with no LiDAR, no stop and no
+        yield. Now the loop never waits. The request is made at tick n, from
+        this tick's image, and its answer is released at tick n + latency --
+        in sim time, so a run with --vlm-latency fixed is repeatable where a
+        real thread would land its answer on a different tick every time. On
+        the robot this is a worker thread; the timing is the same.
+
+        The wall-clock time the HTTP call really took is the default latency:
+        the sim is paused while it runs, then charged for it afterwards.
+        """
+        t0 = time.perf_counter()
+        cam_pose = self.robot.camera_pose()
+        paths = self.policy(floor).request(self.robot.get_image(),
+                                           vamos_prompt(state), cam_pose)
+        wait = (time.perf_counter() - t0 if self.vlm_latency is None
+                else self.vlm_latency)
+        self.pending = (n + int(round(wait / self.robot.CONTROL_DT)), paths,
+                        n, self.robot.get_pose()[:2])
+        self.vlm["asked"] += 1
+
+    def take_answer(self, floor, n, pose, destination):
+        """The pending answer, if it has landed: judged from where the dog is
+        now, not from where it was asked. Returns plan()'s triple, or None
+        while the answer is still on its way.
+        """
+        if self.pending is None or n < self.pending[0]:
+            return None
+        _, paths, asked_at, xy0 = self.pending
+        self.pending = None
+        self.vlm["answers"] += 1
+        self.vlm["age"] += (n - asked_at) * self.robot.CONTROL_DT
+        self.vlm["moved"] += math.dist(xy0, pose[:2])
+        return self.policy(floor).deliver(paths, pose, destination)
+
     def say(self, line):
         """One line of the Preemptive Voice Engine. Printed here, spoken later."""
         print(f"    [voice] {line}")
+
+    def handle_tick(self):
+        """Read the handle for this tick, and say what a tug or continue did.
+
+        Before the command goes out, so a tug stops the dog on the tick it is
+        felt: one control tick, 50 ms at 20 Hz, inside the spec's 100 ms.
+        """
+        t, dt = self.robot.sim_time, self.robot.CONTROL_DT
+        event = self.mux.update(self.handle.force(t), self.handle.pressed(t, dt), dt)
+        x, y, _ = self.robot.get_pose()
+        if event == "tug":
+            print(f"    t={t:6.1f}s  HANDLE tug at ({x:.2f}, {y:.2f}): stopped until continue")
+            self.say("Stopped. Press continue when you are ready.")
+        elif event == "continue":
+            print(f"    t={t:6.1f}s  HANDLE continue at ({x:.2f}, {y:.2f})")
+            self.say("Carrying on.")
+        if self.mux.stopped and not self.handle.will_continue(t):
+            self.robot.set_velocity(0.0, 0.0, 0.0)
+            raise HandleStop(f"by a tug on the handle at t={t:.1f}s on floor "
+                             f"{self.floor}; nobody pressed continue")
+
+    def handle_wait(self):
+        """The scripted moves into and out of the lift stop for a tug too.
+
+        They set the pose directly and never reach the mux, so this stands the
+        dog where it is, still filming, until continue.
+        """
+        self.handle_tick()
+        while self.mux.stopped:
+            x, y, yaw = self.robot.get_pose()
+            self.robot.place((x, y), yaw)
+            self.mux.stats["stopped_ticks"] += 1
+            self.step_crowd()
+            self.frame()
+            self.handle_tick()
 
     @staticmethod
     def clear_ahead(live, xy, target, d=LOOKAHEAD, skip=perception.SKIP):
@@ -537,18 +783,248 @@ class Run:
                                     xy[1] + dy * (d * k / steps) / span)
                    for k in range(first, steps + 1))
 
+    def body_contacts(self):
+        """(the dog's geoms, {scene geom: what it is}) for collision scoring.
+
+        The dog's geoms are everything under the body with the free joint:
+        trunk, hips, legs, feet. The scene's are everything the body must not
+        touch -- walls, crates, the lift shaft and roof, stair steps. Left out:
+        what it stands on (`ground`, the `slab`s, the lift car's `lift_plate`),
+        where contact is walking, and the people, whose geoms do not collide at
+        all and are scored by distance instead (PED_NEAR).
+        """
+        import mujoco
+        m = self.robot.model
+        root = next(m.jnt_bodyid[j] for j in range(m.njnt)
+                    if m.jnt_type[j] == mujoco.mjtJoint.mjJNT_FREE)
+
+        def ours(b):
+            while b:
+                if b == root:
+                    return True
+                b = m.body_parentid[b]
+            return False
+
+        dog, scene = set(), {}
+        for g in range(m.ngeom):
+            if ours(m.geom_bodyid[g]):
+                dog.add(g)
+                continue
+            name = mujoco.mj_id2name(m, mujoco.mjtObj.mjOBJ_GEOM, g) or ""
+            if (name == "ground" or name.startswith("slab") or name == "lift_plate"
+                    or not m.geom_contype[g] and not m.geom_conaffinity[g]):
+                continue
+            scene[g] = (name.split("_", 1)[1] if name.startswith("obs")
+                        else "stairs" if name.startswith("step")
+                        else "lift" if name.startswith("lift")
+                        else "wall")
+        return dog, scene
+
     def score_collision(self, floor, x, y):
-        """Ground truth: is the dog standing inside an obstacle right now?
+        """Ground truth: is any part of the dog touching a wall or an obstacle?
+
+        MuJoCo's own contacts between the Go2's geoms and the scene's, so the
+        whole body counts -- trunk, hips, swinging legs -- not just the point
+        at its centre. The point test this replaced scored a trunk scraping a
+        crate as clean as long as the centre stayed outside the box, and never
+        looked at walls at all.
 
         Scoring only, and never fed back into the robot -- the dog finds these
         with the LiDAR or it does not find them. A run that reports arrival
-        while this counter climbed is a run that walked through a crate, which
-        is precisely the failure that was invisible before.
+        while this counter climbed is a run that walked into something.
         """
-        for bx0, bx1, by0, by1, _h, name in obstacles.boxes(floor):
-            if bx0 <= x <= bx1 and by0 <= y <= by1:
-                self.hits["ticks"] += 1
-                self.hits["boxes"].add(f"floor {floor} {name}")
+        d = self.robot.data
+        touched = set()
+        for c in d.contact[:d.ncon]:
+            g1, g2 = int(c.geom1), int(c.geom2)
+            other = g2 if g1 in self.dog_geoms else g1 if g2 in self.dog_geoms else None
+            if other in self.touchable:
+                touched.add(self.touchable[other])
+        if touched:
+            self.hits["ticks"] += 1
+            self.hits["boxes"].update(f"floor {floor} {what}" for what in touched)
+
+    def handler_at(self):
+        """Where the person on the handle is: straight behind, along the heading."""
+        x, y, yaw = self.robot.get_pose()
+        return x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
+
+    @staticmethod
+    def door_near(gates, xy, reach):
+        """Is a doorway on the route, not yet walked through, within `reach`?"""
+        for entry, exit_, (ux, uy) in gates:
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy > depth + FUNNEL_PAST:
+                continue                          # through this one already
+            return math.dist(xy, entry) < reach
+        return False
+
+    @staticmethod
+    def funnel(gates, xy, target):
+        """(`target`, or a point on the axis of the doorway just ahead; whether
+        the dog is within DOOR_NEAR of that doorway). See FUNNEL_D."""
+        for entry, exit_, (ux, uy) in gates:
+            s = (xy[0] - entry[0]) * ux + (xy[1] - entry[1]) * uy
+            depth = (exit_[0] - entry[0]) * ux + (exit_[1] - entry[1]) * uy
+            if s > depth + FUNNEL_PAST:
+                continue                          # through this one already
+            if s < -FUNNEL_D:
+                break                             # not there yet
+            # Not a door the dog is walking past on its way somewhere else:
+            # only when it is within a funnel's width of the axis.
+            lateral = (xy[0] - entry[0]) * -uy + (xy[1] - entry[1]) * ux
+            if abs(lateral) > FUNNEL_D:
+                break
+            ahead = min(s + FUNNEL_LEAD, depth + FUNNEL_PAST)
+            return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
+        return target, False
+
+    def handler_room(self, live, x, y, yaw):
+        """What the dog can know of the room around the person, for a dog pose:
+        walls from the map, measured to their real faces rather than the
+        planner's inflated ones (clearance.wall_face_field -- the person's
+        shoulder lives in the inflation band), and crates from the LiDAR's
+        standing field."""
+        px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
+        return min(live.wall_at(px, py), live.detected_at(px, py))
+
+    def unpin(self, live, pose, dt=0.3):
+        """Yaw rate while standing still for somebody: 0, unless the person on
+        the handle is within HANDLER_ROOM of something and turning slowly one
+        way gives them more room. Waiting is not turning (see the person
+        branch), except to stop pressing someone into a wall."""
+        x, y, yaw = pose
+        now = self.handler_room(live, x, y, yaw)
+        if now >= HANDLER_ROOM:
+            return 0.0
+        best, w_best = now + 0.02, 0.0
+        for w in (UNPIN_W, -UNPIN_W):
+            room = self.handler_room(live, x, y, yaw + w * dt)
+            if room > best:
+                best, w_best = room, w
+        return w_best
+
+    @staticmethod
+    def nose_closing(live, pose, cmd, dt=0.1):
+        """Is a front corner of the dog within NOSE_MIN of something, and would
+        this command bring that corner closer still? Walking away is fine.
+
+        Corners, not the middle of the front: turning away from a crate swings
+        the middle clear while the corner on the crate's side is still closing
+        -- seed 8's front-left leg, on the cart, with the dog turning right."""
+        def corners(x, y, yaw):
+            fx, fy = x + SWING_NOSE * math.cos(yaw), y + SWING_NOSE * math.sin(yaw)
+            return [live.detected_at(fx + side * -math.sin(yaw), fy + side * math.cos(yaw))
+                    for side in (-NOSE_HALF_W, 0.0, NOSE_HALF_W)]
+        x, y, yaw = pose
+        now = corners(x, y, yaw)
+        if min(now) >= NOSE_MIN:
+            return False
+        yaw += cmd[2] * dt
+        x += cmd[0] * math.cos(yaw) * dt
+        y += cmd[0] * math.sin(yaw) * dt
+        return any(a < NOSE_MIN and b < a for a, b in zip(now, corners(x, y, yaw)))
+
+    def swing(self, live, pose, cmd, people=(), dt=0.1):
+        """Roll `cmd` forward SWING_T: (least room around the person, whether
+        the dog itself stays clear -- of everything by ROBOT_R, and of where
+        each of `people` is heading by SWING_PEOPLE)."""
+        x, y, yaw = pose
+        vx, _, w = cmd
+        worst, clear = INF, True
+        for k in range(1, int(round(SWING_T / dt)) + 1):
+            yaw += w * dt
+            x += vx * math.cos(yaw) * dt
+            y += vx * math.sin(yaw) * dt
+            worst = min(worst, self.handler_room(live, x, y, yaw))
+            clear = (clear and live(x, y) >= ROBOT_R
+                     and live.detected_at(x + SWING_NOSE * math.cos(yaw),
+                                          y + SWING_NOSE * math.sin(yaw)) >= ROBOT_R
+                     and all(math.dist((x, y), p.predict(k * dt)) >= SWING_PEOPLE
+                             for p in people))
+        return worst, clear
+
+    def spare_handler(self, live, pose, cmd, limit, people=()):
+        """`cmd`, with its turn eased where it would swing the person into
+        something. See HANDLER_ROOM. `limit` is the speed every other rule
+        has already allowed; easing never walks faster than it.
+
+        `people` are the person-sized tracks. Easing walks on where the
+        command would have pivoted, and on seeds 4 and 12 of `room 201
+        --pedestrians 3` that walked the dog to 0.42 m of somebody standing
+        beside it. So an eased command that walks further than the original
+        must keep SWING_PEOPLE from where each of them is heading, or the
+        turn goes ahead as commanded. Only then: holding every eased command
+        to it, whether or not it added a step, turned the dog's easing off
+        wherever anyone was near, and put the person on the handle back
+        against walls on 5 seeds of 12."""
+        now = self.handler_room(live, *pose)
+        worst, _ = self.swing(live, pose, cmd)
+        if worst >= HANDLER_ROOM or worst >= now:
+            return cmd
+        vx, vy, w = cmd
+        v = max(vx, min(SWING_V, limit))
+        best = None
+        for f in SWING_EASE:
+            alt = (v, vy, w * f)
+            room, clear = self.swing(live, pose, alt, people if v > vx else ())
+            if not clear:
+                continue
+            if room >= HANDLER_ROOM or room >= now:
+                best = (room, alt)
+                break
+            if best is None or room > best[0]:
+                best = (room, alt)
+        if best is None or best[0] <= worst:
+            return cmd
+        self.obs["eased"] += 1
+        return best[1]
+
+    def score_handler(self, floor):
+        """Ground truth for the person: is their body touching anything?
+
+        They are not in the MuJoCo scene, so this asks the scene with rays: a
+        ring of HANDLER_RAYS at each of HANDLER_H, and a hit within HANDLER_R
+        of their centre is a touch. A ray starting inside a solid box sees
+        nothing of it, so one more straight down from above the crates: landing
+        on something before the floor means they are standing in it. Scoring
+        only, like score_collision.
+        """
+        import mujoco
+        m, d = self.robot.model, self.robot.data
+        px, py = self.handler_at()
+        z0 = levels.floor_z(floor)
+        gid = np.zeros(1, np.int32)
+        touched = set()
+
+        def ray(p, v, reach):
+            dist = mujoco.mj_ray(m, d, np.array(p, float), np.array(v, float),
+                                 None, 1, -1, gid)
+            if 0 <= dist <= reach and int(gid[0]) in self.touchable:
+                touched.add(self.touchable[int(gid[0])])
+
+        for h in HANDLER_H:
+            for k in range(HANDLER_RAYS):
+                a = 2 * math.pi * k / HANDLER_RAYS
+                ray((px, py, z0 + h), (math.cos(a), math.sin(a), 0.0), HANDLER_R)
+        ray((px, py, z0 + 1.5), (0.0, 0.0, -1.0), 1.45)
+        # When and where each touch starts and ends, so a total can be traced
+        # back to the moment it happened.
+        x, y, yaw = self.robot.get_pose()
+        if touched and self.handler_hits["since"] is None:
+            self.handler_hits["since"] = self.robot.sim_time
+            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch starts: dog "
+                  f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
+                  f"({px:.2f}, {py:.2f}), touching {', '.join(sorted(touched))}")
+        elif not touched and self.handler_hits["since"] is not None:
+            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch ends after "
+                  f"{self.robot.sim_time - self.handler_hits['since']:.1f}s: dog "
+                  f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
+                  f"({px:.2f}, {py:.2f})")
+            self.handler_hits["since"] = None
+        if touched:
+            self.handler_hits["ticks"] += 1
+            self.handler_hits["boxes"].update(f"floor {floor} {what}" for what in touched)
 
     # -- the crowd ------------------------------------------------------
     def place_crowd(self):
@@ -622,6 +1098,7 @@ class Run:
                 return held
             if self.held_still >= PATIENCE * FPS:
                 self.say("They have stopped. I will go around them.")
+                self.passing = (held.x, held.y)
                 self.waiting_for, self.waited, self.held_still = None, 0, 0
                 return None
 
@@ -661,6 +1138,12 @@ class Run:
         """
         self.floor = floor
         self.robot.set_height(levels.floor_z(floor))
+        # An answer still on its way from the last leg is about a corridor the
+        # dog has left -- another floor, or the far side of a lift ride.
+        if self.pending is not None:
+            self.pending = None
+            self.vlm["dropped"] += 1
+        self.passing = None
         if not waypoints:
             # Asked for where it already is. A* has no checkpoints to give for
             # a route of zero length, and every line below indexes into them --
@@ -671,7 +1154,11 @@ class Run:
             return True, 0
         i = 1 if len(waypoints) > 1 else 0
         said = set()
-        chosen, candidates, safety = None, [], 1.0
+        gates = self.router.gates(floor, waypoints)
+        # `proposed` is what VAMOS last offered and the gate let through;
+        # `chosen` is what steers -- the same thing under --vamos, never
+        # anything under --shadow.
+        proposed, chosen, candidates, safety = None, None, [], 1.0
         hunting = halted = False
         stalled = no_goal = 0
         lean = 0.0                # the side of a detour once it is committed
@@ -716,6 +1203,7 @@ class Run:
             live.exclude([(t.x, t.y, t.r) for t in walking])
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
+            self.score_handler(floor)
             self.score_people(floor, x, y)
 
             # Picked from the body, projected from the lens -- see
@@ -729,6 +1217,7 @@ class Run:
             # crate is five candidate paths into the crate -- measured, before
             # this existed. Move the goal and the model has something to solve.
             aim, offset, blocked = None, 0.0, False
+            no_way = False            # the map has a route destination and no clear aim
             # Whenever the route has a destination -- not only when the camera
             # can see it. This used to read `if state["state"] == "TRACK"`, and
             # that is a camera test standing in for a safety one: ALIGN means
@@ -759,8 +1248,33 @@ class Run:
                     if q is not None and line_clear((x, y), q, live.static_at, ROBOT_R):
                         probe = q
                         break
-                aim, offset = free_destination(state["destination"], (x, y), live,
-                                               probe=probe, prefer=lean)
+                # And not across a corner either. The destination is 2-4 m along
+                # the route, so near a turn it is round the corner, and the
+                # straight line to it cuts across whatever the route goes past.
+                # `chemistry lab` turns into a south door 1.2 m after the
+                # cartons: the line from the lane to the far side of the turn
+                # crossed them, avoidance sent the dog round their east end,
+                # and it pivoted beside them with its body in them. If the
+                # route itself -- the dog to the corner, the corner to the
+                # destination -- is clear of everything the LiDAR has found,
+                # there is nothing to go round: follow it.
+                #
+                # Round a person who has stopped, the room is a person's, not a
+                # crate's. Where there is not that much, the crate's will do --
+                # slowly, below -- rather than no way past at all.
+                need = PASS_NEED if self.passing else perception.DESTINATION_CLEAR
+                dest, corner = state["destination"], waypoints[i]
+                around = (math.dist((x, y), corner) + math.dist(corner, dest)
+                          > math.dist((x, y), dest) + 0.1)
+                if (around and line_clear((x, y), corner, live.detected_at, need)
+                        and line_clear(corner, dest, live.detected_at, need, skip=0.0)):
+                    aim, offset = dest, 0.0
+                else:
+                    aim, offset = free_destination(dest, (x, y), live, probe=probe,
+                                                   prefer=lean, need=need)
+                    if aim is None and self.passing:
+                        aim, offset = free_destination(dest, (x, y), live,
+                                                       probe=probe, prefer=lean)
                 # Which way round it went, kept until the thing is out of
                 # sight: a detour that changes its mind halfway is a swerve,
                 # and the announcement below has already told the person which
@@ -771,6 +1285,7 @@ class Run:
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
                 no_goal = no_goal + 1 if aim is None else 0
+                no_way = aim is None
                 blocked = no_goal >= BLOCKED_TICKS
                 # Re-aiming the VLM is still a TRACK-only affair: a goal pixel
                 # is what VAMOS consumes, and during an alignment turn there is
@@ -785,13 +1300,21 @@ class Run:
             # Ask again sooner while nothing has cleared: the view changes as
             # the dog closes in, and a candidate that was not there at 4 m
             # often is at 2 m.
-            due = n % (REPLAN_BLOCKED if chosen is None else REPLAN_EVERY) == 0
-            if self.vamos and state["state"] == "TRACK" and due:
-                chosen, candidates, safety = self.policy(floor).plan(
-                    self.robot.get_image(), vamos_prompt(state),
-                    self.robot.camera_pose(), state["destination"], pose=(x, y, yaw))
+            # Asked on schedule, answered whenever the answer lands; the loop
+            # carries on either way. `asked` is an answer arriving this tick.
+            due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
+            if ((self.vamos or self.shadow) and state["state"] == "TRACK" and due
+                    and self.pending is None):
+                self.ask_vamos(floor, n, state)
+            answer = self.take_answer(floor, n, (x, y, yaw),
+                                      state.get("destination") or waypoints[-1])
+            asked = answer is not None
+            if asked:
+                proposed, candidates, safety = answer
+            if self.vamos:
+                chosen = proposed
 
-            self.frame(state, chosen, candidates, safety if chosen else None)
+            self.frame(state, proposed, candidates, safety if proposed else None)
 
             if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r:
                 for line in (announcements[-1] if announcements else []):
@@ -810,9 +1333,16 @@ class Run:
             # reject a path that is fine for 2 m and leads nowhere at 4 m.
             # Spec L4 step 5 -- the LoRA fine-tune -- is what would let the
             # model make this turn itself; until then the map makes it.
-            on_vamos = bool(chosen) and state["state"] == "TRACK" and not offset
+            #
+            # Only what is left of the path in front of the dog. It is held
+            # until the next answer lands, which can now be a couple of metres
+            # of walking later, and a path walked to its end is spent, not a
+            # reason to turn round for its first point.
+            rest = ahead(chosen, (x, y)) if chosen else []
+            on_vamos = (len(rest) >= 2 and state["state"] == "TRACK" and not offset
+                        and not self.door_near(gates, (x, y), DOOR_MAP_D))
             if on_vamos:
-                tx, ty = path_target(chosen, (x, y))
+                tx, ty = path_target(rest, (x, y))
             elif offset:
                 # Nothing VAMOS offered survived the gate, but the goal has been
                 # moved clear of what the sensor found, so steer at that rather
@@ -822,15 +1352,28 @@ class Run:
                 tx, ty = aim
             else:
                 tx, ty = waypoints[i]
+            at_door = False
+            if not offset:
+                (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
+            if asked and self.shadow:
+                self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
 
             # Reported, not acted on: free_destination already decided whether
             # there is a way through, and this is how much room it left.
             self.obs["min_clear"] = min(self.obs["min_clear"],
                                         self.clear_ahead(live, (x, y), (tx, ty)))
             # Stepping round something is not being stuck: only count it as
-            # searching when there is no detour to follow either.
+            # searching when there is no detour to follow either -- and no
+            # clear way on the route itself. This used to crawl whenever VAMOS
+            # had nothing and the LiDAR saw anything at all, a crate 8 m off or
+            # somebody at the far end of the corridor, while free_destination
+            # had already found the route clear and the map-only dog walked it
+            # at full pace. Gate D, 21 pairs: 266.7 s of crawling under
+            # --vamos against 0.0 s map-only, and the candidate slower on every
+            # pair (chemistry lab +33 s). VAMOS offering nothing is not a
+            # reason to slow down; the map having no way past is.
             searching = (self.vamos and chosen is None and not offset
-                         and len(live.points) > 0)
+                         and len(live.points) > 0 and no_way)
             touching = live.detected_at(x, y) < ROBOT_R
 
             err = wrap(math.atan2(ty - y, tx - x) - yaw)
@@ -912,6 +1455,14 @@ class Run:
                         return False, n
                 else:
                     stalled, halted = 0, False
+            if self.passing is not None:
+                # Walking past somebody, not striding: the person on the handle
+                # passes them at the same distance a moment later.
+                px, py = self.passing
+                if math.dist((x, y), (px, py)) < PASS_R:
+                    speed = min(speed, PASS_V)
+                elif (px - x) * math.cos(yaw) + (py - y) * math.sin(yaw) < 0:
+                    self.passing = None          # behind the dog, and clear
             if person is not None:
                 # Waiting is not being stuck, and the give-up timer must not
                 # think it is. Without this the dog announces that it cannot
@@ -921,7 +1472,7 @@ class Run:
                 # somebody walking past is what a dog does and is not what a
                 # handle attached to a person's arm should do.
                 if self.waited < YIELD_MAX * FPS:
-                    speed, err = 0.0, 0.0
+                    speed, err = 0.0, self.unpin(live, (x, y, yaw)) / K_W
                 else:
                     # They are not going anywhere. Neither can the dog stand
                     # here for ever, so creep and keep asking.
@@ -929,9 +1480,19 @@ class Run:
                         self.say("They are not moving. Going slowly.")
                     speed *= CRAWL
 
-            self.robot.set_velocity(
-                0.0 if abs(err) > TURN_ONLY else speed * math.cos(err),
-                0.0, K_W * err)
+            turn_only = DOOR_ERR if at_door else TURN_ONLY
+            cmd = (0.0 if abs(err) > turn_only else speed * math.cos(err), 0.0, K_W * err)
+            if cmd[0] > 0.0 and self.nose_closing(live, (x, y, yaw), cmd):
+                cmd = (0.0, 0.0, cmd[2])
+            if speed > 0.0:
+                people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
+                cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)
+            # Last: the person on the handle overrules everything above.
+            self.handle_tick()
+            cmd = self.mux.apply(cmd, self.robot.MAX_V)
+            self.commands.update(struct.pack("3d", *cmd))
+            self.n_commands += 1
+            self.robot.set_velocity(*cmd)
             self.robot.step()
 
             if verbose and n % 60 == 0:
@@ -976,6 +1537,7 @@ class Run:
         dyaw = wrap(yaw - yaw0)
         ticks = max(int(math.dist((x, y), to_xy) / (STEP_V * self.robot.CONTROL_DT)), 1)
         for k in range(1, ticks + 1):
+            self.handle_wait()
             t = k / ticks
             self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t),
                              yaw0 + dyaw * t, z=z)
@@ -987,6 +1549,7 @@ class Run:
         d = wrap(to_yaw - from_yaw)
         xy = self.robot.get_pose()[:2]
         for k in range(1, int(seconds / self.robot.CONTROL_DT) + 1):
+            self.handle_wait()
             self.robot.place(xy, from_yaw + d * k / (seconds / self.robot.CONTROL_DT), z=z)
             self.step_crowd()
             self.frame()
@@ -994,6 +1557,7 @@ class Run:
     def hold(self, seconds):
         """Stand still, still filming."""
         for _ in range(int(seconds / self.robot.CONTROL_DT)):
+            self.handle_tick()
             self.robot.place(self.robot.get_pose()[:2], self.robot.get_pose()[2])
             self.step_crowd()
             self.frame()
@@ -1064,6 +1628,21 @@ def main():
     ap.add_argument("--no-video", action="store_true", help="drive without rendering")
     ap.add_argument("--nlu", action="store_true", help="parse through the Gemma layer")
     ap.add_argument("--vamos", action="store_true", help="VLM in the steering loop")
+    ap.add_argument("--shadow", action="store_true",
+                    help="ask VAMOS and score its paths with the dream, but let the map "
+                         "route drive; every call is logged to --shadow-log")
+    ap.add_argument("--shadow-log", default=str(paths.OUTPUT_DIR / "shadow_log.jsonl"),
+                    metavar="PATH", help="where --shadow writes one JSON line per VAMOS call")
+    ap.add_argument("--vamos-url", default=None, metavar="URL",
+                    help="VAMOS server (default http://127.0.0.1:8009)")
+    ap.add_argument("--vlm-latency", type=float, default=None, metavar="S",
+                    help="with --vamos or --shadow: seconds of sim time before a VAMOS "
+                         "answer arrives; the control loop runs on meanwhile (default: "
+                         "the call's measured time; fix it for repeatable runs)")
+    ap.add_argument("--vamos-sample", action="store_true",
+                    help="with --vamos or --shadow: let VAMOS sample its paths "
+                         "(temperature 1.0, different every run) instead of beam "
+                         "search, which gives the same paths for the same frame")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
     ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
@@ -1071,9 +1650,18 @@ def main():
                          "they are on no map, and the dog stops for them")
     ap.add_argument("--seed", type=int, default=0,
                     help="which crowd -- the same seed is the same people every run")
+    ap.add_argument("--handle", default="", metavar="EVENTS",
+                    help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
+                         '"pull@20-25", "push@26-28" (see sim/handle.py)')
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
+    if args.vamos and args.shadow:
+        ap.error("--vamos steers with VAMOS and --shadow never does; pick one")
+    try:
+        handle = HandleScript(args.handle)
+    except ValueError as bad:
+        ap.error(str(bad))
 
     scene = str(paths.BUILDING_SCENE)
     if not os.path.exists(scene):
@@ -1100,7 +1688,10 @@ def main():
         if len(first) > 1 else 0.0
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
-              crowd=args.pedestrians, seed=args.seed)
+              crowd=args.pedestrians, seed=args.seed,
+              shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
+              vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
+              handle=handle)
 
     ok, halted = True, None
     try:
@@ -1131,9 +1722,12 @@ def main():
     run.close()
 
     x, y, _ = run.robot.get_pose()
-    if halted is not None:
+    if isinstance(halted, HandleStop):
+        print(f"STOPPED {halted}")
+    elif halted is not None:
         print(f"HALTED {halted}")
-    print(f"{'ARRIVED' if ok else 'FAILED'} on floor {run.floor} at ({x:.1f}, {y:.1f}) "
+    outcome = "ARRIVED" if ok else "STOPPED" if isinstance(halted, HandleStop) else "FAILED"
+    print(f"{outcome} on floor {run.floor} at ({x:.1f}, {y:.1f}) "
           f"after {run.robot.sim_time:.0f}s of sim time")
     for floor, p in sorted(run.policies.items()):
         st = p.stats
@@ -1142,15 +1736,44 @@ def main():
               f"{st['rejected']} candidates rejected "
               f"({st['rejected_by_gate']} of them by the safety gate), "
               f"mean safety of the paths it followed {mean:.2f}")
+    if args.vamos or args.shadow:
+        v = run.vlm
+        k = max(v["answers"], 1)
+        dropped = v["dropped"] + (run.pending is not None)
+        print(f"VLM ASYNC: {v['asked']} asked, {v['answers']} answered, {dropped} "
+              f"dropped at a leg's end; answers were {v['age'] / k:.1f}s old on "
+              f"arrival, the dog {v['moved'] / k:.2f} m on from where it asked; "
+              f"the control loop never waited")
+    if run.shadow is not None:
+        run.shadow.close()
+        sn = run.shadow_n
+        print(f"SHADOW: {sn['calls']} VAMOS calls logged, {sn['steer']} would have "
+              f"steered more than {math.degrees(SHADOW_DISAGREE):.0f} deg off the map "
+              f"route, {sn['none']} had nothing pass the gate -> {args.shadow_log}")
+    # Tick for tick what the dog was told to do; compare across runs.
+    print(f"commands: {run.n_commands} ticks, sha256 {run.commands.hexdigest()[:16]}")
     o, h = run.obs, run.hits
     print(f"obstacles: up to {o['seen']} returns the map could not explain, "
           f"{o['crawl'] / FPS:.1f}s crawling, {o['stopped'] / FPS:.1f}s stopped, "
           f"least clearance ahead {o['min_clear']:.2f} m")
     # Ground truth, and the only line here the robot cannot flatter itself on.
     if h["ticks"]:
-        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s inside {', '.join(sorted(h['boxes']))}")
+        print(f"COLLISIONS: {h['ticks'] / FPS:.1f}s touching {', '.join(sorted(h['boxes']))}")
     else:
-        print("collisions: none -- the dog never entered an obstacle's footprint")
+        print("collisions: none -- no part of the dog touched a wall or an obstacle")
+    hh = run.handler_hits
+    if hh["ticks"]:
+        print(f"HANDLER: {hh['ticks'] / FPS:.1f}s with the person on the handle touching "
+              f"{', '.join(sorted(hh['boxes']))}")
+    else:
+        print("handler: none -- the person on the handle never touched a wall or an obstacle")
+    print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
+    if args.handle:
+        hs = run.mux.stats
+        print(f"handle: {hs['tugs']} tug(s), {hs['continues']} continue(s), "
+              f"{hs['stopped_ticks'] / FPS:.1f}s stopped by the person, "
+              f"{hs['slowed_ticks'] / FPS:.1f}s slowed by a pull, "
+              f"lowest pace {hs['lowest_pace']:.0%} of top speed")
     # Also when there are none: a yield in an empty building is a false
     # positive, and it should be as visible as a collision is.
     if args.pedestrians or run.ped["yields"]:

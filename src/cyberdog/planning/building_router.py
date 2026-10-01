@@ -33,6 +33,8 @@ import yaml
 from cyberdog.mapping.occupancy_grid import OccupancyGrid  # noqa: E402
 from cyberdog.mapping.behavior_layer import BehaviorLayer  # noqa: E402
 from cyberdog.mapping.astar_planner import AStarPlanner  # noqa: E402
+from cyberdog.mapping.lane import (bridge_doors, door_gates, doorway_cells,  # noqa: E402
+                                   keep_side, round_corners)
 
 from cyberdog.paths import BUILDING_DIR, MAP_CONFIG as CONFIG_PATH
 
@@ -73,6 +75,17 @@ class BuildingRouter:
             cfg = yaml.safe_load(f)["map"]
         radius = max(cfg.get("robot_radius", 0.0) - cfg.get("grid_inflation", 0.0), 0.0)
         self.plan_grids = {n: g.inflate(radius) for n, g in self.grids.items()}
+        # Which side of a corridor to walk, and how far from its wall. The
+        # config gives the distance from the wall face; the planning grids
+        # already stop that much short of it (their total inflation), so the
+        # lane is placed in their terms. See mapping/lane.py.
+        lane = cfg.get("lane", {})
+        self.lane_side = lane.get("side", "none")
+        inflated = max(cfg.get("robot_radius", 0.0), cfg.get("grid_inflation", 0.0))
+        self.lane_distance = max(lane.get("wall_distance", 0.0) - inflated, 0.0)
+        self.lane_width = max(lane.get("max_corridor", 3.5) - 2 * inflated, 0.0)
+        self.turn_radius = lane.get("turn_radius", 0.0)
+        self._lane_walls = {}
         self.behavior = BehaviorLayer.from_config(
             config_path, zones_path=os.path.join(building_dir, "zones.json"))
         # A stop zone is not something to route through and halt at -- it is
@@ -276,20 +289,71 @@ class BuildingRouter:
                 f"take stairs. I cannot get you to floor {to_floor} from here.")
         return self.resolve(TRANSIT_NODE, from_floor, xy, floor=from_floor)
 
-    def plan(self, start_floor, start_xy, target):
-        """Returns a list of (floor, Route) legs, or None if any leg fails."""
+    def lane(self, floor):
+        """The path reshaping for one floor's legs: keep to lane_side."""
+        if self.lane_side == "none":
+            return None
+        grid = self.plan_grids[floor]
+        walls = self.lane_walls(floor)
+        return lambda path: keep_side(path, grid, walls, self.lane_side,
+                                      self.lane_distance, self.lane_width)
+
+    def lane_walls(self, floor):
+        """The floor's planning grid with doorways bridged -- lane.bridge_doors."""
+        if floor not in self._lane_walls:
+            self._lane_walls[floor] = bridge_doors(self.plan_grids[floor])
+        return self._lane_walls[floor]
+
+    def doorways(self, floor):
+        """Boolean grid of the floor's doorway cells -- lane.doorway_cells."""
+        return doorway_cells(self.plan_grids[floor], self.lane_walls(floor))
+
+    def gates(self, floor, points):
+        """The doorways a walk line goes through -- lane.door_gates."""
+        return door_gates(points, self.plan_grids[floor], self.doorways(floor))
+
+    def walk_line(self, floor, route):
+        """(points, announcements per point): what the dog actually follows.
+
+        The whole simplified polyline, not only its checkpoints. Checkpoints
+        are where something is said, and they skip gentle bends -- one of
+        which was the lane's move from the entrance door to the right-hand
+        side, so the dog walked a 41 m diagonal across the corridor instead of
+        the lane. Corners are rounded (lane.round_corners) so the person on
+        the handle is not swung into what is beside the turn.
+        """
+        says = [[] for _ in route.polyline]
+        for c in route.checkpoints:
+            says[c.index] = list(c.announcements)
+        points = [(float(x), float(y)) for x, y in route.polyline]
+        if self.turn_radius <= 0:
+            return points, says
+        return round_corners(points, says, self.plan_grids[floor], self.turn_radius)
+
+    def plan(self, start_floor, start_xy, target, lift_stop=None):
+        """Returns a list of (floor, Route) legs, or None if any leg fails.
+
+        `lift_stop` is where the dog waits outside the lift, if the caller
+        knows: the leg to the lift ends there and the leg out starts there,
+        instead of both at the car's centre. Cut back afterwards, a leg from
+        the car lost its first lane point -- it is in the mouth of the shaft --
+        and the dog walked a 41 m diagonal from the lift to the far end.
+        """
         legs = []
         floor, xy = start_floor, tuple(start_xy)
         if target["floor"] != floor:
             lift = self.transit(floor, target["floor"], xy)
-            leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy, tuple(lift["xy"]))
+            stop = tuple(lift_stop) if lift_stop is not None else tuple(lift["xy"])
+            leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy,
+                                                     stop, reshape=self.lane(floor))
             if leg is None:
                 return None
             leg.checkpoints[-1].announcements = [f"Take the lift to floor {target['floor']}"]
             legs.append((floor, leg))
-            floor, xy = target["floor"], tuple(lift["xy"])
+            floor, xy = target["floor"], stop
 
-        leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy, tuple(target["xy"]))
+        leg = self.planner.plan_with_checkpoints(self.plan_grids[floor], self.behavior, xy,
+                                                 tuple(target["xy"]), reshape=self.lane(floor))
         if leg is None:
             return None
         legs.append((floor, leg))

@@ -735,6 +735,14 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", type=str, required=True, help="Path to preload model")
     parser.add_argument("--use_fp32", action="store_true", help="Use FP32 precision")
     parser.add_argument("--trust_remote_code", action="store_true", default=True, help="Trust remote code")
+    # CyberDog: upstream hard-coded uvicorn's limit_max_requests=1000, which
+    # recycles the process after 1000 requests. That is for a supervisor that
+    # restarts it; run by hand nothing does, and the server simply exited in
+    # the middle of every Gate D campaign (log: "Maximum request limit of 1000
+    # exceeded. Terminating process."). Default now: no limit.
+    parser.add_argument("--max_requests", type=int, default=0,
+                        help="Exit after this many requests, for a supervisor to restart "
+                             "(0 = never, the default)")
     
     args = parser.parse_args()
     
@@ -762,7 +770,7 @@ if __name__ == "__main__":
         host=host, 
         port=port, 
         workers=1,
-        limit_max_requests=1000,
+        limit_max_requests=args.max_requests or None,
         limit_concurrency=100,
         timeout_keep_alive=30
     )

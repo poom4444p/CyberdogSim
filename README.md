@@ -188,11 +188,33 @@ bad run as a bug.
 
 ### 7. Check everything works
 
+Run these from the repo root, in `cyberdog_sim` -- **not** `vamos_mac`. If you
+just started the VLM server (step 6), that terminal is still in `vamos_mac`;
+open a new one or switch back first.
+
 ```bash
+conda activate cyberdog_sim
 python tests/selftest.py          # every stage of the stack, ~2 min
 python tests/selftest.py lidar    # or just one stage
 pytest                            # unit tests
 ```
+
+Or, without changing the active environment:
+
+```bash
+conda run -n cyberdog_sim --no-capture-output python tests/selftest.py
+```
+
+Stages run bottom-up and can be named one at a time: `scene`, `lidar`,
+`perception`, `destination`, `crowd`, `latency`, `dreaming`, `vamos`, `run`.
+Each check prints `[PASS]` or `[FAIL]` with the number it judged on, and the
+run ends with `ALL PASS` or the list of failures. The first failure is usually
+the real one -- a bad scene fails every stage above it.
+
+- The `vamos` stage uses a stand-in server, so it needs neither the VLM server
+  nor the `vamos_mac` environment.
+- `pytest` skips `selftest.py` on purpose (see `pyproject.toml`); run it
+  directly as above.
 
 ---
 
@@ -204,7 +226,10 @@ it are only the call chain.
 **`No module named 'cyberdog'`**
 The package isn't installed in the active environment. `conda activate
 cyberdog_sim`, then `pip install -e .`. Import names start at `cyberdog`, never
-`src`.
+`src`. Most often the wrong environment is active -- `vamos_mac` after starting
+the VLM server. `python -c "import sys; print(sys.executable)"` should print a
+path inside `.../envs/cyberdog_sim/` (`which python` can show a pyenv shim even
+when the right interpreter runs).
 
 **`No module named 'torch'` (with `--nlu` or during training)**
 The command parser's extra is missing: `pip install -e ".[language]"`.
@@ -253,6 +278,7 @@ All commands run in `cyberdog_sim`, from the repo root. Flags combine freely.
 | `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog stops for them |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
+| `python -m cyberdog.sim.run_building restroom --handle "tug@10,continue@15"` | The person on the handle: a tug at 10 s stops the dog until continue at 15 s; `pull@T1-T2` slows it, `push@T1-T2` undoes a pull (`sim/handle.py`) |
 | `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer (needs `.[language]`) |
 | `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
 | `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |
@@ -430,13 +456,117 @@ to be binding.
   nearly every candidate goes through the entrance wall, so its paths are barely
   on screen. Give it a floor-1 destination (`room 101`, `cafeteria`) to watch it
   steer down a corridor.
-- `--vamos` is **not reproducible.** The VLM server samples at `temperature=1.0`
-  and the client sends neither a temperature nor a seed, so two identical
-  commands give different paths. `--seed` pins the crowd, not the model. The two
-  `room 201` runs above differed by 2 calls and 16 candidates on the same route.
-- The collision counter is a **point test** on the dog's centre, not its body, so
-  it scores a graze as clean. Margins in the passing runs were around 0.1 m of
-  actual trunk clearance.
+- `--vamos` **is reproducible with `--vlm-latency` fixed.** The client asks for
+  its 5 candidates by beam search (`num_beams=5`, `temperature=0`) rather than
+  the server's default sampling at `temperature=1.0`, which gave 5 different
+  paths for the same frame on every call. Beam search gives the same 5, still
+  distinct, at the same 1.6 s. `second floor restroom --nlu --vamos
+  --pedestrians 4 --seed 2 --vlm-latency 1.8` now repeats tick for tick (same
+  `commands:` sha256). Without `--vlm-latency` an answer lands after the
+  call's measured time, which varies, so runs still drift. `--vamos-sample`
+  goes back to sampling.
+- **VAMOS answers arrive late, and the loop does not wait for them.** A call
+  takes about 1.8 s against the real server. It used to block the control loop
+  while the twin paused the world, which hid that a real dog would walk on
+  blind for that long. Now a request is sent from one tick's image and its
+  answer lands `--vlm-latency` seconds of sim time later (default: the call's
+  measured time). Meanwhile the 50 ms loop keeps its LiDAR, stop and yield. A late
+  answer is cut to what is still ahead of the dog and re-dreamed from where
+  it is now, so a path that has run into something since is rejected on
+  arrival. Runs print `VLM ASYNC:` with how old the answers were and how far
+  the dog had moved. The `--vamos` results above predate this.
+- **Collisions are whole-body, and routes keep right.** `COLLISIONS:` is
+  MuJoCo's contacts between the whole Go2 body and the walls, crates, lift and
+  stairs. It used to be a point test on the dog's centre against the crates
+  only, which hid the dog scraping the south corridor wall on `restroom`,
+  `room 101` and `room 201` for up to 13 s. A\*'s shortest line ran along the
+  edge of the free space, 0.25 m from the wall face. Three fixes, and all 8
+  routes are now clean:
+  - Routes keep to the right-hand side of corridors, 0.75 m from the wall, as
+    pedestrians do in Denmark (`lane` in `config/map_config.yaml`,
+    `mapping/lane.py`). Rooms and lobbies have no lane.
+  - Line simplification and checkpoint extraction never replace a stretch of
+    route with a straight line that leaves free space. The dropped doorway
+    point was cutting `room 101`'s door frame.
+  - Avoidance follows the route round a corner when the route itself is
+    clear, instead of detouring from a straight line that cuts across an
+    obstacle. That line walked `chemistry lab` into the cartons once it kept
+    right.
+- **The person on the handle is scored.** They are modelled 1.1 m straight
+  behind the dog on a rigid handle, with a 0.25 m radius. `HANDLER:` reports
+  their contact with walls, crates, lift and stairs. On a turn of radius r
+  they swing √(r² + 1.1²) − r outside the dog's path, so a sharp corner puts
+  them into whatever is beside it. Contact started on 7 of 8 routes and is now
+  **0 of 8**, and the self-test fails on any (`person on the handle
+  untouched`).
+
+  What fixed it: the dog follows the whole route, not only its announcement
+  checkpoints (these skipped the lane's bends). Corners are arcs of up to
+  1.5 m radius (`lane.turn_radius`). The lane is 0.75 m from the wall, to
+  leave room for the swing. Legs to and from the lift start at the waiting
+  point outside it. Across a lobby the route blends into the lane instead of
+  making an S-bend. Then three things in `run_building.py`:
+  - **Turns are checked for the person** (`spare_handler`). Every contact
+    left was a turn: a pivot beside the crate just gone round, a left turn
+    past the lift. Each command is rolled forward 0.8 s; where it would bring
+    the person within 0.35 m of a wall or a detected obstacle, the turn is
+    eased and the dog keeps walking, so the arc widens. Walls are measured to
+    their real faces, not the planner's inflated ones.
+  - **The lift shaft's side walls are on the map** (`lift.SHAFT_WALLS`, folded
+    into `clearance.py`). They were in the scene and not the grid, 0.5 m into
+    floor the map called open, and the LiDAR's returns off them were thrown
+    away as "already mapped".
+  - **Doors are entered on their axis** (`funnel`). From 2 m out the dog
+    steers onto the doorway's centre line, and in the last metre it lines up
+    before it walks. A dog off the route -- round a person, or on a VAMOS
+    path -- used to reach the frame 0.5 m off-centre and pivot there, which
+    swung the person into the floor-2 crate beside the restroom door.
+    Reshaping the route to meet doors square was tried and made it worse for
+    doors on the lane's own side of the corridor; the funnel alone does it.
+- **People.** Pedestrians keep right, and cross the corridor all run long,
+  from the left and the right, straight or on a slant. Before, every walker
+  became a corridor-walker after its first leg, so nobody near the dog was
+  crossing at all, and up to half came head-on down the dog's own side.
+  Someone the dog is standing in front of steps round it after 2 s
+  (`GIVE_WAY`), which ends standoffs where each waited for the other. When
+  the dog goes round someone who has stopped, it keeps 0.6 m from them, not
+  a crate's 0.35 m, and walks at 0.4 m/s.
+  It does **not** step back first: that was tried, and reversing pushes the
+  rigid handle into the person holding it.
+
+  Over 40 seeds of `room 201 --pedestrians 3`, all arrive and the dog touches
+  nothing. The person on the handle touches something on 6 (5.8 s in all,
+  every one a wall -- never a box), and 7 seeds come within 0.55 m of a
+  pedestrian (8.5 s in all). Before the fixes below: 7 seeds and
+  7.5 s on the handle, 5 of them against the cart or crate, and 13 seeds and
+  18.3 s of pedestrian contact.
+  - **Easing a turn keeps clear of people** (`SWING_PEOPLE`). It walks on
+    where the dog would have pivoted, and on seeds 4 and 12 that walked it
+    towards somebody standing beside it. A step easing adds keeps 0.7 m from
+    where each person-sized track is heading, or the turn goes ahead.
+  - **No avoidance goal behind a wall.** A point shifted 1.6 m sideways out
+    of the corridor is open floor in the room behind it, and the line to it
+    was only checked against what the LiDAR found; seed 8 walked into the
+    floor-2 north wall for 6.5 s. Lines may no longer enter a wall, tested
+    against the real wall faces (`clearance.wall_face_field`).
+  - **Straight past a box leaves room for the person** (`PERSON_LINE`). The
+    dog passed the floor-2 cart and crate 0.23 m clear, enough for itself;
+    the person follows the same line 1.1 m behind and is 0.25 m across the
+    shoulders. A line now counts as clear, no detour needed, only with 0.35 m
+    to spare; with less, the dog leans away. Rounding a corner still needs
+    only the dog's 0.20 m (`LINE_NEED`).
+  - **The front of the dog is guarded** (`NOSE_MIN`, `SWING_NOSE`). The
+    proximity stop reads the centre, and the Go2 is twice as long as it is
+    wide: seed 8 kept 0.25 m at the centre and put a front leg on the cart's
+    corner. Walking on is refused while either front corner is within 0.15 m
+    of something and closing -- the dog turns first -- both in the command
+    and in an eased one.
+
+  What is left is not boxes: people walking into a dog that is standing and
+  waiting, going round somebody who has stopped, overtaking in the same
+  lane -- people heading west keep to the north lane (y = 10.40), which is
+  also the dog's lane (y ≈ 10.10), and pedestrians do not yet overtake on
+  the left -- and the person against a wall on a turn round somebody.
 - Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone

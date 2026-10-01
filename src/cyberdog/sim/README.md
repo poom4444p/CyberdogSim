@@ -187,7 +187,10 @@ probability; weighted by how much room they left, that is the safety factor:
 
 where `room` is the mean closest approach scaled to [0, 1] between the robot
 radius (0.16) and 0.40 m, so a run that survives but scrapes still keeps 0.4
-of its score. It is in the spirit of the spec's chance constraint (CE-RRT*,
+of its score. Within half a metre of the start only getting *closer* than the
+start counts -- otherwise, from a pose beside a wall, every candidate's
+closest approach is the spot they all begin on, and the one that steers away
+ties with the one that hugs it. It is in the spirit of the spec's chance constraint (CE-RRT*,
 P_coll < 0.01) reached by sampling rather than algebra -- but not that
 constraint: the gate at 0.5 lets through a path with P_coll = 0.2, and 24
 rollouts cannot resolve 0.01 anyway. It does three things: rejects anything under

@@ -49,7 +49,7 @@ import math
 import numpy as np
 from scipy import ndimage
 
-from cyberdog.sim.clearance import clearance_field
+from cyberdog.sim.clearance import clearance_field, wall_face_field
 
 EXPLAINED = 0.35        # static clearance above this: the map calls it open floor
 MIN_H, MAX_H = 0.08, 1.8  # ankle height to head height, above the floor
@@ -65,6 +65,14 @@ LINE_NEED = 0.20        # ...and the room the way there merely has to survive.
                         # Above ROBOT_R (0.16) so it is still a margin, but not
                         # so far above that rounding an obstacle's corner --
                         # which is the whole manoeuvre -- reads as impossible.
+PERSON_LINE = 0.35      # ...and the room a line must keep to count as clear
+                        # with no detour at all. The person on the handle
+                        # walks the same line 1.1 m behind and is 0.25 m
+                        # across the shoulders: a straight pass at LINE_NEED
+                        # put them 2-3 cm into the floor-2 cart and crate
+                        # (room 201 --pedestrians 3, seeds 11 and 18, and the
+                        # Gate D pair that failed D2). Rounding a corner still
+                        # needs only LINE_NEED; walking straight past does not.
 CLUSTER_PAD = 0.25      # margin around a moving thing when taking it out of
                         # the planning field: its track is a centroid and a
                         # radius, and the returns off a coat sleeve are a
@@ -95,6 +103,7 @@ class LiveClearance:
     def __init__(self, floor):
         self.floor = floor
         self.dist, self.res, self.ox, self.oy = clearance_field(floor)
+        self.faces = wall_face_field(floor)[0]   # same grid geometry, real wall faces
         self.H, self.W = self.dist.shape
         self.n = int(2 * WINDOW / self.res)
         self.local = None               # (edt, x0, y0) while something is seen
@@ -226,6 +235,14 @@ class LiveClearance:
         r = int(self.H - 1 - (y - self.oy) / self.res)
         if 0 <= r < self.H and 0 <= c < self.W:
             return float(self.dist[r, c])
+        return 0.0
+
+    def wall_at(self, x, y):
+        """Metres to the nearest real wall face -- clearance.wall_face_field."""
+        c = int((x - self.ox) / self.res)
+        r = int(self.H - 1 - (y - self.oy) / self.res)
+        if 0 <= r < self.H and 0 <= c < self.W:
+            return float(self.faces[r, c])
         return 0.0
 
     def __call__(self, x, y):
@@ -384,9 +401,25 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         return live.detected_at(*p) >= need and live.static_at(*p) >= STATIC_MIN
 
     def reachable(p):
-        return point_ok(p) and line_clear(xy, p, live.detected_at, LINE_NEED)
+        return (point_ok(p) and line_clear(xy, p, live.detected_at, LINE_NEED)
+                and through_no_wall(xy, p))
 
-    if reachable(far) and reachable(goal):
+    def through_no_wall(a, b, skip=SKIP):
+        """The line a -> b never enters a mapped wall. Standing in open floor
+        is not enough: a point shifted 1.6 m sideways out of a corridor is
+        open floor in the room behind the wall. Seed 8 of `room 201
+        --pedestrians 3` aimed at (17.3, 12.1), 1.2 m past the floor-2 north
+        wall, and walked into the wall for 6.5 s. Only entering the wall is
+        refused, not coming near it, so it is asked of the real wall faces:
+        against the inflated ones, a dog 0.3 m off-centre in a doorway found
+        a wall on every line into the room and stopped there."""
+        return line_clear(a, b, live.wall_at, 1e-6, skip=skip)
+
+    def roomy(p):
+        """Room for the person on the handle, too -- see PERSON_LINE."""
+        return line_clear(xy, p, live.detected_at, PERSON_LINE)
+
+    if reachable(far) and reachable(goal) and roomy(far) and roomy(goal):
         return destination, 0.0
 
     dx, dy = far[0] - xy[0], far[1] - xy[1]
@@ -425,7 +458,7 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         while off <= max_offset + 1e-9:
             for sign in signs:
                 p = (pinch[0] + nx * off * sign, pinch[1] + ny * off * sign)
-                if not point_ok(p):
+                if not point_ok(p) or not through_no_wall(pinch, p, skip=0.0):
                     continue
                 room = min(live.detected_at(*p), live.static_at(*p))
                 if room > best_room + 1e-9:

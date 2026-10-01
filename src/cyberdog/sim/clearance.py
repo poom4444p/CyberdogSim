@@ -30,6 +30,7 @@ ROBOT_RADIUS = 0.16
 
 _BEHAVIOR = None
 _CLEARANCE = {}
+_FACES = {}
 
 
 def _behavior():
@@ -71,10 +72,48 @@ def clearance_field(floor=1):
                     if z.contains_point(ox + (c + 0.5) * res,
                                         oy + (H - 1 - r + 0.5) * res):
                         blocked[r, c] = True
+        # The lift shaft's walls, which the scene has and the grid does not --
+        # grown by the grid's own inflation, so they read like every other wall.
+        import yaml
+        from cyberdog.sim.scene.lift import SHAFT_WALLS
+        with open(paths.MAP_CONFIG) as f:
+            grow = float(yaml.safe_load(f)["map"].get("grid_inflation", 0.0))
+        for x0, x1, y0, y1 in SHAFT_WALLS.values():
+            r0 = max(int(H - 1 - (y1 + grow - oy) / res), 0)
+            r1 = min(int(H - 1 - (y0 - grow - oy) / res) + 1, H)
+            c0 = max(int((x0 - grow - ox) / res), 0)
+            c1 = min(int((x1 + grow - ox) / res) + 1, W)
+            blocked[r0:r1, c0:c1] = True
         # Distance from every free cell to the nearest blocked one, in metres.
         _CLEARANCE[floor] = (ndimage.distance_transform_edt(~blocked) * res,
                              res, ox, oy)
     return _CLEARANCE[floor]
+
+
+def wall_face_field(floor=1):
+    """(dist, res, ox, oy): metres to the nearest real wall face.
+
+    Not clearance_field, which is measured from the planner's inflated walls
+    and so reads 0 everywhere within 0.25 m of one. Two questions live in
+    exactly that band: whether a turn swings the person on the handle into a
+    wall or only near it, and whether a line crosses a wall or only passes
+    close to one -- in a doorway the inflation covers nearly the whole
+    opening, and an off-centre dog there saw a wall on every line into the
+    room. Built from the same grid the scene's walls are (build_scene.wall_grid)
+    plus the lift shaft's walls, which the grid does not have.
+    """
+    if floor not in _FACES:
+        from scipy import ndimage
+        from cyberdog.sim.scene.build_scene import wall_grid
+        from cyberdog.sim.scene.lift import SHAFT_WALLS
+        occ, res, ox, oy = wall_grid(floor)
+        occ = occ.copy()
+        H, W = occ.shape
+        for x0, x1, y0, y1 in SHAFT_WALLS.values():
+            occ[max(int(H - 1 - (y1 - oy) / res), 0):int(H - 1 - (y0 - oy) / res) + 1,
+                max(int((x0 - ox) / res), 0):int((x1 - ox) / res) + 1] = True
+        _FACES[floor] = (ndimage.distance_transform_edt(~occ) * res, res, ox, oy)
+    return _FACES[floor]
 
 
 def clearance_test(floor=1):

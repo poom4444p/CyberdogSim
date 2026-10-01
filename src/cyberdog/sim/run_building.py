@@ -383,10 +383,11 @@ class HazardStop(Exception):
 
 
 class HandleStop(HazardStop):
-    """A tug on the handle stopped the dog and nobody pressed continue.
+    """The dog is waiting for continue on the handle and none is coming:
+    after a tug, or at the lift doors.
 
     Only a scripted handle can know that no continue is coming; the run ends
-    here, standing where the person stopped it, rather than at MAX_TICKS.
+    here, standing where it waited, rather than at MAX_TICKS.
     """
 
 
@@ -439,7 +440,9 @@ class Run:
         self.lidar = Lidar(self.robot.model, self.robot.data)
         # The person's override, last before the motors (handle.py). With no
         # handle the mux reads zero force every tick and passes commands on
-        # unchanged.
+        # unchanged. With one, its continue is also how the person answers
+        # the lift (confirm).
+        self.has_handle = handle is not None
         self.handle = handle or HandleScript()
         self.mux = SafetyMux()
         self.live = {}            # floor -> LiveClearance, one per storey
@@ -1509,11 +1512,34 @@ class Run:
         that was never called. So the handover is explicit: it asks, a human
         does the part that needs hands, and the run continues.
 
-        --auto-confirm (and any non-interactive stdin, which is every batch
-        run) answers for them, after a visible pause, so the video still shows
-        the stop.
+        With a handle, continue on the handle is the answer, as it would be on
+        the robot, and the dog stands at the doors until it comes: --auto-
+        confirm does not answer for a person who has a handle to press. A
+        continue that releases a tug only releases the tug; the lift needs a
+        press of its own.
+
+        Without one, --auto-confirm (and any non-interactive stdin, which is
+        every batch run) answers for them, after a visible pause, so the video
+        still shows the stop.
         """
         self.say(prompt)
+        if self.has_handle:
+            dt = self.robot.CONTROL_DT
+            while True:
+                t = self.robot.sim_time
+                was_stopped = self.mux.stopped
+                self.handle_tick()
+                if (self.handle.pressed(t, dt) and not was_stopped
+                        and not self.mux.stopped):
+                    print(f"    t={t:6.1f}s  HANDLE continue: lift confirmed")
+                    return
+                if not self.handle.will_continue(t):
+                    raise HandleStop(f"at the lift on floor {self.floor}: nobody "
+                                     f"pressed continue")
+                x, y, yaw = self.robot.get_pose()
+                self.robot.place((x, y), yaw)
+                self.step_crowd()
+                self.frame()
         if self.auto_confirm or not sys.stdin.isatty():
             for _ in range(int(WAIT_S * FPS)):
                 self.step_crowd()
@@ -1652,7 +1678,8 @@ def main():
                     help="which crowd -- the same seed is the same people every run")
     ap.add_argument("--handle", default="", metavar="EVENTS",
                     help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
-                         '"pull@20-25", "push@26-28" (see sim/handle.py)')
+                         '"pull@20-25", "push@26-28" (see sim/handle.py). Its continue '
+                         'also answers the lift prompt, in place of --auto-confirm')
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -1691,7 +1718,7 @@ def main():
               crowd=args.pedestrians, seed=args.seed,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
-              handle=handle)
+              handle=handle if args.handle else None)
 
     ok, halted = True, None
     try:

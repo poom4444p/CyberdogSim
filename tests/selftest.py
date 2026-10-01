@@ -902,6 +902,9 @@ def handle():
       stopped until continue, and then it carries on and arrives;
     - with no continue coming, the run ends standing where it was stopped;
     - a tug during the scripted walk into the lift holds it there too;
+    - with a handle, continue on it answers the lift prompt: the dog stands
+      at the doors until it comes, --auto-confirm or not, and a continue that
+      releases a tug does not also confirm the lift;
     - a handle with nothing on it changes nothing: the same commands, to the
       bit, as no handle at all.
     """
@@ -914,8 +917,11 @@ def handle():
             "idle": ["restroom", "--handle", "continue@999"],
             "tug": ["restroom", "--handle", "tug@10,continue@15"],
             "never": ["restroom", "--handle", "tug@10"],
-            # 8.6 s is in the scripted walk into the floor-1 lift.
-            "lift": ["room 201", "--handle", "tug@8.6,continue@11.6"]}
+            # The dog reaches the floor-1 lift doors at about 7.4 s; continue
+            # at 8 boards it, and at 10 s it is part way into the car.
+            "lift": ["room 201", "--handle", "continue@8,tug@10,continue@13"],
+            "lift wait": ["room 201", "--handle", "continue@12"],
+            "lift tug only": ["room 201", "--handle", "tug@9,continue@10"]}
     procs = {k: subprocess.Popen(base + a, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                  text=True) for k, a in runs.items()}
     out = {k: p.communicate()[0] for k, p in procs.items()}
@@ -944,6 +950,18 @@ def handle():
               f"tug at {tug}, continue at {cont}")
         check(f"{name}: carries on and arrives", "ARRIVED" in o and "Carrying on." in o,
               "arrived" if "ARRIVED" in o else "did not arrive")
+
+    o = out["lift wait"]
+    m = re.search(r"t= *([\d.]+)s  HANDLE continue: lift confirmed", o)
+    check("lift: waits at the doors for continue",
+          m is not None and float(m.group(1)) == 12.0 and "auto-confirmed" not in o
+          and "ARRIVED" in o,
+          f"confirmed at t={m.group(1)}s, arrived" if m and "ARRIVED" in o
+          else "not confirmed by the handle" if not m else "did not arrive")
+    o = out["lift tug only"]
+    check("lift: releasing a tug does not confirm it",
+          "lift confirmed" not in o and "STOPPED at the lift" in o,
+          "stopped at the doors" if "STOPPED at the lift" in o else "boarded")
 
     o = out["never"]
     tug = at(o, "tug")

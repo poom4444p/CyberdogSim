@@ -17,7 +17,7 @@ conda activate cyberdog_sim
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`132 passed`, `ALL PASS`).
+clean (`150 passed`, `ALL PASS`).
 
 ## Before the first run
 
@@ -55,6 +55,7 @@ pytest -q                               # quieter
 | `test_overlay_labels.py` | Room labels in the video: projected where the camera sees them, never overlapping | 16 |
 | `test_dataset.py` | The command parser's training vocabulary (no model needed) | 14 |
 | `test_handle.py` | The Smart Handle mock and the safety mux: a tug stops and latches until continue, a pull lowers the pace, a push only undoes a pull, and no force leaves every command unchanged | 25 |
+| `test_affordance_data.py` | The affordance data contract shared with the Isaac Lab collector: the elevation patch (frame, highest-wins, NaN for unseen), the ground under the dog, the walkable label, the shard format | 18 |
 
 ## 2. Location check (`test_locations.py`)
 

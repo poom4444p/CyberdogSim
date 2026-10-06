@@ -993,6 +993,7 @@ def affordance():
     from cyberdog.sim.scene import levels, obstacles
     from cyberdog.sim.sensing import lidar as L
     from cyberdog.sim.sensing.dreaming import ROBOT_R
+    from cyberdog.sim.sensing.perception import LiveClearance
 
     CLEAR_M, REACH = 0.30, 1.2
 
@@ -1011,7 +1012,7 @@ def affordance():
     for floor, boxes in obstacles.OBSTACLES.items():
         fz = levels.floor_z(floor)
         r = MujocoRobot(SCENE, start_xy=(1.0, 9.5), start_yaw=0.0, start_z=fz)
-        sensor = L.Lidar(r.model, r.data)
+        sensor, walls = L.Lidar(r.model, r.data), LiveClearance(floor).wall_at
         for x0, x1, y0, y1, _h, name in boxes:
             for yaw, face in ((0.0, x0), (math.pi, x1)):
                 sign = 1.0 if yaw == 0.0 else -1.0
@@ -1024,7 +1025,7 @@ def affordance():
                         mem.add(sensor.scan(dog, fz, yaw), dog, fz)
                         if gap > REACH + 0.4:
                             continue
-                        patch = mem.patch((dog[0], dog[1], yaw))
+                        patch = mem.patch((dog[0], dog[1], yaw), walls)
                         for deg in range(-40, 41, 10):
                             b = math.radians(deg)
                             target = (REACH * math.cos(b), REACH * math.sin(b))
@@ -1074,10 +1075,17 @@ def affordance():
     # dream's clearance (ROBOT_R) is what covers the body today.
     print(f"    touching at the end: {sum(w[7] == 0 for w in at_end)} of {len(at_end)} passed, "
           f"{len(late)} still passed 0.1 m closer -- report only")
+    # Walls the map knows are blanked to floor (runtime.WALL_M). Before that,
+    # a wall within view refused 52% of clear walks well away from any box.
+    far = [w for w in clear if w[5] >= VIEW_HALF_W + 0.2 and w[6] < VIEW_HALF_W]
+    n_far = sum(w[7] != 0 for w in far)
+    check("a mapped wall in view does not refuse", len(far) >= 100 and n_far <= 0.1 * len(far),
+          f"{n_far} of {len(far)} clear walks with only a wall near refused")
     # The network sees VIEW_HALF_W either side of the walk, walls included.
     for walls, keep in ((f"walls in view", lambda w: w[6] < VIEW_HALF_W),
                         (f"walls out of view", lambda w: w[6] >= VIEW_HALF_W)):
-        for lo, hi in ((CLEAR_M, VIEW_HALF_W), (VIEW_HALF_W, math.inf)):
+        for lo, hi in ((CLEAR_M, VIEW_HALF_W), (VIEW_HALF_W, VIEW_HALF_W + 0.2),
+                       (VIEW_HALF_W + 0.2, math.inf)):
             band = [w for w in clear if lo <= w[5] < hi and keep(w)]
             print(f"    clear walks {lo:.1f}-{hi:.1f} m from a box, {walls}: refused "
                   f"{sum(w[7] != 0 for w in band)} of {len(band)} -- report only")

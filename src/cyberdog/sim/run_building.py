@@ -1147,7 +1147,7 @@ class Run:
         if target is None:
             self.aff_n["skipped: turning or too near"] += 1
             return
-        cls, probs, seen = self.aff.judge(self.elev.patch(pose), target)
+        cls, probs, seen = self.aff.judge(self.elev.patch(pose, live.wall_at), target)
         if cls is None:
             self.aff_n["skipped: too little seen"] += 1
             return

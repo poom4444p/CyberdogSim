@@ -62,6 +62,32 @@ class TestElevationMemory:
         assert not np.isfinite(m.patch((0.0, 0.0, 0.0))).any()
 
 
+class TestMappedWalls:
+    # A wall from y = 0.6, 0.9 m tall; the map gives metres to its face, 0 inside.
+    @staticmethod
+    def _wall_at(x, y):
+        return max(0.6 - y, 0.0)
+
+    def _memory(self, extra=()):
+        m = R.ElevationMemory()
+        wall = _floor(-1, 2, 0.6, 0.7, z=0.9)
+        m.add(np.vstack([_floor(-1, 2, -1.2, 0.6), wall, *extra]), (0.0, 0.0), 0.0)
+        return m
+
+    def test_without_the_map_the_wall_is_there(self):
+        assert np.nanmax(self._memory().patch((0.0, 0.0, 0.0))) == pytest.approx(0.9)
+
+    def test_a_mapped_wall_reads_as_floor(self):
+        p = self._memory().patch((0.0, 0.0, 0.0), self._wall_at)
+        assert np.nanmax(p) < 1e-6
+
+    def test_a_crate_by_the_wall_is_still_seen(self):
+        # The map knows the wall, not the crate 0.3 m off it.
+        crate = _floor(0.8, 1.2, 0.0, 0.3, z=0.5)
+        p = self._memory([crate]).patch((0.0, 0.0, 0.0), self._wall_at)
+        assert np.nanmax(p) == pytest.approx(0.5)
+
+
 class TestAhead:
     def test_straight_ahead_is_capped_at_reach(self):
         assert R.ahead((0, 0, 0), (5.0, 0.0)) == pytest.approx((1.2, 0.0))

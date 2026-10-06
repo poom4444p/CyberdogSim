@@ -25,6 +25,7 @@ Without --nlu the destination is matched against locations.json by name, which
 keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
+import collections
 import hashlib
 import json
 import math
@@ -138,6 +139,8 @@ PASS_R = 2.0              # somebody, not overtaking them
 YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
                           # this long, creep and keep asking. Reachable only
                           # by a queue of people arriving one after another.
+AFF_EVERY = 5             # ticks between affordance checks in --affordance-shadow (4 Hz)
+AFF_HALF_W = 0.3          # metres either side of the judged walk that ground truth looks at
 PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
                           # as a contact. Scoring only, never shown the robot.
 
@@ -436,7 +439,8 @@ class Run:
 
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
-                 vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None):
+                 vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
+                 affordance_shadow=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -495,6 +499,16 @@ class Run:
         self.handler_hits = {"ticks": 0, "boxes": set(), "since": None}
         self.dog_geoms, self.touchable = self.body_contacts()
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
+        # The affordance network watching, not steering (--affordance-shadow):
+        # what it would say about the walk ahead, against what was really
+        # there. `affordance_shadow` is the log file; None is off.
+        self.aff = self.elev = self.aff_log = None
+        self.aff_n = collections.Counter()
+        if affordance_shadow:
+            from cyberdog.affordance.runtime import Affordance, ElevationMemory
+            self.aff, self.elev = Affordance(), ElevationMemory()
+            os.makedirs(os.path.dirname(os.path.abspath(affordance_shadow)), exist_ok=True)
+            self.aff_log = open(affordance_shadow, "w")
         # People. Not in any grid either, and unlike the crates they move, so
         # one scan cannot describe them -- `tracker` is what two scans give.
         self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
@@ -1094,6 +1108,57 @@ class Run:
             crowd.step(self.robot.CONTROL_DT, dog if floor == self.floor else None)
         self.place_crowd()
 
+    def ground_truth(self, floor, pose, target, live):
+        """What was really on the walk the network judged: "stairs", "person",
+        "obstacle", "wall" or "open floor" -- scoring only, never fed back.
+
+        Points every 0.1 m from the dog to `target` (dog frame), out to
+        AFF_HALF_W either side: the band the label's own path_cells covers."""
+        x, y, yaw = pose
+        c, s = math.cos(yaw), math.sin(yaw)
+        tx, ty = target
+        L = math.hypot(tx, ty)
+        ux, uy = tx / L, ty / L
+        band = []
+        for a in np.arange(0.0, L + 1e-9, 0.1):
+            for b in np.arange(-AFF_HALF_W, AFF_HALF_W + 1e-9, 0.1):
+                fx, fy = a * ux - b * uy, a * uy + b * ux
+                band.append((x + c * fx - s * fy, y + s * fx + c * fy))
+        if any(self.router.hazard_at(p) is not None for p in band):
+            return "stairs"
+        people = list(self.crowds[floor].positions())
+        if any(math.dist(p, q) < 0.45 for p in band for q in people):
+            return "person"
+        for bx0, bx1, by0, by1, _h, _name in obstacles.boxes(floor):
+            if any(bx0 - 0.1 <= px <= bx1 + 0.1 and by0 - 0.1 <= py <= by1 + 0.1
+                   for px, py in band):
+                return "obstacle"
+        if any(live.wall_at(*p) < 0.05 for p in band):
+            return "wall"
+        return "open floor"
+
+    def shadow_affordance(self, floor, pose, steer_xy, live):
+        """Ask the network about the walk toward the steering target; log it.
+
+        --affordance-shadow only: nothing here changes what the dog does."""
+        from cyberdog.affordance import data as adata
+        from cyberdog.affordance.runtime import ahead
+        target = ahead(pose, steer_xy)
+        if target is None:
+            self.aff_n["skipped: turning or too near"] += 1
+            return
+        cls, probs, seen = self.aff.judge(self.elev.patch(pose), target)
+        if cls is None:
+            self.aff_n["skipped: too little seen"] += 1
+            return
+        truth = self.ground_truth(floor, pose, target, live)
+        self.aff_n[(adata.CLASS_NAMES[cls], truth)] += 1
+        self.aff_log.write(json.dumps({
+            "t": round(self.robot.sim_time, 2), "floor": floor,
+            "pose": [round(v, 3) for v in pose], "target": [round(v, 3) for v in target],
+            "class": adata.CLASS_NAMES[cls], "probs": [round(float(v), 3) for v in probs],
+            "seen": round(seen, 3), "truth": truth}) + "\n")
+
     def score_people(self, floor, x, y):
         """Ground truth again: how near the dog actually got to a person.
 
@@ -1235,8 +1300,10 @@ class Run:
             # on no map reacts because of this one call.
             self.step_crowd()
             live = self.clearance(floor)
-            live.update(self.lidar.scan((x, y), self.robot.z, yaw), self.robot.z,
-                        (x, y), origin=(x, y, self.robot.z + MOUNT_H))
+            scan = self.lidar.scan((x, y), self.robot.z, yaw)
+            live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H))
+            if self.elev is not None:
+                self.elev.add(scan, (x, y), self.robot.z)
             self.seen = live.points
             self.obs["seen"] = max(self.obs["seen"], len(live.points))
             # Same returns, asked a different question: which of them moved
@@ -1402,6 +1469,8 @@ class Run:
                 (tx, ty), at_door = self.funnel(gates, (x, y), (tx, ty))
             if asked and self.shadow:
                 self.log_shadow(floor, n, (x, y, yaw), (tx, ty), proposed, safety)
+            if self.aff is not None and n % AFF_EVERY == 0:
+                self.shadow_affordance(floor, (x, y, yaw), (tx, ty), live)
 
             # Reported, not acted on: free_destination already decided whether
             # there is a way through, and this is how much room it left.
@@ -1849,6 +1918,10 @@ def main():
                     help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
                          '"pull@20-25", "push@26-28" (see sim/handle.py). Its continue '
                          'also answers the lift prompt, in place of --auto-confirm')
+    ap.add_argument("--affordance-shadow", nargs="?", metavar="PATH", default=None,
+                    const=str(paths.OUTPUT_DIR / "affordance_shadow.jsonl"),
+                    help="run the affordance network watching, not steering: log what it "
+                         "would say about the walk ahead, against what was really there")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -1888,7 +1961,8 @@ def main():
               crowd=args.pedestrians, seed=args.seed,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
-              handle=handle if args.handle else None)
+              handle=handle if args.handle else None,
+              affordance_shadow=args.affordance_shadow)
 
     ok, halted = True, None
     try:
@@ -1985,6 +2059,20 @@ def main():
     else:
         print("handler: none -- the person on the handle never touched a wall or an obstacle")
     print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
+    if run.aff is not None:
+        run.aff_log.close()
+        an = run.aff_n
+        judged = {k: v for k, v in an.items() if isinstance(k, tuple)}
+        total = sum(judged.values())
+        skipped = ", ".join(f"{v} {k[9:]}" for k, v in an.items() if isinstance(k, str))
+        print(f"AFFORDANCE (shadow): {total} judgements ({skipped or 'none skipped'}) "
+              f"-> {args.affordance_shadow}")
+        for truth in ("open floor", "wall", "obstacle", "person", "stairs"):
+            row = {c: judged.get((c, truth), 0) for c in ("walkable", "caution", "not walkable")}
+            k = sum(row.values())
+            if k:
+                print(f"  {truth:10s} {k:5d}:  " + ", ".join(
+                    f"{c} {v / k:.0%}" for c, v in row.items()))
     if run.stair_flights:
         print(f"stairs: {run.stair_flights} flight(s), {run.stair_steps} steps, each "
               f"taken after two yeses (offered, then at the first step)")

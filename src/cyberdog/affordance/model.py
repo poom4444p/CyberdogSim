@@ -26,6 +26,13 @@ trials followable; given the jumps, 8%, and 93.8% right on followable-or-not
 on tiles it never saw (a small CNN, which has neighbours built in, did about
 as well -- 93.3% -- confirming it was the representation, not the size).
 
+Only the ground near the walk is shown (VIEW_HALF_W): everything further
+than that from the line to the target is blanked to "unseen" before any map
+is made. Isaac's terrain has no walls, so the network learned that tall
+things anywhere in view mean stairs or boxes -- and in the twin's corridors,
+walking 0.55 m from a wall, it refused 59% of open floor on the first
+shadow run. The question is about the walk, so the input is the walk.
+
 Kept apart from data.py so that file stays numpy-only for the Isaac
 collector; only training and the runtime need torch.
 """
@@ -47,6 +54,7 @@ N_IN = 4 * N_CELLS + 2
 # Too careful is a detour; not careful enough is a fall.
 REFUSE_P = 0.2
 JUMP_SCALE = 10.0       # a 0.1 m jump reads as 1
+VIEW_HALF_W = 0.5       # metres either side of the walk the network may see
 
 
 def jumps(patch):
@@ -70,8 +78,9 @@ def jumps(patch):
 
 def features(patch, target):
     """(N, N_IN) float32 network input from (N, NY, NX) patches and (N, 2) targets."""
-    patch = np.asarray(patch, dtype=np.float32)
     target = np.asarray(target, dtype=np.float32).reshape(-1, 2)
+    patch = np.where(data.path_cells(target, VIEW_HALF_W),
+                     np.asarray(patch, dtype=np.float32), np.nan)
     seen = np.isfinite(patch)
     h = np.clip(np.where(seen, patch, 0.0), -H_CLIP, H_CLIP) / H_CLIP
     on = data.path_cells(target)

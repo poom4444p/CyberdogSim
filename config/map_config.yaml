@@ -52,11 +52,13 @@ behavior_layer:
       announcement: "Grass area ahead"
     stairs:
       # Not a slow zone and not a confirm-and-continue zone: this robot leads
-      # someone who cannot see the steps, so a staircase is a hard stop and a
-      # handover to the person. Floor changes go through the lift instead.
+      # someone who cannot see the steps, so walking into a staircase is a
+      # hard stop. The stairs are taken only as a planned floor change the
+      # person has agreed to, twice (building_router.choose_transit,
+      # run_building.stairs_ride) -- never by a route that wanders onto them.
       speed_modifier: 0.0   # full stop, and no route may contain one
       announce: true
-      announcement: "Stairs detected — I do not take stairs; the lift is at the east end of the corridor"
+      announcement: "Stairs detected — stopping. I only take the stairs when you have agreed to; the lift is at the east end of the corridor"
       requires_confirmation: false  # a halt, not confirm-and-continue: nothing resumes
     crosswalk:
       speed_modifier: 0.7

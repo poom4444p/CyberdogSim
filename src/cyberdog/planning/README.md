@@ -93,12 +93,16 @@ legs = router.plan(start_floor=1, start_xy=(45, 4), target=target)   # [(1, Rout
   then lift → target on the target floor. The last checkpoint of the first
   leg announces "Take the lift to floor N"; every route ends with
   "Destination reached".
-- **`transit`**: the lift serving both floors, or `NoAccessibleRoute` if none
-  does. It does not fall back on the stairs, because there is nothing to fall
-  back to: leading a blind user to a stair head is worse than saying "I cannot
-  get you to floor 3 from here".
+- **`choose_transit`**: lift or stairs for a floor change, as a `Transit`
+  (kind, where to wait, why). The lift unless it is out of service, does not
+  serve the floor, or is both `STAIRS_RATIO` (2x) and `STAIRS_EXTRA_M` (30 m)
+  longer than the stairs, walking both ends. It only decides: the dog asks the
+  person twice before taking any stairs (`run_building.offer_stairs`,
+  `stairs_ride`). `NoAccessibleRoute` when neither works.
+  `BuildingRouter(allow_stairs=False)` is the old lift-or-nothing rule.
 
-**Stairs are never routed through.** The user cannot see the steps and has one
+**Stairs are never routed *through*.** Taking them is a deliberate, confirmed
+floor change, like the lift ride; walking routes still never cross a stairwell. The user cannot see the steps and has one
 hand on the handle, so the stairwells are `stairs` zones in
 `data/building/zones.json` — full stop, announce — and
 `_block_zones()` stamps them into the *planning* grids as obstacles before any

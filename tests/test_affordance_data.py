@@ -122,6 +122,61 @@ class TestLabel:
         assert data.label(r).tolist() == [False]
         assert data.label(r, step_max=0.12).tolist() == [True]
 
+    def test_the_gaits_own_rocking_is_not_a_failure(self):
+        # The Go2 rocks 8-10 deg walking on flat ground; that used to fail.
+        r = _record(1, max_tilt=np.full(1, math.radians(10), np.float32))
+        assert data.label(r).tolist() == [True]
+
+
+def _step(height, at_x=0.75):
+    """A record walking 1.2 m straight ahead over a step `height` high at `at_x`."""
+    r = _record(1, target=np.array([[1.2, 0.0]], np.float32))
+    xs, _ = data.cell_centres()
+    r["patch"][0][:, xs >= at_x] = height
+    return r
+
+
+class TestClasses:
+
+    def test_flat_is_walkable(self):
+        assert data.classes(_step(0.0)).tolist() == [data.WALKABLE]
+
+    def test_small_bumps_are_caution(self):
+        assert data.classes(_step(0.035)).tolist() == [data.CAUTION]
+
+    def test_an_edge_is_not_walkable(self):
+        # A kerb-sized edge: refused even though the dog arrived without falling.
+        assert data.classes(_step(0.12)).tolist() == [data.NOT_WALKABLE]
+
+    def test_caution_still_counts_as_followable(self):
+        assert data.label(_step(0.035)).tolist() == [True]
+        assert data.label(_step(0.12)).tolist() == [False]
+
+    def test_an_edge_beside_the_path_does_not_count(self):
+        # The same kerb, but only on cells more than PATH_HALF_W to the left.
+        r = _record(1, target=np.array([[1.2, 0.0]], np.float32))
+        _, ys = data.cell_centres()
+        r["patch"][0][ys > data.PATH_HALF_W + 0.15, :] = 0.12
+        assert data.classes(r).tolist() == [data.WALKABLE]
+
+    def test_a_ramp_is_a_slope_not_a_bump(self):
+        # 1:12, the steepest ramp an accessibility code allows.
+        r = _record(1, target=np.array([[1.2, 0.0]], np.float32))
+        xs, _ = data.cell_centres()
+        r["patch"][0][:] = np.maximum(xs, 0) / 12.0
+        assert data.path_bump(r)[0] < data.BUMP_WALK
+        assert data.classes(r).tolist() == [data.WALKABLE]
+
+    def test_unseen_cells_are_not_bumps(self):
+        r = _step(0.0)
+        r["patch"][0][::2, ::2] = np.nan
+        assert data.path_bump(r)[0] == 0.0
+
+    def test_a_failure_wins_over_smooth_ground(self):
+        r = _step(0.0)
+        r["fell"][:] = True
+        assert data.classes(r).tolist() == [data.NOT_WALKABLE]
+
 
 class TestShards:
 

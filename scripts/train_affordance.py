@@ -48,11 +48,12 @@ def confusion(y, p):
 
 
 @torch.no_grad()
-def predict(net, x, device, batch=8192):
+def predict(net, x, device, batch=8192, refuse_p=None):
+    """Classes for feature rows: argmax, or M.decide at refuse_p if given."""
     net.eval()
-    out = [net(torch.as_tensor(x[a:a + batch], device=device)).argmax(1).cpu().numpy()
-           for a in range(0, len(x), batch)]
-    return np.concatenate(out)
+    probs = np.concatenate([torch.softmax(net(torch.as_tensor(x[a:a + batch], device=device)), 1)
+                            .cpu().numpy() for a in range(0, len(x), batch)])
+    return probs.argmax(1) if refuse_p is None else M.decide(probs, refuse_p)
 
 
 def report(name, y, p):
@@ -144,10 +145,12 @@ def main():
     print(f"trained in {time.time() - t0:.0f}s; keeping the epoch best on val ({best:.1%})")
 
     report("VALIDATION tiles (used to pick the epoch)", y[va], predict(net, x[va], device))
-    result = report("TEST tiles (never seen until now)", y[te], predict(net, x[te], device))
+    report("TEST tiles, plain argmax", y[te], predict(net, x[te], device))
+    result = report(f"TEST tiles, as the dog decides (refuse at P >= {M.REFUSE_P})",
+                    y[te], predict(net, x[te], device, refuse_p=M.REFUSE_P))
 
     M.save(net.cpu(), Path(args.out), run=run.name, seed=args.seed, epochs=args.epochs,
-           test=result, thresholds={"tilt_max": data.TILT_MAX, "step_max": data.STEP_MAX,
+           test=result, refuse_p=M.REFUSE_P, thresholds={"tilt_max": data.TILT_MAX, "step_max": data.STEP_MAX,
                                     "bump_walk": data.BUMP_WALK,
                                     "bump_caution": data.BUMP_CAUTION})
     print(f"\nweights -> {args.out}")

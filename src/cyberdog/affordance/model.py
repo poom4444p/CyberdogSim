@@ -38,6 +38,14 @@ from cyberdog.affordance import data
 H_CLIP = 0.5            # metres: anything higher or lower is "a lot", the same to us
 N_CELLS = data.NY * data.NX
 N_IN = 4 * N_CELLS + 2
+
+# Refuse when the network gives "not walkable" at least this probability,
+# whatever else it rates higher. Chosen for the people this is for: on the
+# held-out tiles of run_20261006_132140, 0.5 (plain argmax) called 10.8% of
+# not-walkable trials followable; 0.2 calls 5.4%, at the price of refusing
+# 10.5% of followable ones (and 92.0% right on followable-or-not, spec > 90%).
+# Too careful is a detour; not careful enough is a fall.
+REFUSE_P = 0.2
 JUMP_SCALE = 10.0       # a 0.1 m jump reads as 1
 
 
@@ -117,6 +125,26 @@ class AffordanceMLP(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
+
+def decide(probs, refuse_p=REFUSE_P):
+    """(N,) class per row of (N, 3) probabilities, refusing at refuse_p.
+
+    NOT_WALKABLE when its probability reaches refuse_p; otherwise the more
+    likely of walkable and caution."""
+    probs = np.asarray(probs)
+    out = np.where(probs[:, data.CAUTION] > probs[:, data.WALKABLE],
+                   data.CAUTION, data.WALKABLE)
+    out[probs[:, data.NOT_WALKABLE] >= refuse_p] = data.NOT_WALKABLE
+    return out.astype(np.int8)
+
+
+@torch.no_grad()
+def classify(net, patch, target, refuse_p=REFUSE_P):
+    """(classes, probabilities) for raw patches and targets -- the runtime's call."""
+    x = torch.as_tensor(features(patch, target), device=next(net.parameters()).device)
+    probs = torch.softmax(net(x), dim=1).cpu().numpy()
+    return decide(probs, refuse_p), probs
 
 
 def save(model, path, **info):

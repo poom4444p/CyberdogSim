@@ -167,8 +167,13 @@ def path_cells(targets, half_w=PATH_HALF_W):
     u = np.where(L[:, None] > 1e-9, targets / np.maximum(L, 1e-9)[:, None], [1.0, 0.0])
     along = X[None] * u[:, 0, None, None] + Y[None] * u[:, 1, None, None]
     side = np.abs(-X[None] * u[:, 1, None, None] + Y[None] * u[:, 0, None, None])
-    return (side <= half_w) & (along >= -1e-9) & (along <= L[:, None, None]) | \
-        (np.hypot(X, Y)[None] <= half_w)
+    # EPS: cell centres are multiples of RES only up to float rounding (y = -0.3
+    # is stored as -0.29999999999999993, +0.3 as 0.30000000000000004), and a cell
+    # exactly on the edge must count the same on the left and on the right --
+    # training mirrors every sample, so a path and its mirror image must match.
+    eps = 1e-6
+    return (side <= half_w + eps) & (along >= -eps) & (along <= L[:, None, None] + eps) | \
+        (np.hypot(X, Y)[None] <= half_w + eps)
 
 
 def path_bump(records, half_w=PATH_HALF_W, chunk=20_000):

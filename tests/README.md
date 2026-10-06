@@ -17,7 +17,7 @@ conda activate cyberdog_sim
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`183 passed`, `ALL PASS`).
+clean (`193 passed`, `ALL PASS`).
 
 ## Before the first run
 
@@ -57,6 +57,7 @@ pytest -q                               # quieter
 | `test_handle.py` | The Smart Handle mock and the safety mux: a tug stops and latches until continue, a pull lowers the pace, a push only undoes a pull, and no force leaves every command unchanged | 25 |
 | `test_affordance_data.py` | The affordance data contract shared with the Isaac Lab collector: the elevation patch (frame, highest-wins, NaN for unseen), the ground under the dog, the shard format; and the labels -- walkable / caution / not walkable, bumps measured on the path only, a ramp is a slope not a bump, the gait's own rocking is not a failure | 27 |
 | `test_affordance_model.py` | The affordance network's plumbing (needs torch): input features and the jump map (an unseen border is not an edge), left-right mirroring, the 0.2 refusal rule, save/load | 10 |
+| `test_affordance_runtime.py` | The affordance network on a running dog: the elevation memory (the ceiling is not ground, a person who walked on leaves no ghost, what was not seen again is remembered, it forgets after 3 m, a new floor starts empty) and the walk-ahead target in the dog's frame | 10 |
 | `test_router_stairs.py` | Lift or stairs for a floor change: the lift unless out of service or 2x and 30 m further; the stair waiting point is outside the stairwell; walking routes never cross one | 14 |
 
 ## 2. Location check (`test_locations.py`)

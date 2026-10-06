@@ -57,7 +57,7 @@ pytest -q                               # quieter
 | `test_handle.py` | The Smart Handle mock and the safety mux: a tug stops and latches until continue, a pull lowers the pace, a push only undoes a pull, and no force leaves every command unchanged | 25 |
 | `test_affordance_data.py` | The affordance data contract shared with the Isaac Lab collector: the elevation patch (frame, highest-wins, NaN for unseen), the ground under the dog, the shard format; and the labels -- walkable / caution / not walkable, bumps measured on the path only, a ramp is a slope not a bump, the gait's own rocking is not a failure | 27 |
 | `test_affordance_model.py` | The affordance network's plumbing (needs torch): input features and the jump map (an unseen border is not an edge), left-right mirroring, the 0.2 refusal rule, save/load | 10 |
-| `test_affordance_runtime.py` | The affordance network on a running dog: the elevation memory (the ceiling is not ground, a person who walked on leaves no ghost, what was not seen again is remembered, it forgets after 3 m, a new floor starts empty) and the walk-ahead target in the dog's frame | 10 |
+| `test_affordance_runtime.py` | The affordance network on a running dog: the elevation memory (the ceiling is not ground, a person who walked on leaves no ghost, what was not seen again is remembered, it forgets after 3 m, a new floor starts empty, a wall the map knows reads as floor but a crate beside it does not) and the walk-ahead target in the dog's frame | 13 |
 | `test_router_stairs.py` | Lift or stairs for a floor change: the lift unless out of service or 2x and 30 m further; the stair waiting point is outside the stairwell; walking routes never cross one | 14 |
 
 ## 2. Location check (`test_locations.py`)
@@ -104,7 +104,7 @@ every stage above it.
 | `crowd` | A person is told apart from a crate, and the dog stops for someone coming towards it | ~2 s |
 | `dreaming` | The path safety score (Gate B of `docs/dreaming_safety_kpis.md`): safe vs unsafe, calibrated against real drives, stable across seeds | ~40 s |
 | `vamos` | The VAMOS client against a **fake** server, and shadow mode (Gate C): steering and shadow runs give identical commands | ~20 s |
-| `affordance` | The affordance network (needs `models/affordance/mlp.pt`) walked up to every crate on the map with real scans: no walk into a box is passed. Reports, without failing, walks whose body only touches at the end and clear walks beside a box that it refuses | ~6 s |
+| `affordance` | The affordance network (needs `models/affordance/mlp.pt`) walked up to every crate on the map with real scans: no walk into a box is passed, and a wall the map knows does not make it refuse. Reports, without failing, walks whose body only touches at the end and clear walks beside a box that it refuses | ~6 s |
 | `handle` | The person on the handle overrules the dog: a tug stops it where it stands until continue (walking and boarding the lift), with no continue the run ends there, the lift waits at its doors for a continue of its own, and an idle handle changes no command | ~5 s |
 | `run` | The whole stack on 8 routes across all 3 floors. Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~25 s |
 

@@ -28,6 +28,9 @@ MAX_H = 1.0             # metres above the floor: higher is not ground (ceiling,
 NEAR_M = 2.5            # only points this close to the dog are kept -- the patch reaches 1.6 m
 MIN_SEEN = 0.7          # under this share of the patch seen, no judgement is made:
                         # under 70% seen it wrongly refused open floor 45% of the time
+WALL_M = 0.15           # metres from a mapped wall face that is wall, not floor: a
+                        # return on the face sits in a world cell up to RES from it,
+                        # looked up from a patch centre up to RES * sqrt(2) away
 
 
 class ElevationMemory:
@@ -77,8 +80,15 @@ class ElevationMemory:
         if len(self.cells) > 4000:
             self.cells = {k: v for k, v in self.cells.items() if v[1] >= old}
 
-    def patch(self, pose):
-        """(NY, NX) elevation patch at pose (x, y, yaw), NaN where unseen."""
+    def patch(self, pose, wall_at=None):
+        """(NY, NX) elevation patch at pose (x, y, yaw), NaN where unseen.
+
+        `wall_at(x, y)`, metres to the nearest wall the map knows, makes those
+        walls floor: cells within WALL_M of one read 0. Isaac has no walls, so
+        the network took any tall thing in view for stairs and refused 52-96%
+        of clear walks with a wall within 0.5 m (selftest affordance) -- every
+        doorway. Walls are the map's to judge (the dream's clearance); the
+        network judges the ground and what the map does not know is there."""
         # Each patch cell looks up the world cell its centre falls in. Splatting
         # world cells into the patch instead aliased: two landed in one patch
         # cell and the next stayed empty, and a floor seen whole read 44% seen.
@@ -96,6 +106,8 @@ class ElevationMemory:
                 v = self.cells.get((int(ix[r, k]), int(iy[r, k])))
                 if v is not None and v[1] >= old:
                     out[r, k] = v[0]
+                if wall_at is not None and wall_at(wx[r, k], wy[r, k]) < WALL_M:
+                    out[r, k] = 0.0
         return out
 
 

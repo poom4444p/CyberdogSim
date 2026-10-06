@@ -104,6 +104,7 @@ every stage above it.
 | `crowd` | A person is told apart from a crate, and the dog stops for someone coming towards it | ~2 s |
 | `dreaming` | The path safety score (Gate B of `docs/dreaming_safety_kpis.md`): safe vs unsafe, calibrated against real drives, stable across seeds | ~40 s |
 | `vamos` | The VAMOS client against a **fake** server, and shadow mode (Gate C): steering and shadow runs give identical commands | ~20 s |
+| `affordance` | The affordance network (needs `models/affordance/mlp.pt`) walked up to every crate on the map with real scans: no walk into a box is passed. Reports, without failing, walks whose body only touches at the end and clear walks beside a box that it refuses | ~6 s |
 | `handle` | The person on the handle overrules the dog: a tug stops it where it stands until continue (walking and boarding the lift), with no continue the run ends there, the lift waits at its doors for a continue of its own, and an idle handle changes no command | ~5 s |
 | `run` | The whole stack on 8 routes across all 3 floors. Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~25 s |
 

@@ -972,9 +972,121 @@ def handle():
           f"tug at {tug}, run ended at {end}")
 
 
+def affordance():
+    """Does the affordance network refuse a walk into a crate?
+
+    The shadow runs cannot say: the planner already steers round the crates,
+    so of 2977 judgements on 21 trips 23 had a box anywhere near the walk and
+    none walked into one. Here the dog is walked up to every box on the map,
+    from both ends of the corridor and from several lanes, with the real
+    Mid-360 scans going into the elevation memory as they would on a run,
+    and asked about walks fanned across the box.
+
+    Truth is the dog's own footprint, not a margin: a walk hits when it
+    passes within dreaming.ROBOT_R of the box, and is clear when it keeps
+    CLEAR_M from the box and from both corridor walls. In between is too
+    close to call and only counted.
+    """
+    from cyberdog.affordance.model import VIEW_HALF_W
+    from cyberdog.affordance.runtime import Affordance, ElevationMemory
+    from cyberdog.sim.robot.mujoco_robot import MujocoRobot
+    from cyberdog.sim.scene import levels, obstacles
+    from cyberdog.sim.sensing import lidar as L
+    from cyberdog.sim.sensing.dreaming import ROBOT_R
+
+    CLEAR_M, REACH = 0.30, 1.2
+
+    def to_box(p, q, box):
+        """Closest the segment p-q comes to the box footprint."""
+        x0, x1, y0, y1 = box
+        best = math.inf
+        for k in range(25):
+            a = k / 24
+            x, y = p[0] + a * (q[0] - p[0]), p[1] + a * (q[1] - p[1])
+            best = min(best, math.hypot(max(x0 - x, 0, x - x1), max(y0 - y, 0, y - y1)))
+        return best
+
+    aff = Affordance()
+    rows = []           # (box, yaw, lane, deg, gap, walk-to-box, off walls, class, P(not), seen)
+    for floor, boxes in obstacles.OBSTACLES.items():
+        fz = levels.floor_z(floor)
+        r = MujocoRobot(SCENE, start_xy=(1.0, 9.5), start_yaw=0.0, start_z=fz)
+        sensor = L.Lidar(r.model, r.data)
+        for x0, x1, y0, y1, _h, name in boxes:
+            for yaw, face in ((0.0, x0), (math.pi, x1)):
+                sign = 1.0 if yaw == 0.0 else -1.0
+                for lane in np.round(np.arange(8.9, 10.15, 0.2), 1):
+                    mem = ElevationMemory()
+                    for k in range(32):                 # 3.5 m out to 0.4 m short
+                        gap = round(3.5 - 0.1 * k, 1)
+                        dog = (face - sign * gap, float(lane))
+                        r.reset(dog, yaw)
+                        mem.add(sensor.scan(dog, fz, yaw), dog, fz)
+                        if gap > REACH + 0.4:
+                            continue
+                        patch = mem.patch((dog[0], dog[1], yaw))
+                        for deg in range(-40, 41, 10):
+                            b = math.radians(deg)
+                            target = (REACH * math.cos(b), REACH * math.sin(b))
+                            end = (dog[0] + sign * target[0], dog[1] + sign * target[1])
+                            d = to_box(dog, end, (x0, x1, y0, y1))
+                            off_walls = min(min(dog[1], end[1]) - obstacles.WALL_Y[0],
+                                            obstacles.WALL_Y[1] - max(dog[1], end[1]))
+                            cls, probs, seen = aff.judge(patch, target)
+                            rows.append((name, yaw, lane, deg, gap, d, off_walls, cls,
+                                         None if cls is None else float(probs[2]), seen,
+                                         to_box(dog, (dog[0] + sign * 0.8 * target[0],
+                                                      dog[1] + sign * 0.8 * target[1]),
+                                                (x0, x1, y0, y1))))
+
+    judged = [w for w in rows if w[7] is not None]
+    into = [w for w in judged if w[5] <= ROBOT_R]
+    # Into it before the walk's last 20%, or only the body touching at its end.
+    through = [w for w in into if w[10] <= ROBOT_R]
+    at_end = [w for w in into if w[10] > ROBOT_R]
+    clear = [w for w in judged if w[5] >= CLEAR_M and w[6] >= CLEAR_M]
+    refused = {(w[0], w[1], w[2], w[3], w[4]) for w in judged if w[7] != 0}
+    for name in dict.fromkeys(w[0] for w in rows):
+        mine = lambda ws: [w for w in ws if w[0] == name]
+        print(f"    {name:8s} into it: passed {sum(w[7] == 0 for w in mine(through)):3d}/"
+              f"{len(mine(through)):3d}   touching at the end: passed "
+              f"{sum(w[7] == 0 for w in mine(at_end)):3d}/{len(mine(at_end)):3d}   "
+              f"clear of it: refused {sum(w[7] != 0 for w in mine(clear)):3d}/{len(mine(clear)):3d}")
+    print(f"    too little seen to judge: {len(rows) - len(judged)} of {len(rows)}")
+    passed_through = [w for w in through if w[7] == 0]
+    for w in sorted(passed_through, key=lambda w: w[8])[:8]:
+        print(f"    [missed] {w[0]} {w[4]} m short, lane y={w[2]}, {w[3]:+d} deg: "
+              f"P(not walkable) {w[8]:.3f}, seen {w[9]:.2f}")
+    # A walk that only touches at its end is judged again 0.1 m on, when the box
+    # is inside it. Passed there too would be a miss that matters.
+    late = [w for w in at_end if w[7] == 0
+            and (w[0], w[1], w[2], w[3], round(w[4] - 0.1, 1)) not in refused]
+    for w in late:
+        nxt = [v for v in rows if v[:4] == w[:4] and v[4] == round(w[4] - 0.1, 1)]
+        print(f"    [late] {w[0]} {'east' if w[1] == 0 else 'west'} {w[4]} m short, lane y={w[2]}, "
+              f"{w[3]:+d} deg, P(not) {w[8]:.3f}; 0.1 m on: "
+              + (f"class {nxt[0][7]}, {nxt[0][5]:.2f} m from it" if nxt else "not asked"))
+    check("walks into a box measured", len(through) >= 100, f"{len(through)} judged")
+    check("no walk into a box passed", not passed_through,
+          f"{len(passed_through)} of {len(through)} passed")
+    # Report only: the network judges the walk's centreline, not the dog's
+    # width, so a walk aimed past a corner can clip it with the body. The
+    # dream's clearance (ROBOT_R) is what covers the body today.
+    print(f"    touching at the end: {sum(w[7] == 0 for w in at_end)} of {len(at_end)} passed, "
+          f"{len(late)} still passed 0.1 m closer -- report only")
+    # The network sees VIEW_HALF_W either side of the walk, walls included.
+    for walls, keep in ((f"walls in view", lambda w: w[6] < VIEW_HALF_W),
+                        (f"walls out of view", lambda w: w[6] >= VIEW_HALF_W)):
+        for lo, hi in ((CLEAR_M, VIEW_HALF_W), (VIEW_HALF_W, math.inf)):
+            band = [w for w in clear if lo <= w[5] < hi and keep(w)]
+            print(f"    clear walks {lo:.1f}-{hi:.1f} m from a box, {walls}: refused "
+                  f"{sum(w[7] != 0 for w in band)} of {len(band)} -- report only")
+
+
 STAGES = {"scene": scene, "lidar": lidar, "perception": perception,
           "destination": destination, "crowd": crowd, "latency": latency,
-          "dreaming": dreaming, "vamos": vamos, "handle": handle, "run": run}
+          "dreaming": dreaming, "vamos": vamos, "handle": handle,
+          "affordance": affordance, "run": run}
 
 
 if __name__ == "__main__":

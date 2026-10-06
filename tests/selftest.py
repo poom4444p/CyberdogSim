@@ -90,10 +90,10 @@ def lidar():
     r = MujocoRobot(SCENE, start_xy=(21.0, 9.8), start_yaw=math.pi, start_z=fz)
     sensor = L.Lidar(r.model, r.data)
 
-    pts = sensor.scan((21.0, 9.8), fz)
+    pts = sensor.scan((21.0, 9.8), fz, math.pi)
     t = time.perf_counter()
     for _ in range(20):
-        sensor.scan((21.0, 9.8), fz)
+        sensor.scan((21.0, 9.8), fz, math.pi)
     ms = (time.perf_counter() - t) / 20 * 1000
     check("scan returns", len(pts) > 1000, f"{len(pts)} points")
     check("scan cost", ms < 20, f"{ms:.2f} ms ({1000 / ms:.0f} Hz ceiling)")
@@ -125,7 +125,7 @@ def perception():
     for x in (44.0, 40.0, 36.0, 34.5, 30.0, 20.0, 16.5, 12.0, 6.0):
         r.reset((x, 9.5), math.pi)
         r.set_height(fz)
-        live.update(sensor.scan((x, 9.5), fz), fz, (x, 9.5),
+        live.update(sensor.scan((x, 9.5), fz, math.pi), fz, (x, 9.5),
                     origin=(x, 9.5, fz + L.MOUNT_H))
         p = live.points
         seen += len(p)
@@ -143,7 +143,7 @@ def perception():
     # And the inside of a box must read as solid, not as the one visible face.
     r.reset((20.0, 9.5), math.pi)
     r.set_height(fz)
-    live.update(sensor.scan((20.0, 9.5), fz), fz, (20.0, 9.5),
+    live.update(sensor.scan((20.0, 9.5), fz, math.pi), fz, (20.0, 9.5),
                 origin=(20.0, 9.5, fz + L.MOUNT_H))
     x0, x1, y0, y1, _h, _n = [b for b in boxes if b[5] == "cart"][0]
     mid = live((x0 + x1) / 2, (y0 + y1) / 2)
@@ -162,7 +162,7 @@ def destination():
     fz = levels.floor_z(2)
     r = MujocoRobot(SCENE, start_xy=(20.0, 9.5), start_yaw=math.pi, start_z=fz)
     sensor, live = L.Lidar(r.model, r.data), LiveClearance(2)
-    live.update(sensor.scan((20.0, 9.5), fz), fz, (20.0, 9.5),
+    live.update(sensor.scan((20.0, 9.5), fz, math.pi), fz, (20.0, 9.5),
                 origin=(20.0, 9.5, fz + L.MOUNT_H))
 
     moved, off = free_destination((16.0, 9.5), (20.0, 9.5), live, probe=(12.0, 9.5))
@@ -189,7 +189,7 @@ def latency():
     sensor, live = L.Lidar(r.model, r.data), LiveClearance(2)
 
     def tick():
-        live.update(sensor.scan((20.0, 9.2), fz), fz, (20.0, 9.2),
+        live.update(sensor.scan((20.0, 9.2), fz, math.pi), fz, (20.0, 9.2),
                     origin=(20.0, 9.2, fz + L.MOUNT_H))
         free_destination((16.0, 9.4), (20.0, 9.2), live, probe=(14.0, 9.5))
 
@@ -249,7 +249,7 @@ def crowd():
     dt, v = r.CONTROL_DT, 0.8
 
     def scan(at):
-        live.update(sensor.scan(at, fz), fz, at, origin=(at[0], at[1], fz + L.MOUNT_H))
+        live.update(sensor.scan(at, fz, math.pi), fz, at, origin=(at[0], at[1], fz + L.MOUNT_H))
         return live.points
 
     # 1. Somebody walking up the corridor towards the dog, in the near lane.

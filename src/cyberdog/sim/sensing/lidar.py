@@ -18,6 +18,14 @@ is the unit's own FOV. ~2000 rays comes out at ~1.5 ms a scan (1.3-1.7
 depending on how much of the floor is in range), so the cost of carrying it
 at every control tick is nothing.
 
+Mounted nose-down, MOUNT_PITCH. The spec plans one Mid-360 for both jobs --
+obstacles and the affordance elevation map, one /lidar/points -- and level,
+its lowest ring (-7 deg from 0.5 m) meets the floor 4 m out: of the 2 m patch
+in front of the dog the elevation map needs, it saw 15% even remembering the
+last 3 m of walking. Tilted 20 deg forward it sees 88%, and the top of its
+field still clears a standing person's head at 3 m. Tilted, the pattern turns
+with the dog, so scan() needs the heading.
+
 Two things that are not obvious and cost an afternoon each:
 
 - The sensor sits at MOUNT_H above the floor, not at the camera's 0.32 m. At
@@ -38,12 +46,13 @@ EL_MIN, EL_MAX = -7.0, 52.0     # degrees, the Mid-360's vertical FOV
 MOUNT_H = 0.50                  # above the floor -- clear of the dog's own back
 MIN_R = 0.35                    # minimum range, and the self-hit guard
 MAX_R = 12.0                    # beyond this it reports nothing
+MOUNT_PITCH = 20.0              # degrees nose-down -- see the docstring
 
 
 class Lidar:
     """Rays from a point above the dog, into whatever the scene is made of."""
 
-    def __init__(self, model, data):
+    def __init__(self, model, data, pitch=MOUNT_PITCH):
         self.model, self.data = model, data
 
         az = np.linspace(0.0, 2 * math.pi, NH, endpoint=False)
@@ -53,18 +62,26 @@ class Lidar:
                         np.cos(E) * np.sin(A),
                         np.sin(E)], axis=-1).reshape(-1, 3)
 
-        # The pattern is a full circle, so the dog's heading does not rotate it
-        # and it can be built once.
-        self.vec = np.ascontiguousarray(vec, dtype=np.float64)
+        # Pitched nose-down about the dog's own y axis, once; turned to the
+        # dog's heading every scan. Level (pitch 0) it would be a full circle
+        # that no heading changes.
+        p = math.radians(pitch)
+        tilt = np.array([[math.cos(p), 0.0, math.sin(p)],
+                         [0.0, 1.0, 0.0],
+                         [-math.sin(p), 0.0, math.cos(p)]])
+        self.body = np.ascontiguousarray(vec @ tilt.T, dtype=np.float64)
+        self.vec = self.body
         self.n = NH * NV
-        self._flat = self.vec.flatten()
         self._geomid = np.zeros(self.n, dtype=np.int32)
         self._dist = np.zeros(self.n, dtype=np.float64)
 
-    def scan(self, xy, floor_z):
+    def scan(self, xy, floor_z, yaw=0.0):
         """(N, 3) world points, one per ray that hit something in range."""
         origin = np.array([xy[0], xy[1], floor_z + MOUNT_H], dtype=np.float64)
-        mujoco.mj_multiRay(self.model, self.data, origin, self._flat,
+        c, s = math.cos(yaw), math.sin(yaw)
+        turn = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        self.vec = np.ascontiguousarray(self.body @ turn.T)
+        mujoco.mj_multiRay(self.model, self.data, origin, self.vec.flatten(),
                            None,          # geomgroup: all of them
                            1,             # flg_static: the building is static
                            -1,            # bodyexclude: MIN_R handles the dog

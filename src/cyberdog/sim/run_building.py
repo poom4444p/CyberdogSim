@@ -1235,7 +1235,7 @@ class Run:
             # on no map reacts because of this one call.
             self.step_crowd()
             live = self.clearance(floor)
-            live.update(self.lidar.scan((x, y), self.robot.z), self.robot.z,
+            live.update(self.lidar.scan((x, y), self.robot.z, yaw), self.robot.z,
                         (x, y), origin=(x, y, self.robot.z + MOUNT_H))
             self.seen = live.points
             self.obs["seen"] = max(self.obs["seen"], len(live.points))

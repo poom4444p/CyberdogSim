@@ -32,12 +32,13 @@ import os
 import struct
 import sys
 import time
+from typing import NamedTuple
 
 import numpy as np
 
 
 from cyberdog import paths
-from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute
+from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute, Transit
 from cyberdog.planning.checkpoint_projector import (load_camera_config,
                                                     pick_destination, project_route,
                                                     project_to_pixel,
@@ -48,7 +49,7 @@ from cyberdog.sim.handle import HandleScript, SafetyMux
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-from cyberdog.sim.scene import levels, lift, obstacles, pedestrians
+from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
 from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
@@ -64,6 +65,7 @@ FPS = 20                  # equals the control rate, so the video is real time
 WAIT_S = 1.5              # held at the lift doors, and while auto-confirming
 ANNOUNCE_R = 2.5          # metres out that a checkpoint's line is spoken
 STEP_V = 0.4              # m/s in and out of the car -- slower than corridor pace
+STAIR_V = 0.25            # m/s along a flight: a tread at a time, a third of corridor pace
 REPLAN_EVERY = 20         # ticks between VLM calls when --vamos is on
 REPLAN_BLOCKED = 10       # ...and while nothing VAMOS offered clears an obstacle
 # Shadow mode: a proposal whose heading is further than this off the map's
@@ -309,9 +311,29 @@ def lift_departure(pts, says):
             [says[0]] + [says[k] for k in keep])
 
 
-def plan_stops(router, stops):
-    """Stops -> [(floor, destination, [(x, y), ...], [[announcement], ...])]
-    legs, following the planner's own floor handoffs.
+class Leg(NamedTuple):
+    """One floor's walk -- plan_stops' unit, and what Run.follow drives."""
+    floor: int
+    name: str                   # the stop it is part of
+    points: list                # [(x, y), ...]
+    says: list                  # [[announcement, ...], ...], one per point
+    via: str = None             # how it is left: "lift", "stairs", or None (the stop)
+    stop: int = 0               # index of its stop in the command
+    transit: Transit = None     # choose_transit's answer, when `via` is set
+
+
+def plan_stops(router, stops, consent=None, start=None):
+    """Stops -> [Leg], following the planner's own floor handoffs.
+
+    `via` is how a leg is left: "lift" or "stairs" for a leg that ends at a
+    floor change, None for one that ends at the stop. Stairs are planned as
+    chosen, which is a yes assumed: main asks the person (Run.offer_stairs)
+    when the dog is about to set off for them, and plans the rest again with
+    `consent` answering no if they say no. `consent(transit, from_floor,
+    to_floor)` -> False turns a stairs change into the lift -- or, with the
+    lift out of use, NoAccessibleRoute.
+
+    `start` is (floor, xy) to plan from; the main entrance by default.
 
     Each leg is one floor: a cross-floor stop comes back as a leg to the lift
     and a leg out of it, with the ride in between. The announcements come
@@ -323,9 +345,12 @@ def plan_stops(router, stops):
     {leg index: point to face on arrival}.
     """
     legs, faces = [], {}
-    floor, xy = START_FLOOR, tuple(router.resolve(START_LOCATION, START_FLOOR, (0, 0))["xy"])
+    if start is None:
+        floor, xy = START_FLOOR, tuple(router.resolve(START_LOCATION, START_FLOOR, (0, 0))["xy"])
+    else:
+        floor, xy = start[0], tuple(start[1])
     start_xy = xy
-    for name, requested in stops:
+    for i, (name, requested) in enumerate(stops):
         if requested is not None and requested not in router.floors:
             raise SystemExit(f"there is no floor {requested}; the building has "
                              f"floors {router.floors[0]}-{router.floors[-1]}")
@@ -346,18 +371,33 @@ def plan_stops(router, stops):
         if target is None:
             raise SystemExit(f"there is no {name} on floor {requested} (it is on "
                              f"floor(s) {', '.join(map(str, router.floors_of(name)))})")
-        planned = router.plan(floor, xy, target, lift_stop=lift.WAIT_XY)
+        transit = None
+        if target["floor"] != floor:
+            transit = router.choose_transit(floor, xy, target, lift_stop=lift.WAIT_XY)
+            if transit.kind == "stairs" and consent is not None \
+                    and not consent(transit, floor, target["floor"]):
+                if transit.lift_m is None:
+                    raise NoAccessibleRoute(
+                        f"{transit.reason} Without the stairs I cannot get you "
+                        f"to floor {target['floor']} from here.")
+                transit = Transit("lift", tuple(lift.WAIT_XY), tuple(lift.WAIT_XY), "",
+                                  transit.lift_m, transit.stairs_m)
+        planned = router.plan(floor, xy, target, lift_stop=lift.WAIT_XY, transit=transit)
         if planned is None:
             raise SystemExit(f"no route to {name}")
+        via = transit.kind if transit is not None else None
         for j, (f, route) in enumerate(planned):
             pts, says = router.walk_line(f, route)
             # A cross-floor stop comes back as a leg to the lift and a leg out
-            # of it; neither should be driven into the car itself.
-            if len(planned) > 1 and j == 0:
+            # of it; neither should be driven into the car itself. The stairs
+            # legs already end and start outside the stairwell zone.
+            if len(planned) > 1 and j == 0 and via == "lift":
                 pts, says = lift_approach(pts, says)
-            elif len(planned) > 1 and j == 1:
+            elif len(planned) > 1 and j == 1 and via == "lift":
                 pts, says = lift_departure(pts, says)
-            legs.append((f, name, pts, says))
+            first = len(planned) > 1 and j == 0
+            legs.append(Leg(f, name, pts, says, via if first else None, i,
+                            transit if first else None))
         if hazard is not None:
             # Replaces "destination reached" on the last leg of this stop:
             # the dog has not reached what was asked for, and saying so is the
@@ -404,6 +444,8 @@ class Run:
         self._doors = {}          # floor -> [(name, door_xy)], for the captions
         self.floor = START_FLOOR
         self.in_lift = False
+        self.on_stairs = False
+        self.stair_flights = self.stair_steps = 0
         self.behind = False
         self.auto_confirm = auto_confirm
         # Write one frame in `speed`. The building is 48 m end to end and the
@@ -1504,7 +1546,7 @@ class Run:
                       f"{state['state']}")
         return False, MAX_TICKS
 
-    def confirm(self, prompt):
+    def confirm(self, prompt, what="lift", enter="once the lift is here and the doors are open"):
         """Stop, say something, and wait for a human to act on it.
 
         The robot cannot press a call button, and pretending otherwise is the
@@ -1521,6 +1563,21 @@ class Run:
         Without one, --auto-confirm (and any non-interactive stdin, which is
         every batch run) answers for them, after a visible pause, so the video
         still shows the stop.
+
+        No answer is a stop (HandleStop): this is for the handovers that have
+        no other way on. `ask` is the question that does.
+        """
+        if not self.ask(prompt, what=what, enter=f"press Enter {enter}... "):
+            raise HandleStop(f"at the {what} on floor {self.floor}: nobody "
+                             f"pressed continue")
+
+    def ask(self, prompt, what="lift", enter=None):
+        """Say `prompt` and wait for yes or no: True on continue.
+
+        On the handle, continue is yes, and a script with no continue left to
+        come is no. --auto-confirm and batch runs say yes, after the same
+        visible pause as `confirm`. At a terminal, `enter` given is a press of
+        Enter (confirm's handovers); otherwise it is a y/n question.
         """
         self.say(prompt)
         if self.has_handle:
@@ -1531,11 +1588,10 @@ class Run:
                 self.handle_tick()
                 if (self.handle.pressed(t, dt) and not was_stopped
                         and not self.mux.stopped):
-                    print(f"    t={t:6.1f}s  HANDLE continue: lift confirmed")
-                    return
+                    print(f"    t={t:6.1f}s  HANDLE continue: {what} confirmed")
+                    return True
                 if not self.handle.will_continue(t):
-                    raise HandleStop(f"at the lift on floor {self.floor}: nobody "
-                                     f"pressed continue")
+                    return False
                 x, y, yaw = self.robot.get_pose()
                 self.robot.place((x, y), yaw)
                 self.step_crowd()
@@ -1545,8 +1601,11 @@ class Run:
                 self.step_crowd()
                 self.frame()
             print("    (auto-confirmed)")
-            return
-        input("    press Enter once the lift is here and the doors are open... ")
+            return True
+        if enter is not None:
+            input(f"    {enter}")
+            return True
+        return input("    [y/n] ").strip().lower().startswith("y")
 
     def glide(self, to_xy, yaw, z):
         """Walk a straight short line with the pose set directly.
@@ -1645,6 +1704,110 @@ class Run:
         self.glide(lift.WAIT_XY, math.pi, z1)
         self.in_lift = False
 
+    @staticmethod
+    def flights(from_floor, to_floor):
+        """The flights between two floors, each named by the floor at its foot."""
+        if to_floor > from_floor:
+            return list(range(from_floor, to_floor))
+        return list(range(from_floor - 1, to_floor - 1, -1))
+
+    @staticmethod
+    def rail_side(flight, up):
+        """Which hand the wall rail is on, walking flight `flight` up or down.
+
+        Each flight runs west to east (stairs.steps) in a lane against one of
+        the corridor's long walls; the rail is on that wall."""
+        wall_south = stairs.lane(flight) == "south"
+        # Going up is walking east, where south is on the right.
+        return "right" if wall_south == up else "left"
+
+    def offer_stairs(self, transit, from_floor, to_floor):
+        """Ask #1: may this floor change use the stairs? True for yes.
+
+        Said before the dog sets off, with what the person needs to decide:
+        why not the lift, how many steps, which way, where the rail is. When
+        the lift works, saying no is taking it; when it does not, saying no is
+        the end of the trip (plan_stops).
+        """
+        up = to_floor > from_floor
+        flights = self.flights(from_floor, to_floor)
+        steps = stairs.N_STEPS * len(flights)
+        no = ("Wait, and I will take the lift" if transit.lift_m is not None
+              else "Wait, and I will stop here")
+        return self.ask(
+            f"{transit.reason} I can take you to floor {to_floor} by the stairs: "
+            f"{steps} steps {'up' if up else 'down'}, handrail on your "
+            f"{self.rail_side(flights[0], up)}. Press continue to take the stairs. "
+            f"{no}.", what="stairs offer")
+
+    def stairs_ride(self, from_floor, to_floor):
+        """Change floor by the stairs -- only ever after offer_stairs said yes.
+
+        Ask #2 comes here, at the stairs and not before: stopped short of the
+        first step, the person is told which way, how many steps and which
+        hand the rail is on, and nothing moves until continue. Then slowly --
+        STAIR_V, a third of corridor pace -- one step at a time, with every
+        landing and the last step said as they come.
+
+        Scripted like the lift ride, and a sketch of the motion rather than a
+        simulation of it: the twin's dog has no legs (it glides), and the
+        stairwell was built as scenery, short and steep with no landings, so
+        the dog passes through the edges of the step boxes. What this tests is
+        the decision, the questions and what is said; the climb itself
+        belongs in Isaac Lab, where the dog has legs.
+        """
+        up = to_floor > from_floor
+        flights = self.flights(from_floor, to_floor)
+        steps = stairs.N_STEPS * len(flights)
+        self.confirm(
+            f"Stairs {'up' if up else 'down'} to floor {to_floor}, {steps} steps, "
+            f"handrail on your {self.rail_side(flights[0], up)}. Press continue "
+            f"when you are ready.", what="stairs", enter="when you are ready ")
+        self.on_stairs = True
+        rise = levels.FLOOR_HEIGHT / stairs.N_STEPS
+        run = (stairs.SHAFT_X1 - stairs.SHAFT_X0) / stairs.N_STEPS
+        west, east = stairs.SHAFT_X0 - 0.15, stairs.SHAFT_X1 + 0.15
+        mid = sum(stairs.LANES["south"][1:] + stairs.LANES["north"][:1]) / 2
+        for j, f in enumerate(flights):
+            y0, y1 = stairs.LANES[stairs.lane(f)]
+            ly = (y0 + y1) / 2
+            zf = levels.floor_z(f)
+            # Each flight's foot is its west end on floor f, its head the east
+            # end on floor f+1. Walk to whichever end comes first along the
+            # strip between the two lanes, then into the lane.
+            start, end = ((west, zf), (east, zf + levels.FLOOR_HEIGHT)) if up \
+                else ((east, zf + levels.FLOOR_HEIGHT), (west, zf))
+            heading = 0.0 if up else math.pi
+            x, _, yaw = self.robot.get_pose()
+            along = yaw if abs(start[0] - x) < 1e-3 else (math.pi if start[0] < x else 0.0)
+            self.glide((start[0], mid), along, start[1])
+            self.glide((start[0], ly), heading, start[1])
+            # Step by step: the body rises (or drops) one riser per tread.
+            order = range(stairs.N_STEPS) if up else range(stairs.N_STEPS - 1, -1, -1)
+            for i in order:
+                x0 = stairs.SHAFT_X0 + i * run
+                x_from, x_to = (x0, x0 + run) if up else (x0 + run, x0)
+                z = zf + (i + 1) * rise if up else zf + i * rise
+                ticks = max(int(run / (STAIR_V * self.robot.CONTROL_DT)), 1)
+                for k in range(1, ticks + 1):
+                    self.handle_wait()
+                    self.robot.place((x_from + (x_to - x_from) * k / ticks, ly), heading, z=z)
+                    self.step_crowd()
+                    self.frame()
+                self.stair_steps += 1
+            self.glide((end[0], ly), heading, end[1])
+            self.floor = f + 1 if up else f
+            self.robot.set_height(levels.floor_z(self.floor))
+            if j + 1 < len(flights):
+                self.say(f"Landing. Floor {self.floor}. "
+                         f"{stairs.N_STEPS} more steps {'up' if up else 'down'}.")
+                self.hold(WAIT_S)
+        self.say(f"Last step. Floor {to_floor}.")
+        self.glide((end[0], mid), heading, levels.floor_z(to_floor))
+        self.glide(self.router.stair_stop(to_floor), 0.0, levels.floor_z(to_floor))
+        self.on_stairs = False
+        self.stair_flights += len(flights)
+
 
 def main():
     ap = argparse.ArgumentParser(description="CyberDog whole-building simulation")
@@ -1669,6 +1832,12 @@ def main():
                     help="with --vamos or --shadow: let VAMOS sample its paths "
                          "(temperature 1.0, different every run) instead of beam "
                          "search, which gives the same paths for the same frame")
+    ap.add_argument("--lift-out-of-service", action="store_true",
+                    help="the lift cannot be used: floor changes go by the stairs, "
+                         "if the person agrees (or not at all with --no-stairs)")
+    ap.add_argument("--no-stairs", action="store_true",
+                    help="never offer the stairs: the lift or nothing (spec rule 0 "
+                         "as it was before the stairs fallback)")
     ap.add_argument("--auto-confirm", action="store_true",
                     help="answer the lift handover prompt instead of waiting for a human")
     ap.add_argument("--pedestrians", type=int, default=0, metavar="N",
@@ -1694,7 +1863,8 @@ def main():
     if not os.path.exists(scene):
         raise SystemExit("no building scene yet -- run: python -m cyberdog.sim.scene.build_scene --building")
 
-    router = BuildingRouter()
+    router = BuildingRouter(allow_stairs=not args.no_stairs,
+                            lift_in_service=not args.lift_out_of_service)
     # A refusal -- stairs as a destination, or a floor the lift misses -- is an
     # answer, not a crash. It is the sentence the user would hear.
     try:
@@ -1708,7 +1878,7 @@ def main():
         raise SystemExit(f"[voice] {refusal}")
 
     print(f"{len(legs)} leg(s) across floors "
-          f"{sorted({f for f, _, _, _ in legs})}, starting at {START_LOCATION}")
+          f"{sorted({leg[0] for leg in legs})}, starting at {START_LOCATION}")
 
     first = legs[0][2]
     yaw0 = math.atan2(first[1][1] - first[0][1], first[1][0] - first[0][0]) \
@@ -1722,24 +1892,44 @@ def main():
 
     ok, halted = True, None
     try:
-        for k, (floor, name, waypoints, announcements) in enumerate(legs):
-            changing = k + 1 < len(legs) and legs[k + 1][0] != floor
+        k = 0
+        while k < len(legs):
+            floor, name, waypoints, announcements, via, stop, transit = legs[k]
+            # Ask #1, as the dog is about to set off for the stairs -- not at
+            # the start of a trip that may visit three rooms first. A no is
+            # the rest of the trip planned again from here, by the lift; with
+            # the lift out of use, it is the end of the trip, said out loud.
+            if via == "stairs" and not run.offer_stairs(transit, floor, legs[k + 1].floor):
+                here = run.robot.get_pose()[:2]
+                try:
+                    _, rest, rest_faces = plan_stops(router, stops[stop:], start=(floor, here),
+                                                     consent=lambda *_: False)
+                except NoAccessibleRoute as refusal:
+                    run.say(str(refusal))
+                    raise HazardStop(f"on floor {floor}: {refusal}")
+                legs = legs[:k] + [leg._replace(stop=leg.stop + stop) for leg in rest]
+                faces = {i: p for i, p in faces.items() if i < k}
+                faces.update({k + i: p for i, p in rest_faces.items()})
+                continue
             print(f"  leg {k + 1}/{len(legs)}: floor {floor}, {len(waypoints)} checkpoints "
-                  f"-> {'the lift' if changing else name}")
+                  f"-> {'the ' + via if via else name}")
             ok, ticks = run.follow(waypoints, floor, announcements,
-                                   goal_r=LIFT_GOAL_R if changing else GOAL_R)
+                                   goal_r=LIFT_GOAL_R if via == "lift" else GOAL_R)
             if not ok:
                 print(f"  leg {k + 1} timed out after {ticks} ticks")
                 break
             if k in faces:
                 run.face(faces[k])
-            if changing:
+            if via == "lift":
                 run.lift_ride(floor, legs[k + 1][0])
+            elif via == "stairs":
+                run.stairs_ride(floor, legs[k + 1][0])
             else:
                 # Arrived somewhere the person asked for. Stand still long
                 # enough for that to register -- a guide dog that announces a
                 # destination and immediately walks off has not delivered it.
                 run.hold(WAIT_S * 2)
+            k += 1
     except HazardStop as stop:
         ok, halted = False, stop
     if ok:
@@ -1795,6 +1985,9 @@ def main():
     else:
         print("handler: none -- the person on the handle never touched a wall or an obstacle")
     print(f"turns eased to keep the person on the handle clear: {o['eased'] / FPS:.1f}s")
+    if run.stair_flights:
+        print(f"stairs: {run.stair_flights} flight(s), {run.stair_steps} steps, each "
+              f"taken after two yeses (offered, then at the first step)")
     if args.handle:
         hs = run.mux.stats
         print(f"handle: {hs['tugs']} tug(s), {hs['continues']} continue(s), "

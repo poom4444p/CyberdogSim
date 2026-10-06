@@ -25,7 +25,8 @@
 | **CrossTracer / NaviTrace** (arXiv:2608.06688 / 2510.26909) | The benchmark to beat (CrossTracer score 45.68). NaviTrace val split = fine-tuning signal + diagnostic. |
 
 **Finalized architectural decisions:**
-0. **Stairs are never traversed.** The user cannot see the steps and has one hand on the handle, so a staircase is a hazard to be announced and refused, not a way up. Stairwells are full-stop zones in the Behavior Layer, stamped into the planning grids so **no A\* route can contain one**, and any drift into one is a hard stop with no resume. All vertical movement is by **lift**, and boarding it is gated on human confirmation — the robot cannot press a call button and does not pretend to. A floor the lift does not serve is unreachable, and the honest answer is to say so.
+0. **The lift first; the stairs only as a fallback the person agrees to.** The user cannot see the steps and has one hand on the handle, so a staircase is never something a route wanders onto: stairwells are full-stop zones in the Behavior Layer, stamped into the planning grids so **no A\* route can contain one**, and any unplanned drift into one is a hard stop with no resume. Vertical movement is by **lift** by default, and boarding it is gated on human confirmation — the robot cannot press a call button and does not pretend to.
+   *Revised (Oct 2026):* this rule used to read "stairs are never traversed". Blind people do use stairs, and a guide dog's job is to make them safe, not to forbid them. So a floor change may now use the stairs as a **deliberate transfer, like the lift ride**, and only when (a) the lift is out of service or does not serve the floor, or (b) the lift route is both **2× and 30 m longer** than the stairs route (`STAIRS_RATIO`, `STAIRS_EXTRA_M`). It is never taken silently: the dog **asks twice** — when it is about to set off for the stairs (why not the lift, how many steps, up or down, which hand the rail is on; no means the lift), and again **stopped at the first step** — then goes at a third of corridor pace, announcing every landing and the last step. `--no-stairs` restores the old rule. A floor neither can reach is unreachable, and the honest answer is to say so.
    *Refusing to move is not the answer either.* Asked for a place inside a no-go zone, the robot walks to the nearest safe point outside it — the corridor by the stairs — and the arrival announcement says plainly that this is as close as it goes. Answer the question that was asked; decline only the part that is unsafe.
 1. **Map decides WHERE** (3D map + Behavior Layer + A*), **VLM decides HOW** (VAMOS local paths), **rules decide WHEN TO STOP**.
 2. **VAMOS requires a goal pixel pointer** → solved by the **Checkpoint Projector** (pinhole projection of an intermediate destination 2–4 m ahead on the map route). Pure geometry, zero AI.
@@ -76,7 +77,7 @@ Cyberdog Executes → haptic/audio feedback loop
 2. Convert to `.pcd`; project ground plane → rasterize → **2D occupancy grid** (`nav_msgs/OccupancyGrid`).
 3. Annotate **Behavior Layer**: polygons with tags `{grass: slow+announce, stairs: STOP+announce, crosswalk, entrance_zone}` → save as JSON. Zones are generated from the same constants the geometry is built from, so a zone cannot end up somewhere the hazard isn't.
 4. Implement **A\*** over occupancy grid; simplify polyline with Ramer–Douglas–Peucker → **checkpoints** (turn points double as voice-announcement triggers). **Full-stop zones are stamped into the planning grid as obstacles** before A* runs — a no-go area is not something to route through and halt at, it is something no route may contain.
-5. Publish the **lift** (or lifts) as named transit nodes. Every cross-floor route is `current floor → lift → target floor`; the stairwells stay on the map only as hazards to refuse.
+5. Publish the **lift** (or lifts) as named transit nodes, and the **stairs** as the fallback one. Every cross-floor route is `current floor → lift → target floor`, or `→ stairs →` when rule 0's fallback applies; walking routes never cross a stairwell either way.
 
 **PoC stub:** none needed — this layer is fully doable now.
 **Acceptance:** occupancy grid + A* route + checkpoints render correctly in RViz for ≥3 route queries.
@@ -99,8 +100,8 @@ Cyberdog Executes → haptic/audio feedback loop
 ### LAYER 3 — Task Planner + Checkpoint Projector (deterministic FSM)
 **Purpose:** orchestration + the goal-pixel pointer VAMOS requires. **~90% of this is simple code.**
 
-**States:** `IDLE → GLOBAL_NAV → ALIGN → LOCAL_NAV → LIFT_WAIT → LIFT_RIDE → ARRIVED` + interrupts `EMERGENCY_STOP`, `STAIRS_STOP`, `HOLD`.
-`LIFT_WAIT` is a stop with a spoken handover ("press the call button for floor N, then press continue") and does not advance without human confirmation. `LIFT_RIDE` is the only state in which the robot's height changes. `STAIRS_STOP` has no resume — it is a halt, not a confirm-and-continue.
+**States:** `IDLE → GLOBAL_NAV → ALIGN → LOCAL_NAV → LIFT_WAIT → LIFT_RIDE → ARRIVED` (or `→ STAIRS_OFFER → STAIRS_WAIT → STAIRS_WALK →`) + interrupts `EMERGENCY_STOP`, `STAIRS_STOP`, `HOLD`.
+`LIFT_WAIT` is a stop with a spoken handover ("press the call button for floor N, then press continue") and does not advance without human confirmation. `STAIRS_OFFER` and `STAIRS_WAIT` are the two confirmations of rule 0's fallback. `LIFT_RIDE` and `STAIRS_WALK` are the only states in which the robot's height changes. `STAIRS_STOP` — walking into a stairwell without having agreed to — has no resume: it is a halt, not a confirm-and-continue.
 **Sub-modules:**
 1. **Intent parser:** lookup/fuzzy match of destination against Behavior Layer node list. (PaliGemma `intent` adapter optional later.)
 2. **Route consumer:** reads A* polyline + checkpoints from L1.
@@ -161,7 +162,7 @@ Cyberdog Executes → haptic/audio feedback loop
 
 **Steps:**
 1. **Kinematic executor (PoC):** integrate `/cmd_vel_final` to move the virtual agent in the twin (this updates `/odom` and closes the loop). *Later phase replaces this with Cyberdog native locomotion (RHC 2 Hz) via ROS 2 driver.*
-2. **Preemptive Voice Engine:** pose-in-zone checks against Behavior Layer → TTS strings ("grass ahead", "turning right", "stairs detected — I do not take stairs, the lift is at the east end", "lift ahead — press the call button for floor 3, then press continue"). Checkpoint lines are spoken *before* the turn they describe; arrival is spoken on arrival.
+2. **Preemptive Voice Engine:** pose-in-zone checks against Behavior Layer → TTS strings ("grass ahead", "turning right", "stairs detected — stopping. I only take the stairs when you have agreed to", "the lift is out of service. I can take you by the stairs: 14 steps up, handrail on your right", "lift ahead — press the call button for floor 3, then press continue"). Checkpoint lines are spoken *before* the turn they describe; arrival is spoken on arrival.
 3. **Haptic mock:** vibration command on turn/stop (keyboard LED / log now; vest/handle motor later).
 
 **Acceptance:** full loop stable for a complete route; voice triggers fire at correct zones.
@@ -218,7 +219,7 @@ Cyberdog Executes → haptic/audio feedback loop
 ## 7. Definition of Done (PoC)
 
 - [ ] Closed-loop *"go to the library"* completes in the digital twin with zero hardware.
-- [ ] A multi-floor run completes with **zero stair traversal**: the lift is announced, confirmed and ridden, and the stairwells are only ever refused.
+- [ ] A multi-floor run completes with **zero unplanned stair traversal**: the lift is announced, confirmed and ridden; stairs are used only through rule 0's fallback, after both confirmations.
 - [ ] Every layer's failure is individually logged and interpretable (which layer rejected what).
 - [ ] Latency + success metrics recorded; go/no-go report written.
 - [ ] **Only then** buy hardware: Jetson Orin NX 16 GB, Livox Mid-360 (~$800), USB cam, ESP32 handle (~$40) — the brain rig phase.

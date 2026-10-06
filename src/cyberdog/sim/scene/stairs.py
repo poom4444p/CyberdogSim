@@ -1,14 +1,14 @@
-"""Where the stairwells are -- and they are scenery, not a route.
+"""Where the stairwells are -- a hazard to every route, a floor change for one.
 
-This robot leads someone who cannot see the steps and has no free hand for a
-rail, so it never climbs. The flights are drawn anyway, and drawn where the
-map says they are, because a hazard has to exist to be refused: the dog's
-camera sees them, VAMOS's candidate paths get scored against them, and the
-Behavior Layer's stop zone sits on top of them. Floor changes go through
-lift.py.
+This robot leads someone who cannot see the steps, so no route ever walks onto
+a flight: the Behavior Layer's stop zone sits on top of them, the dog's camera
+sees them, and VAMOS's candidate paths get scored against them. Floor changes
+go through lift.py -- or, as spec rule 0's agreed fallback, up or down these
+flights in run_building.stairs_ride, which is the one thing that walks them.
 
-build_scene.py draws the flights and the openings they come through. Nothing
-walks them.
+build_scene.py draws the flights and the openings they come through. They were
+built as scenery -- short and steep, no landings -- so stairs_ride sketches
+the climb rather than simulating it; the climb itself belongs in Isaac Lab.
 
 Layout. Every floor has "stairs" at the same spot in locations.json, the west
 end of the corridor, so the shaft runs east from there along the corridor. The

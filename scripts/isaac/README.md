@@ -5,10 +5,13 @@ affordance MLP can learn it. Everything in this folder runs **only inside
 Isaac Lab on an NVIDIA GPU** (a Linux machine, e.g. SDU UCloud with a GPU
 allocation). It does not run on a Mac or on a CPU-only machine.
 
-> **Status: written, not yet run.** `collect_affordance.py` was checked against
-> the Isaac Lab and rsl_rl sources (Oct 2026) but has not been run on a GPU yet.
-> Expect to fix a thing or two the first time. The data format it writes
-> (`src/cyberdog/affordance/data.py`) *is* tested: `pytest tests/test_affordance_data.py`.
+> **Status:** run on SDU UCloud: `run_20261006_132140` (100k trials) trained
+> the current network, and a 500-trial check on 2026-10-07 with the pre-trained
+> policy that ships in the UCloud Isaac Lab image
+> (`/opt/IsaacLab/.pretrained_checkpoints/rsl_rl/Isaac-Velocity-Rough-Unitree-Go2-v0/exported/policy.pt`)
+> reached 98% and fell 1%. `--boxes` is written against Isaac Lab's
+> `MeshRepeatedBoxesTerrainCfg` source but **not yet run**. The data format
+> (`src/cyberdog/affordance/data.py`) is tested: `pytest tests/test_affordance_data.py`.
 
 ## What comes out
 
@@ -126,6 +129,7 @@ print(len(y), y.mean())          # how many trials, what share is walkable
 | `--shard_size` | 5000 | records per `.npz` file |
 | `--out` | `<repo>/datasets/affordance` | where run folders go |
 | `--seed` | 0 | terrain, spawns and targets |
+| `--boxes` | off | add `free_boxes`, 20% of the columns: flat floor with upright boxes 0.3–1.0 m tall to walk past or bump. Without it the network never sees a box beside the walk and refuses to pass crates |
 
 Plus Isaac Lab's own flags, e.g. `--headless` and `--device`.
 

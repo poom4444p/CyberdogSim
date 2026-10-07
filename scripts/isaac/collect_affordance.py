@@ -39,6 +39,9 @@ parser.add_argument("--shard_size", type=int, default=5_000)
 parser.add_argument("--out", default=None,
                     help="output folder (default: <repo>/datasets/affordance)")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--boxes", action="store_true",
+                    help="add a terrain of flat floor with standing boxes, 20%% of the "
+                         "columns (BOX_SHARE): walks past a crate, not only onto one")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -53,6 +56,7 @@ import gymnasium as gym  # noqa: E402
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
+import isaaclab.terrains as terrain_gen  # noqa: E402
 import isaaclab_tasks  # noqa: E402,F401  registers the tasks with gym
 from isaaclab.utils.math import wrap_to_pi  # noqa: E402
 from isaaclab_tasks.utils import parse_env_cfg  # noqa: E402
@@ -71,6 +75,7 @@ SETTLE_S = 1.0          # after a reset, stand this long before the first trial
 EPISODE_S = 60.0        # Play's 20 s throws away a trial in progress too often
 SCAN = 3.2              # the wider scanner: a centred square that covers the patch
 LOG_EVERY_S = 10.0
+BOX_SHARE = 0.2         # --boxes: share of the terrain columns that are free_boxes
 
 
 def make_env():
@@ -91,6 +96,8 @@ def make_env():
     # curriculum moving dogs between rows: spawn rows stay uniform.
     gen = cfg.scene.terrain.terrain_generator
     gen.num_rows, gen.num_cols, gen.curriculum = 10, 20, True
+    if args.boxes:
+        gen.sub_terrains["free_boxes"] = free_boxes(gen)
     cfg.scene.terrain.max_init_terrain_level = None
     cfg.curriculum.terrain_levels = None
 
@@ -101,6 +108,32 @@ def make_env():
         pattern_cfg=hs.pattern_cfg.replace(size=[SCAN, SCAN]), debug_vis=False)
 
     return gym.make(args.task, cfg=cfg), cfg
+
+
+def free_boxes(gen):
+    """Flat floor with boxes standing on it, the way crates stand in a corridor.
+
+    The rough task's own `boxes` is a grid of raised steps across the whole
+    tile: something to walk onto. Nothing in it is a box to walk *past*, and
+    in the twin the network refused 38% of clear walks 0.3-0.5 m beside a
+    crate (selftest affordance). Here a dog walks among upright boxes too
+    tall to climb, and passing one or bumping it is the label.
+
+    Rows run easy to hard: more, taller, wider boxes. platform_height is set
+    because Isaac's default (-1) raises the spawn pad to the boxes' height;
+    platform_width keeps every box centre 0.75 m from the spawn point.
+    """
+    share = sum(t.proportion for t in gen.sub_terrains.values())
+    return terrain_gen.MeshRepeatedBoxesTerrainCfg(
+        proportion=share * BOX_SHARE / (1.0 - BOX_SHARE),
+        object_params_start=terrain_gen.MeshRepeatedBoxesTerrainCfg.ObjectCfg(
+            num_objects=10, height=0.3, size=(0.4, 0.4)),
+        object_params_end=terrain_gen.MeshRepeatedBoxesTerrainCfg.ObjectCfg(
+            num_objects=25, height=1.0, size=(1.0, 1.0)),
+        rel_height_noise=(0.8, 1.2),
+        platform_width=1.5,
+        platform_height=0.02,
+    )
 
 
 def column_names(gen):

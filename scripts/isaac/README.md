@@ -5,13 +5,22 @@ affordance MLP can learn it. Everything in this folder runs **only inside
 Isaac Lab on an NVIDIA GPU** (a Linux machine, e.g. SDU UCloud with a GPU
 allocation). It does not run on a Mac or on a CPU-only machine.
 
-> **Status:** run on SDU UCloud: `run_20261006_132140` (100k trials) trained
-> the current network, and a 500-trial check on 2026-10-07 with the pre-trained
-> policy that ships in the UCloud Isaac Lab image
-> (`/opt/IsaacLab/.pretrained_checkpoints/rsl_rl/Isaac-Velocity-Rough-Unitree-Go2-v0/exported/policy.pt`)
-> reached 98% and fell 1%. `--boxes` is written against Isaac Lab's
-> `MeshRepeatedBoxesTerrainCfg` source but **not yet run**. The data format
-> (`src/cyberdog/affordance/data.py`) is tested: `pytest tests/test_affordance_data.py`.
+> **Status:** run on SDU UCloud. `run_20261006_132140` (100k trials, no
+> `--boxes`, the pre-trained policy that ships in the UCloud Isaac Lab image,
+> `/opt/IsaacLab/.pretrained_checkpoints/rsl_rl/Isaac-Velocity-Rough-Unitree-Go2-v0/exported/policy.pt`)
+> trained the first network (`mlp_v1.pt`). `run_20261007_094041` (100k
+> trials, `--boxes`, policy `/work/policy.pt`) trains the current one. On tiles it never saw: 93.8% right on
+> followable-or-not (v1 92.4%), not-walkable called walkable or caution 5.0%
+> (v1 5.4%), followable refused 7.4% (v1 9.9%). In the twin
+> (`python tests/selftest.py affordance`) it still passes no walk into a crate,
+> but `--boxes` did **not** fix what it was for: clear walks 0.3–0.5 m beside a
+> crate with no wall in view are refused 37% of the time (v1 39%). Not for
+> want of seeing: the walk's band is 100% seen there. At 0.3-0.4 m the network
+> refuses 46% even given exact heights, where Isaac's own outcomes fail 23% --
+> too few trials pass a box that close to learn where it flips; at 0.4-0.6 m
+> the twin's elevation memory draws a crate a cell wider than it is (24% refused
+> vs 5% on exact heights). The data format (`src/cyberdog/affordance/data.py`) is tested:
+> `pytest tests/test_affordance_data.py`.
 
 ## What comes out
 

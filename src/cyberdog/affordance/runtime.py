@@ -29,8 +29,9 @@ NEAR_M = 2.5            # only points this close to the dog are kept -- the patc
 MIN_SEEN = 0.7          # under this share of the patch seen, no judgement is made:
                         # under 70% seen it wrongly refused open floor 45% of the time
 WALL_M = 0.15           # metres from a mapped wall face that is wall, not floor: a
-                        # return on the face sits in a world cell up to RES from it,
-                        # looked up from a patch centre up to RES * sqrt(2) away
+                        # return on the face is read from a patch centre up to
+                        # RES / sqrt(2) away
+SUB_M = 0.025           # metres: each world cell keeps one return per square this size
 
 
 class ElevationMemory:
@@ -43,12 +44,20 @@ class ElevationMemory:
     metres of floor-1 corridor that people had just walked, refused with
     certainty and every cell seen. A cell looked at again now takes what it
     shows now -- floor where the person was, the crate where the crate still
-    is. Within one scan a cell keeps its highest return, as data.py does.
+    is.
+
+    A cell keeps where its returns were, not just how high: one point per
+    SUB_M square (the highest, as data.py keeps the highest). A cell's height
+    alone drew a crate up to a cell wider than it is -- the crate's side at
+    y = 9.55 put 0.7 m in the whole 9.50-9.60 cell -- and the network refused
+    25% of clear walks 0.5-0.6 m from a crate, 0% given the true heights
+    (selftest affordance). Isaac's scanner reads the height at each patch
+    cell's centre; patch() reads the remembered return nearest it.
     """
 
     def __init__(self, keep_m=KEEP_M, max_h=MAX_H, res=data.RES):
         self.keep_m, self.max_h, self.res = keep_m, max_h, res
-        self.cells = {}                 # (ix, iy) -> [height above floor, odometer]
+        self.cells = {}                 # (ix, iy) -> [(k, 3) x, y, height above floor, odometer]
         self.odometer = 0.0
         self.last_xy = None
         self.floor_z = None
@@ -67,14 +76,21 @@ class ElevationMemory:
             keep = ((h < self.max_h) & (h > -self.max_h)
                     & (np.hypot(p[:, 0] - xy[0], p[:, 1] - xy[1]) <= NEAR_M))
             p, h = p[keep], h[keep]
-            ix = np.floor(p[:, 0] / self.res).astype(np.int64)
-            iy = np.floor(p[:, 1] / self.res).astype(np.int64)
-            key = ix * 1_000_003 + iy
-            order = np.lexsort((-h, key))           # per cell, highest first
-            key, ix, iy, h = key[order], ix[order], iy[order], h[order]
-            first = np.r_[True, key[1:] != key[:-1]]
-            for a, b, z in zip(ix[first], iy[first], h[first]):
-                self.cells[(int(a), int(b))] = [float(z), self.odometer]
+            # The highest return in each SUB_M square...
+            sx = np.floor(p[:, 0] / SUB_M).astype(np.int64)
+            sy = np.floor(p[:, 1] / SUB_M).astype(np.int64)
+            sub = sx * 10_000_019 + sy
+            order = np.lexsort((-h, sub))
+            top = order[np.r_[True, sub[order][1:] != sub[order][:-1]]]
+            pts = np.column_stack([p[top, :2], h[top]])
+            # ...grouped by the world cell it is in, which it replaces.
+            ix = np.floor(pts[:, 0] / self.res).astype(np.int64)
+            iy = np.floor(pts[:, 1] / self.res).astype(np.int64)
+            order = np.lexsort((iy, ix))
+            pts, ix, iy = pts[order], ix[order], iy[order]
+            starts = np.flatnonzero(np.r_[True, (ix[1:] != ix[:-1]) | (iy[1:] != iy[:-1])])
+            for a, b in zip(starts, np.r_[starts[1:], len(pts)]):
+                self.cells[(int(ix[a]), int(iy[a]))] = [pts[a:b], self.odometer]
         # Forget what was seen more than keep_m of walking ago.
         old = self.odometer - self.keep_m
         if len(self.cells) > 4000:
@@ -83,31 +99,39 @@ class ElevationMemory:
     def patch(self, pose, wall_at=None):
         """(NY, NX) elevation patch at pose (x, y, yaw), NaN where unseen.
 
+        Each patch cell takes the remembered return nearest its centre, of
+        those inside its RES square; none inside, unseen.
+
         `wall_at(x, y)`, metres to the nearest wall the map knows, makes those
         walls floor: cells within WALL_M of one read 0. Isaac has no walls, so
         the network took any tall thing in view for stairs and refused 52-96%
         of clear walks with a wall within 0.5 m (selftest affordance) -- every
         doorway. Walls are the map's to judge (the dream's clearance); the
         network judges the ground and what the map does not know is there."""
-        # Each patch cell looks up the world cell its centre falls in. Splatting
-        # world cells into the patch instead aliased: two landed in one patch
-        # cell and the next stayed empty, and a floor seen whole read 44% seen.
         old = self.odometer - self.keep_m
         x, y, yaw = pose
-        xs, ys = data.cell_centres()
-        fx, fy = np.meshgrid(xs, ys)                    # [iy, ix], like the patch
         c, s = math.cos(yaw), math.sin(yaw)
-        wx, wy = x + c * fx - s * fy, y + s * fx + c * fy
-        ix = np.floor(wx / self.res).astype(np.int64)
-        iy = np.floor(wy / self.res).astype(np.int64)
-        out = np.full(fx.shape, np.nan, dtype=np.float32)
-        for r in range(out.shape[0]):
-            for k in range(out.shape[1]):
-                v = self.cells.get((int(ix[r, k]), int(iy[r, k])))
-                if v is not None and v[1] >= old:
-                    out[r, k] = v[0]
-                if wall_at is not None and wall_at(wx[r, k], wy[r, k]) < WALL_M:
-                    out[r, k] = 0.0
+        out = np.full((data.NY, data.NX), np.nan, dtype=np.float32)
+        live = [v[0] for v in self.cells.values() if v[1] >= old]
+        if live:
+            p = np.concatenate(live)
+            dx, dy = p[:, 0] - x, p[:, 1] - y
+            fx, fy = c * dx + s * dy, -s * dx + c * dy          # into the dog's frame
+            kx = np.floor((fx - data.X0) / data.RES + 0.5).astype(np.int64)
+            ky = np.floor((fy - data.Y0) / data.RES + 0.5).astype(np.int64)
+            inside = (kx >= 0) & (kx < data.NX) & (ky >= 0) & (ky < data.NY)
+            kx, ky, fx, fy, h = kx[inside], ky[inside], fx[inside], fy[inside], p[inside, 2]
+            cell = ky * data.NX + kx
+            d2 = (fx - (data.X0 + kx * data.RES)) ** 2 + (fy - (data.Y0 + ky * data.RES)) ** 2
+            order = np.lexsort((d2, cell))                      # per cell, nearest first
+            first = order[np.r_[True, cell[order][1:] != cell[order][:-1]]]
+            out.reshape(-1)[cell[first]] = h[first]
+        if wall_at is not None:
+            xs, ys = data.cell_centres()
+            for r, py in enumerate(ys):
+                for k, px in enumerate(xs):
+                    if wall_at(x + c * px - s * py, y + s * px + c * py) < WALL_M:
+                        out[r, k] = 0.0
         return out
 
 

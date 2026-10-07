@@ -29,6 +29,8 @@ ARRIVE_R = 0.15                 # waypoint reached inside this -- keep it well
                                 # under half a door width (doors are 1.2 m) or the
                                 # dog turns early and clips the frame
 GOAL_R = 0.5
+MIN_SEG = 0.3                   # metres: a waypoint nearer than this to the one
+                                # before it is judged passed along a longer leg
 
 
 def wrap(a):
@@ -42,10 +44,22 @@ def advance(i, x, y, waypoints):
     Distance alone is not enough: overshoot a waypoint by more than ARRIVE_R
     and the dog turns back for it, overshoots again, and spins forever.
     Projecting onto the segment catches the overshoot.
+
+    But not onto a segment of a few centimetres. A* leaves jogs like that in
+    a route -- floor 3 to the chemistry lab steps 10 cm north at (43.26, 10.0)
+    -- and "past it" along a 10 cm step north means nothing to a dog walking
+    west on a VAMOS path or round a person: it went 1.8 m by at y = 9.97, the
+    route still had the jog ahead, and it pivoted back for it and forward
+    again for 18 s, swinging the person on the handle through the wall and
+    the cartons (Gate D, chemistry lab seed 9, --vamos: 10.2 s of D2). So the
+    segment starts at the last waypoint at least MIN_SEG back.
     """
     while i < len(waypoints) - 1:
-        px, py = waypoints[i - 1]
         cx, cy = waypoints[i]
+        k = i - 1
+        while k > 0 and math.hypot(cx - waypoints[k][0], cy - waypoints[k][1]) < MIN_SEG:
+            k -= 1
+        px, py = waypoints[k]
         sx, sy = cx - px, cy - py
         seg = sx * sx + sy * sy
         t = ((x - px) * sx + (y - py) * sy) / seg if seg > 1e-9 else 1.0

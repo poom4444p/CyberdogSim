@@ -73,12 +73,19 @@ MAX_RADIUS = 0.50       # A cluster wider than this is not one person.
                         # face as the dog walks past, at 0.6 m/s, which is a
                         # walking pace and is why a speed threshold alone
                         # cannot separate them. Shape can.
+CLAIM_R = 0.40          # metres round where a walker is predicted to be: their
+                        # returns this tick, taken before the rest are clustered.
+                        # A person who stops beside a crate is one cluster with
+                        # it otherwise (CELL), wider than MAX_RADIUS, with its
+                        # centroid half a metre from them: Gate D, room 201
+                        # --vamos, seeds 1 and 8, the dog went round a cart
+                        # and its user at a crate's distance, 0.40 m from them.
 
 
 class Track:
     """One clustered thing, over time."""
 
-    __slots__ = ("x", "y", "vx", "vy", "r", "age", "missed", "past", "dt")
+    __slots__ = ("x", "y", "vx", "vy", "r", "age", "missed", "past", "dt", "walked")
 
     def __init__(self, x, y, r, dt):
         self.x, self.y, self.r, self.dt = x, y, r, dt
@@ -86,6 +93,7 @@ class Track:
         self.age = 1
         self.missed = 0
         self.past = deque([(x, y)], maxlen=WINDOW)
+        self.walked = False         # ever moving: a person, whatever they do next
 
     def observe(self, x, y, r):
         """Where it is now, and therefore how fast it has been going."""
@@ -97,6 +105,7 @@ class Track:
             ox, oy = self.past[0]
             span = (len(self.past) - 1) * self.dt
             self.vx, self.vy = (x - ox) / span, (y - oy) / span
+        self.walked = self.walked or self.moving
 
     @property
     def speed(self):
@@ -165,9 +174,25 @@ class Tracker:
 
     def update(self, points):
         """Fold in one scan's unexplained returns. Returns all live tracks."""
-        found = clusters(points)
-        unmatched = list(self.tracks)
-        self.tracks = []
+        # A track that has walked keeps its own returns, so a person who
+        # stops next to something stays a person, where they are. CLAIM_R.
+        rest = list(points)
+        claimed = []
+        for t in self.tracks:
+            if not t.walked or not rest:
+                continue
+            px, py = t.predict(self.dt)
+            mine = [p for p in rest if math.hypot(p[0] - px, p[1] - py) < CLAIM_R]
+            if len(mine) < MIN_POINTS:
+                continue
+            rest = [p for p in rest if math.hypot(p[0] - px, p[1] - py) >= CLAIM_R]
+            cx = sum(p[0] for p in mine) / len(mine)
+            cy = sum(p[1] for p in mine) / len(mine)
+            t.observe(cx, cy, max(math.hypot(p[0] - cx, p[1] - cy) for p in mine))
+            claimed.append(t)
+        found = clusters(rest)
+        unmatched = [t for t in self.tracks if t not in claimed]
+        self.tracks = claimed
 
         for cx, cy, r in found:
             best, bd = None, MATCH_D

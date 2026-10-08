@@ -132,6 +132,9 @@ PASS_NEED = 0.60          # going round someone who has stopped: room kept from
                           # speed, 9 cm from their shoulder.
 PASS_V = 0.40             # m/s while within PASS_R of them: walking past
 PASS_R = 2.0              # somebody, not overtaking them
+PASS_SIDE = 0.90          # metres either side of the dog's heading a standing
+                          # person must be to be passed slowly: PASS_NEED plus
+                          # the dog's half-width
 # No stepping back from them first. It was tried: reversing pushes the rigid
 # handle into the person holding it, and nothing the dog senses knows they
 # are there -- seed 8 of room 201 backed them into a wall for 9 s. A standoff
@@ -1334,6 +1337,22 @@ class Run:
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
             walking = self.tracker.movers()
+            # Somebody standing still ahead who was seen walking is a person,
+            # not a crate, whether or not the dog waited for them first: go
+            # round with a person's room (PASS_NEED), at PASS_V. Only the ones
+            # it had waited out got that, and room 201 seed 1 --vamos went
+            # past a person stopped by the wall at a crate's 0.44 m. Only the
+            # ones near its line (PASS_SIDE): slowing for everybody standing
+            # in the other lane cost room 201 seeds 1 and 8 25 s each.
+            if self.passing is None:
+                c, s_ = math.cos(yaw), math.sin(yaw)
+                for t in tracks:
+                    fwd = (t.x - x) * c + (t.y - y) * s_
+                    side = abs(-(t.x - x) * s_ + (t.y - y) * c)
+                    if (t.walked and not t.moving and 0 < fwd < PASS_R
+                            and side < PASS_SIDE):
+                        self.passing = (t.x, t.y)
+                        break
             # Out of the planning field, still in the safety one. A person is
             # waited for; only a crate is gone round. See LiveClearance.exclude.
             live.exclude([(t.x, t.y, t.r) for t in walking])

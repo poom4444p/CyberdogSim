@@ -172,6 +172,15 @@ HANDLER_ROOM = 0.35       # metres, their centre to a surface: HANDLER_R + 0.10
 SWING_T = 0.8             # seconds a command is rolled forward over
 SWING_V = 0.30            # m/s walked while easing a turn a pivot would have made
 SWING_EASE = (0.5, 0.25, 0.0)   # fractions of the turn rate tried, in order
+SIDE_V = 0.20             # m/s sideways, towards the turn, when no eased turn
+                          # walking forward is clear. Setting off round somebody
+                          # who stopped in its lane, the dog had them in front and
+                          # its user 0.5 m from the wall beside it: walking on
+                          # meets the one, pivoting swings the other into the
+                          # wall (Gate D on main, --vamos, room 101 seeds 2, 3,
+                          # 8, 9, room 201 seed 10). A step sideways takes both
+                          # away from the wall; the turn follows once there is
+                          # room for it.
 SWING_NOSE = 0.30         # metres ahead of the dog's centre its front legs reach.
                           # An eased command walks on while the turn waits, so
                           # the front of the body has to stay clear too, not
@@ -987,20 +996,23 @@ class Run:
     def swing(self, live, pose, cmd, people=(), dt=0.1):
         """Roll `cmd` forward SWING_T: (least room around the person, whether
         the dog itself stays clear -- of everything by ROBOT_R, and of where
-        each of `people` is heading by SWING_PEOPLE)."""
+        each of `people` is heading by SWING_PEOPLE, or by as much as it has
+        now if that is less: someone stopped 0.55 m in front of it would
+        otherwise rule out stepping away from them too)."""
         x, y, yaw = pose
-        vx, _, w = cmd
+        vx, vy, w = cmd
+        keep = [min(SWING_PEOPLE, math.dist((x, y), (p.x, p.y)) - 1e-6) for p in people]
         worst, clear = INF, True
         for k in range(1, int(round(SWING_T / dt)) + 1):
             yaw += w * dt
-            x += vx * math.cos(yaw) * dt
-            y += vx * math.sin(yaw) * dt
+            x += (vx * math.cos(yaw) - vy * math.sin(yaw)) * dt
+            y += (vx * math.sin(yaw) + vy * math.cos(yaw)) * dt
             worst = min(worst, self.handler_room(live, x, y, yaw))
             clear = (clear and live(x, y) >= ROBOT_R
                      and live.detected_at(x + SWING_NOSE * math.cos(yaw),
                                           y + SWING_NOSE * math.sin(yaw)) >= ROBOT_R
-                     and all(math.dist((x, y), p.predict(k * dt)) >= SWING_PEOPLE
-                             for p in people))
+                     and all(math.dist((x, y), p.predict(k * dt)) >= d
+                             for p, d in zip(people, keep)))
         return worst, clear
 
     def spare_handler(self, live, pose, cmd, limit, people=()):
@@ -1034,6 +1046,18 @@ class Run:
                 break
             if best is None or room > best[0]:
                 best = (room, alt)
+        if (best is None or best[0] < min(HANDLER_ROOM, now)) and w != 0.0:
+            # Nothing walking forward will do: step sideways. See SIDE_V.
+            for f in SWING_EASE:
+                alt = (0.0, math.copysign(SIDE_V, w), w * f)
+                room, clear = self.swing(live, pose, alt, people)
+                if not clear:
+                    continue
+                if room >= HANDLER_ROOM or room >= now:
+                    best = (room, alt)
+                    break
+                if best is None or room > best[0]:
+                    best = (room, alt)
         if best is None or best[0] <= worst:
             return cmd
         self.obs["eased"] += 1

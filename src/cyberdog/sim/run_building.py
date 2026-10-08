@@ -452,7 +452,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
-                 affordance_shadow=None):
+                 affordance_shadow=None, autolabel=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -521,6 +521,12 @@ class Run:
             self.aff, self.elev = Affordance(), ElevationMemory()
             os.makedirs(os.path.dirname(os.path.abspath(affordance_shadow)), exist_ok=True)
             self.aff_log = open(affordance_shadow, "w")
+        # Training pairs for the VAMOS LoRA (--autolabel): the frame, and the
+        # path the dog went on to walk from it. Map-only runs only.
+        self.autolabel = None
+        if autolabel:
+            from cyberdog.sim.autolabel import AutoLabel
+            self.autolabel = AutoLabel(autolabel, self.cam)
         # People. Not in any grid either, and unlike the crates they move, so
         # one scan cannot describe them -- `tracker` is what two scans give.
         self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
@@ -1289,6 +1295,8 @@ class Run:
             # the main entrance.
             self.say("We are already there.")
             return True, 0
+        if self.autolabel is not None:
+            self.autolabel.start_leg(floor)
         i = 1 if len(waypoints) > 1 else 0
         said = set()
         gates = self.router.gates(floor, waypoints)
@@ -1470,6 +1478,9 @@ class Run:
                 chosen = proposed
 
             self.frame(state, proposed, candidates, safety if proposed else None)
+            if self.autolabel is not None:
+                self.autolabel.tick(n, (x, y, yaw), self.robot.camera_pose(), state,
+                                    self.robot.get_image)
 
             if math.hypot(waypoints[-1][0] - x, waypoints[-1][1] - y) < goal_r:
                 for line in (announcements[-1] if announcements else []):
@@ -1965,11 +1976,18 @@ def main():
                     const=str(paths.OUTPUT_DIR / "affordance_shadow.jsonl"),
                     help="run the affordance network watching, not steering: log what it "
                          "would say about the walk ahead, against what was really there")
+    ap.add_argument("--autolabel", default=None, metavar="DIR",
+                    help="keep onboard frames labelled with the path the dog then walked, "
+                         "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
     if args.vamos and args.shadow:
         ap.error("--vamos steers with VAMOS and --shadow never does; pick one")
+    if args.vamos and args.autolabel:
+        # The label is the path the map-only stack walked. Under --vamos it
+        # would be VAMOS's own answer, and the model would be trained on itself.
+        ap.error("--autolabel records map-only runs; drop --vamos")
     try:
         handle = HandleScript(args.handle)
     except ValueError as bad:
@@ -2005,7 +2023,7 @@ def main():
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               handle=handle if args.handle else None,
-              affordance_shadow=args.affordance_shadow)
+              affordance_shadow=args.affordance_shadow, autolabel=args.autolabel)
 
     ok, halted = True, None
     try:
@@ -2136,6 +2154,17 @@ def main():
                   f"(closest {pd['min_d']:.2f} m)")
         else:
             print(f"contact: none -- closest it came to anybody was {pd['min_d']:.2f} m")
+    if run.autolabel is not None:
+        # Clean is the same bar Gate D sets: arrived, and nothing touched --
+        # not the dog, not the person on the handle, not anybody walking past.
+        clean = (outcome == "ARRIVED" and not h["ticks"] and not hh["ticks"]
+                 and not run.ped["near"])
+        kept = run.autolabel.finish({
+            "command": args.command, "pedestrians": args.pedestrians, "seed": args.seed,
+            "outcome": outcome, "clean": clean, "collision_ticks": h["ticks"],
+            "handler_ticks": hh["ticks"], "contact_ticks": run.ped["near"]})
+        print(f"autolabel: {kept} labelled frames, run {'clean' if clean else 'NOT clean'}"
+              f" -> {args.autolabel}")
     if not args.no_video:
         pace = "real time" if args.speed == 1 else f"{args.speed}x real time"
         print(f"video -> {args.out}  ({run.robot.sim_time / args.speed:.0f}s, {pace})")

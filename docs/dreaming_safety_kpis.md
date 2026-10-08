@@ -201,8 +201,9 @@ passed. The map-only baseline is clean on all 8 routes (down from 7 of 8),
 and `selftest.py run` now fails on any contact. With pedestrians it is not
 yet zero: 2 of 12 seeds of `room 201 --pedestrians 3` (README, known limits).
 
-Run it with `python scripts/gate_d.py` (7 routes × seeds 1–3, VAMOS by beam
-search at `--vlm-latency 1.8`). Campaigns so far, 2026-09-30:
+Run it with `python scripts/gate_d.py` (7 routes, VAMOS by beam search at
+`--vlm-latency 1.8`), or `bash scripts/check.sh gate all` for seeds 1–10
+after pytest and selftest. First campaigns, 2026-09-30, seeds 1–3:
 
 | KPI | map-only | `--vamos`, first run | `--vamos`, after the fixes below | |
 |---|---|---|---|---|
@@ -241,7 +242,43 @@ and four map-only runs share the machine, memory is the likely cause; the
 campaign that completed ran with the server's output logged, and it did not
 fail that time.
 
-- [ ] D1–D8 all pass
+### 2026-10-08: 7 routes × seeds 1–10 (70 pairs)
+
+Each column is one campaign, map-only / `--vamos`:
+
+| KPI | `main` | + sidestep | + sidestep + stopped person | |
+|---|---|---|---|---|
+| D1 pairs complete | 70 / 70 | 70 / 70 | 70 / 70 | PASS |
+| D2 collisions + handle (s) | 1.9 / 6.9 | 1.4 / 2.9 | 2.9 / 2.7 | FAIL → PASS |
+| D3 pedestrian contact (s) | 4.0 / 6.6 | 3.9 / 4.8 | 4.7 / 3.6 | FAIL → PASS |
+| D4 stair / no-go entries | 0 / 0 | 0 / 0 | 0 / 0 | PASS |
+| D5 arrivals | 70/70 both | 70/70 both | 70/70 both | PASS |
+| D6 mean time (s) | 54.2 / 58.2 | 54.4 / 57.7 | 56.6 / 58.9 | PASS |
+| D8 missing / VAMOS unused | 0 / 0 | 0 / 0 | 0 / 0 | PASS |
+
+Logs: `output/gate_d/20261008-094731`, `…-104538`, `…-120028`. An earlier
+70-pair campaign (`20261007-161746`) ran with the stopped-person change
+uncommitted in the tree and is not a `main` baseline. The fixes:
+
+- **Step sideways when no eased turn is clear** (`SIDE_V`). Setting off
+  round somebody who stopped in its lane, the dog had them 0.55 m in front
+  and its user 0.5 m from the wall. Every eased turn failed the 0.7 m
+  people check, stepping away included, so the full pivot went ahead and
+  swung the user into the wall: `room 101` seeds 2, 3, 8, 9 and `room 201`
+  seed 10, `--vamos`. Someone already inside `SWING_PEOPLE` now only has to
+  get no closer.
+- **A person who stopped stays a person** (`tracking.CLAIM_R`,
+  `PASS_SIDE`). A walker who stopped beside a crate merged into one cluster
+  with it and was passed at a crate's distance, 0.40 m (`room 201`).
+
+The pass is narrow. Map-only handle contact rose 1.4 → 2.9 s with the
+second fix, mostly `room 101` seed 3 (1.8 s, both arms touching there),
+and `--vamos` clears D2 by 0.2 s. Not zero in either arm: the crate in the
+`electrical engineering lab` (`--vamos` seeds 1 and 4, 1.4 s, a right turn
+after passing it), `room 101` seed 3, and the lift on `restroom` seed 7
+(0.3 s, both arms).
+
+- [x] D1–D8 all pass (2026-10-08, `output/gate_d/20261008-120028`)
 - [ ] Promotion is an explicit decision; never promote from selftest alone
 
 ---

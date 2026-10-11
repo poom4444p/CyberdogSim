@@ -11,7 +11,14 @@ move it to the model.
 | 2. Collect held-out data | `python scripts/vamos/collect.py --test` | `cyberdog_sim` | ~1 min |
 | 3. Train | `python scripts/vamos/train_lora.py` | `vamos_mac` (or a CUDA box) | hours on a GPU; far longer on a Mac |
 | 4. Score base, then adapter | `python scripts/vamos/evaluate.py --name base` then `--name lora --load <repo>/models/vamos_lora` | `cyberdog_sim` + server | ~10 min each |
-| 5. Closed loop | restart the server with `--model_path <repo>/models/vamos_lora`, then `python scripts/gate_d.py` | both | a Gate D campaign |
+| 5. Closed loop | in `vendor/VAMOS/server`: `bash start_server.sh --model_path <repo>/models/vamos_lora` (absolute path), then from the repo root `python scripts/gate_d.py` | both | a Gate D campaign |
+
+The server keeps the last model it loaded, including one loaded by
+`evaluate.py --load`. So step 4's `--name base` must come before any `--load`,
+or carry `--load mateoguaman/vamos`. Restart the server before each step 5
+campaign. `gate_d.py` asks the server's `/health` which model it serves,
+prints it, keeps it as `model` in `summary.json`, and warns if it changed
+before the campaign ended.
 
 **Labels.** `sim/autolabel.py` (`run_building --autolabel DIR`) keeps a frame
 every 0.5 s of a map-only run, and labels it with the path the dog *walked*

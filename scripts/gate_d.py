@@ -61,6 +61,15 @@ def server_up(url):
         return False
 
 
+def served_model(url):
+    """The model the server says it loaded last, as it was given: base or a
+    LoRA adapter. None from a server too old to say, or one that is down."""
+    try:
+        return requests.get(f"{url}/health", timeout=5).json().get("model_path")
+    except (requests.RequestException, ValueError):
+        return None
+
+
 def drive(route, seed, vamos, url, log_dir):
     """One run. Returns its parsed summary; the raw output goes to a log.
 
@@ -162,6 +171,15 @@ def main():
     if not server_up(args.vamos_url):
         raise SystemExit(f"VAMOS server is not answering on {args.vamos_url} -- "
                          "start it first (README, step 6)")
+    # The server keeps whatever it loaded last, evaluate.py --load included,
+    # so the campaign records what it was scored on.
+    model = served_model(args.vamos_url)
+    if model is None:
+        raise SystemExit("the VAMOS server does not say which model it serves -- "
+                         "restart it from vendor/VAMOS/server with this repo's vlm_server.py")
+    if args.resume and prev.get("model", model) != model:
+        raise SystemExit(f"{args.resume} was driven on {prev['model']}, "
+                         f"the server now serves {model}")
     if not paths.BUILDING_SCENE.exists():
         raise SystemExit("no building scene yet -- run: "
                          "python -m cyberdog.sim.scene.build_scene --building")
@@ -173,6 +191,7 @@ def main():
     pairs = [(r, s) for r in args.routes for s in args.seeds]
     print(f"Gate D: {len(args.routes)} routes x seeds {args.seeds} = {len(pairs)} pairs, "
           f"{2 * len(pairs)} runs; logs in {log_dir}")
+    print(f"VAMOS model: {model}")
     if args.resume:
         print(f"resuming: {len(kept)} complete runs kept, "
               f"{2 * len(pairs) - len(kept)} to drive")
@@ -208,6 +227,10 @@ def main():
     base = {k: f.result() for k, f in base.items()}
     cand = {k: f.result() for k, f in cand.items()}
     print(f"\n{2 * len(pairs)} runs in {(time.time() - t0) / 60:.1f} min\n")
+    model_end = served_model(args.vamos_url)
+    if model_end not in (None, model):
+        print(f"VAMOS model CHANGED mid-campaign: {model} -> {model_end}. "
+              f"The candidate arm is a mix; do not score it.\n")
 
     def arm_sum(runs, key):
         return round(sum(r[key] for r in runs.values()), 2)
@@ -272,7 +295,9 @@ def main():
 
     (log_dir / "summary.json").write_text(json.dumps({
         "routes": args.routes, "seeds": args.seeds, "pedestrians": PEDESTRIANS,
-        "vlm_latency": VLM_LATENCY, "passed": passed,
+        "vlm_latency": VLM_LATENCY, "model": model,
+        **({"model_end": model_end} if model_end not in (None, model) else {}),
+        "passed": passed,
         "kpis": [{"id": k, "name": n, "map": b, "vamos": c,
                   "result": None if ok is None else bool(ok)} for k, n, b, c, ok in rows],
         "runs": [base[k] for k in pairs] + [cand[k] for k in pairs],

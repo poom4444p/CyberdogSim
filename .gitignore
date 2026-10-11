@@ -25,3 +25,7 @@ datasets/
 
 # Point clouds are large; regenerate with scripts/mapping/mesh_to_grid.py
 *.pcd
+
+# --- VAMOS LoRA training: its log and the dataset tarball sent to the GPU box
+/train.log
+/vamos_train.tgz

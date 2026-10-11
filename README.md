@@ -172,6 +172,18 @@ cd vendor/VAMOS/server       # must start from here
 bash start_server.sh
 ```
 
+To serve the LoRA adapter instead (`scripts/vamos/README.md`), pass it with
+an absolute path -- from here `$PWD` is the server directory, not the repo:
+
+```bash
+bash start_server.sh --model_path /path/to/Cyberdog/models/vamos_lora
+bash start_server.sh --model_path mateoguaman/vamos    # back to the base model
+```
+
+The server keeps whichever model it loaded last, including one loaded by
+`evaluate.py --load`, until it is restarted. Restart it before every Gate D
+campaign so the campaign is scored on the model you meant.
+
 The first start downloads the `mateoguaman/vamos` weights (several GB), so
 expect a long pause. From another terminal, check it is up, then run with it:
 

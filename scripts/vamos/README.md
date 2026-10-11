@@ -24,9 +24,19 @@ before the campaign ended.
 every 0.5 s of a map-only run, and labels it with the path the dog *walked*
 from there: 5 points by arc length, projected into that frame, starting where
 the camera can first see the floor and cut where the path leaves the image.
-The prompt's goal is that path's end (hindsight), and the projector's own goal
-is kept beside it as `map_prompt`. Only clean runs are used: arrived, with no
-collision, no handle contact and no person contact.
+Each frame keeps two prompts: `prompt`, whose goal is that path's end
+(hindsight), and `map_prompt`, the projector's goal, which is what the live
+stack sends. Only clean runs are used: arrived, with no collision, no handle
+contact and no person contact.
+
+**Prompt.** `train_lora.py` and `evaluate.py` use `map_prompt` by default
+(`--prompt hindsight` for the other). The hindsight prompt hands the model
+the answer's end: the first adapter, trained on it, learnt to draw a straight
+line there. It scored 0.26 → 0.03 top-path error with that prompt, no better
+than base with the live one, and failed Gate D
+(`docs/dreaming_safety_kpis.md`, 2026-10-11). Results in
+`output/vamos_eval/` from before this change were scored with `prompt` unless
+the name ends in `_map`.
 
 **Split.** The 7 Gate D routes are held out entirely (`--test`). They share
 corridors with the train routes, so this is a held-out route, not a held-out

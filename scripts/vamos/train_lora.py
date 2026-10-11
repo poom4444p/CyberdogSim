@@ -5,6 +5,13 @@ reimplementation the spec asks for, on the data scripts/vamos/collect.py
 made: (frame, "Navigate to x=<loc>, y=<loc>.") -> the 10 location tokens of
 the path the dog walked.
 
+The prompt's goal is the projector's (`map_prompt`), the one the live stack
+sends, not the walked path's end (`prompt`, hindsight). With the hindsight
+goal the answer's end is in the question: the first adapter learnt to draw
+a straight line to it, scored 0.26 -> 0.03 offline on that prompt, did not
+move at all on the live one, and failed Gate D (docs/dreaming_safety_kpis.md,
+2026-10-11). `--prompt hindsight` trains that way again.
+
     conda activate vamos_mac                     # torch lives here, not in cyberdog_sim
     python scripts/vamos/train_lora.py           # -> models/vamos_lora/
     python scripts/vamos/train_lora.py --epochs 1 --limit 200    # a quick look
@@ -92,21 +99,21 @@ def split(runs, val_frac, seed):
             [s for r in ids[:n_val] for s in runs[r]], ids[:n_val])
 
 
-def batch(processor, samples, dev):
+def batch(processor, samples, dev, key):
     images = [Image.open(s["image"]).convert("RGB") for s in samples]
-    enc = processor(text=["<image><bos>" + s["prompt"] for s in samples], images=images,
+    enc = processor(text=["<image><bos>" + s[key] for s in samples], images=images,
                     suffix=[s["target"] for s in samples], return_tensors="pt",
                     padding="longest")
     return {k: (v.to(dev) if hasattr(v, "to") else v) for k, v in enc.items()}
 
 
 @torch.no_grad()
-def evaluate(model, processor, samples, dev, bs):
+def evaluate(model, processor, samples, dev, bs, key):
     model.eval()
     total, n = 0.0, 0
     for k in range(0, len(samples), bs):
         chunk = samples[k:k + bs]
-        total += model(**batch(processor, chunk, dev)).loss.item() * len(chunk)
+        total += model(**batch(processor, chunk, dev, key)).loss.item() * len(chunk)
         n += len(chunk)
     model.train()
     return total / max(n, 1)
@@ -124,8 +131,12 @@ def main():
     ap.add_argument("--limit", type=int, default=0, help="use only this many train frames")
     ap.add_argument("--oversample", type=int, default=4,
                     help=f"times each frame bulging over {DETOUR_M} m is seen per epoch")
+    ap.add_argument("--prompt", choices=["map", "hindsight"], default="map",
+                    help="goal in the prompt: the projector's, as asked live (default), "
+                         "or the walked path's end")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
+    key = "map_prompt" if args.prompt == "map" else "prompt"
     out = Path(args.out)
     if "lora" not in out.name.lower():
         # vlm_server.load_model only treats a path as an adapter if it says so.
@@ -142,7 +153,7 @@ def main():
     train = train + detours * (args.oversample - 1)
     print(f"{len(runs)} clean runs: {len(train)} train frames ({len(detours)} detours "
           f"x{args.oversample}), {len(val)} val frames ({len(val_runs)} runs held out), "
-          f"device {dev}")
+          f"{args.prompt} prompt, device {dev}")
 
     processor = AutoProcessor.from_pretrained(BASE)
     model = AutoModelForImageTextToText.from_pretrained(
@@ -159,7 +170,7 @@ def main():
         opt, lambda s: min(1.0, (s + 1) / max(steps * 0.05, 1))
         * max(0.0, 1 - s / max(steps, 1)))
 
-    best = evaluate(model, processor, val, dev, args.batch)
+    best = evaluate(model, processor, val, dev, args.batch, key)
     print(f"epoch 0 (the base model): val loss {best:.4f}")
     history = [{"epoch": 0, "val_loss": best}]
     best_epoch, t0 = 0, time.time()
@@ -169,7 +180,7 @@ def main():
         running, seen = 0.0, 0
         for k in range(0, len(train), args.batch):
             chunk = train[k:k + args.batch]
-            loss = model(**batch(processor, chunk, dev)).loss
+            loss = model(**batch(processor, chunk, dev, key)).loss
             (loss / args.accum).backward()
             running += loss.item() * len(chunk)
             seen += len(chunk)
@@ -181,7 +192,7 @@ def main():
             if (k // args.batch) % 50 == 0:
                 print(f"  epoch {epoch} {seen}/{len(train)} train loss {running / seen:.4f} "
                       f"({time.time() - t0:.0f}s)", flush=True)
-        v = evaluate(model, processor, val, dev, args.batch)
+        v = evaluate(model, processor, val, dev, args.batch, key)
         history.append({"epoch": epoch, "train_loss": running / max(seen, 1), "val_loss": v})
         print(f"epoch {epoch}: train loss {running / max(seen, 1):.4f}, val loss {v:.4f}")
         if v < best:

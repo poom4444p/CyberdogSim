@@ -278,6 +278,42 @@ and `--vamos` clears D2 by 0.2 s. Not zero in either arm: the crate in the
 after passing it), `room 101` seed 3, and the lift on `restroom` seed 7
 (0.3 s, both arms).
 
+### 2026-10-11: the VAMOS LoRA adapter, seeds 1–10 (70 pairs)
+
+The adapter of `scripts/vamos/README.md` (epoch 3, val loss 0.54) against
+base VAMOS on the same code and seeds. The map-only arm repeats the
+2026-10-08 one run for run.
+
+| KPI | map-only | base VAMOS (`20261008-120028`) | LoRA (`20261011-200051`) |
+|---|---|---|---|
+| D2 collisions + handle (s) | 2.9 | 2.7 PASS | 3.3 **FAIL** |
+| D3 pedestrian contact (s) | 4.7 | 3.6 PASS | 6.4 **FAIL** |
+| D6 mean time (s) | 56.6 | 58.9 | 57.6 |
+
+D1, D4, D5, D8 pass. In the loop it walks closer to people: `room 201`
+seeds 9 and 10 (closest person 0.72 → 0.47 m and 0.70 → 0.43 m; 1.9 s and
+1.2 s of new pedestrian contact, plus 1.0 s handle on seed 9), `room 101`
+seed 3 (handle 0.7 → 1.7 s) and seed 8 (0.2 s). It does clear the
+`electrical engineering lab` crate (seeds 1 and 4, 1.4 s → 0).
+
+**It draws a straight line to the prompt's goal.** `room 201` seed 9 under
+`--shadow`, base then adapter, walks the same 1337 ticks, so all 33 calls
+see the same frames. The adapter's paths bend from straight by a median
+2 mm (base 46 mm, worst 0.18 m against 0.73 m), are 2.44 m long almost every
+call, and point within a median 1.7° of base's. No call offered a detour.
+The labels' prompt is hindsight, the end of the walked path, so the end is
+in the prompt and copying it scores well. Scored with the live prompt
+(`map_prompt`, `*_map.json`), the end error does not move (0.231 base, 0.230
+adapter); the 0.26 → 0.03 top-path drop is with the hindsight prompt. Fewer
+of its candidates fall off the map or behind the dog (11% rejected against
+28%), but the path it follows rates lower in the dream (0.86 against 0.93),
+0.77 on floor 1 in 36 runs (base: 1.00 in 36).
+
+The server keeps the last model it loaded. `20261009-091038` matches this
+campaign run for run, so it was the adapter too, not base. The two seed
+11–20 campaigns of 2026-10-09 match each other but did not record their
+model; neither is a baseline. `summary.json` now keeps `model`.
+
 - [x] D1–D8 all pass (2026-10-08, `output/gate_d/20261008-120028`)
 - [ ] Promotion is an explicit decision; never promote from selftest alone
 

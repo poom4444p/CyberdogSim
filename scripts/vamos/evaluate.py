@@ -135,8 +135,9 @@ def main():
     ap.add_argument("--url", default=DEFAULT_URL)
     ap.add_argument("--limit", type=int, default=400, help="frames to send (0 = all)")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--map-prompt", action="store_true",
-                    help="ask with the live projector's goal, not the walked path's end")
+    ap.add_argument("--prompt", choices=["map", "hindsight"], default="map",
+                    help="goal in the prompt: the projector's, as asked live (default), "
+                         "or the walked path's end, which gives the answer's end away")
     ap.add_argument("--compare", nargs="+", metavar="NAME", help="print saved results side by side")
     args = ap.parse_args()
 
@@ -165,7 +166,7 @@ def main():
     for k, s in enumerate(todo, 1):
         image = np.asarray(Image.open(s["image"]).convert("RGB"))
         try:
-            answers = policy._request(image, s["map_prompt"] if args.map_prompt else s["prompt"])
+            answers = policy._request(image, s["map_prompt"] if args.prompt == "map" else s["prompt"])
         except (requests.RequestException, ValueError) as e:
             print(f"  {s['frame']}: {e}", file=sys.stderr)
             answers = []
@@ -175,7 +176,7 @@ def main():
             print(f"  {k}/{len(todo)} ({time.time() - t0:.0f}s)", flush=True)
 
     result = {"name": args.name, "load": args.load, "data": args.data,
-              "map_prompt": args.map_prompt, "summary": summary(rows), "frames": rows}
+              "map_prompt": args.prompt == "map", "summary": summary(rows), "frames": rows}
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / f"{args.name}.json").write_text(json.dumps(result))
     table({args.name: result})

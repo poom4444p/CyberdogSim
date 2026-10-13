@@ -149,12 +149,17 @@ FOLLOW_GAP = 2.0        # metres kept behind the user when walking the same way
 DRIFT_V = 0.8           # m/s sideways, when moving over to give room
 CROSS_HURRY = 1.25      # pace multiplier for a crosser finishing in its path
 ONWARD = (8.0, 20.0)    # metres of corridor walked after turning
+BOX_GAP = 0.05          # metres kept between a body and a crate
+BOX_LEAD = 1.2          # metres before a crate that they start easing round it:
+                        # at a brisk 1.45 m/s, the widest ease (0.6 m) is
+                        # 0.7 m/s sideways, about DRIFT_V
 
 
 class Walker:
     """One person, walking a there-and-back leg at a constant pace."""
 
-    def __init__(self, a, b, speed, pause, kind, phase=0.0):
+    def __init__(self, a, b, speed, pause, kind, phase=0.0, boxes=()):
+        self.boxes = boxes              # this floor's crates, to walk round
         self.reset(a, b, speed, pause, kind, phase)
 
     def reset(self, a, b, speed, pause, kind, phase=0.0):
@@ -165,6 +170,7 @@ class Walker:
         self.done = False               # walked it; wants a new one
         self.held = 0.0                 # seconds stood behind the dog
         self.off = 0.0                  # aware: sideways shift off the leg's line
+        self._box_side = {}             # crate index -> the side being walked round
         self._place()
 
     def _step_round(self, dx, dy):
@@ -195,6 +201,51 @@ class Walker:
             # Only an `along` walker drifts, and its leg runs along x, so the
             # shift is in y. Kept inside the corridor's lanes.
             self.y = max(LANE_Y[0], min(LANE_Y[1], self.y + self.off))
+        self._round_boxes()
+
+    def _round_boxes(self):
+        """Walk round the crates, never through them.
+
+        Lanes are drawn clear of them, but a drift to give the dog room, or a
+        sidestep, is not: in room 101 seed 6 (aware) a walker making room
+        walked straight through the floor-1 trolley, where the dog was waiting
+        for it. Within BOX_LEAD of a crate, a walker on a line through it eases
+        off sideways to the nearer free side, all the way off by the time
+        their body would touch it. Sideways is across the leg: y for an
+        `along` walker, x for a crossing. Recomputed from the leg every tick,
+        so it holds whatever else moved them.
+        """
+        along = abs(self.b[0] - self.a[0]) >= abs(self.b[1] - self.a[1])
+        for k, (x0, x1, y0, y1, _h, _n) in enumerate(self.boxes):
+            r = RADIUS + BOX_GAP
+            if along:
+                u, lo, hi, v, vlo, vhi, lim = self.x, x0, x1, self.y, y0, y1, LANE_Y
+            else:
+                u, lo, hi, v, vlo, vhi, lim = self.y, y0, y1, self.x, x0, x1, LANE_X
+            gap = max(lo - r - u, u - hi - r, 0.0)
+            if gap >= BOX_LEAD:
+                self._box_side.pop(k, None)   # not there yet, or past it
+                continue
+            # Once picked, a side is kept until they are past, wherever their
+            # line goes meanwhile: an aware drift can carry the line right
+            # across the crate, and letting go when it comes out the far side
+            # moved them 1.2 m through the crate in one tick (25 m/s to the
+            # tracker).
+            low = self._box_side.get(k)
+            if low is None:
+                if not vlo - r < v < vhi + r:
+                    continue                  # their line misses it
+                fits = [lim[0] <= vlo - r, vhi + r <= lim[1]]
+                near_low = v - (vlo - r) <= (vhi + r) - v
+                low = self._box_side[k] = fits[0] if fits[0] != fits[1] else near_low
+            side = vlo - r if low else vhi + r
+            if (v <= side) if low else (v >= side):
+                continue                      # already clear on their side
+            v += (side - v) * (1.0 - gap / BOX_LEAD)
+            if along:
+                self.y = v
+            else:
+                self.x = v
 
     def heading(self):
         dx, dy = self.b[0] - self.a[0], self.b[1] - self.a[1]
@@ -315,7 +366,9 @@ class Walker:
         return 0.0
 
     def _drift(self, dy):
-        lo, hi = LANE_Y[0] - (self.y - self.off), LANE_Y[1] - (self.y - self.off)
+        # The leg's own y, not self.y: _round_boxes may have moved them off it.
+        base = self.a[1] + (self.b[1] - self.a[1]) * self.t
+        lo, hi = LANE_Y[0] - base, LANE_Y[1] - base
         self.off = max(lo, min(hi, self.off + dy))
 
     def _relax(self, dt):
@@ -364,7 +417,7 @@ class Crowd:
                 y = self.keep_right(x1 - x0)
                 a, b = (x0, y), (x1, y)
             return Walker(a, b, rng.uniform(*SPEED), rng.uniform(*PAUSE),
-                          kind, phase=rng.random())
+                          kind, phase=rng.random(), boxes=boxes)
         return None
 
     @staticmethod

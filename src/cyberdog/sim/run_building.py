@@ -142,6 +142,9 @@ PASS_SIDE = 0.90          # metres either side of the dog's heading a standing
 YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
                           # this long, creep and keep asking. Reachable only
                           # by a queue of people arriving one after another.
+CROSS_V = 0.3             # m/s: slower than this, across or along, is not a
+                          # direction worth telling anybody (describe_person)
+SIDE_DEAD = 0.3           # metres off the dog's line still called "ahead"
 AFF_EVERY = 5             # ticks between affordance checks in --affordance-shadow (4 Hz)
 AFF_HALF_W = 0.3          # metres either side of the judged walk that ground truth looks at
 PED_NEAR = 0.55           # ground truth: nearer than this to a person counts
@@ -298,6 +301,37 @@ def resolve_stops(router, text, use_nlu=False):
         if requested is not None:
             floor = requested
     return stops
+
+
+def describe_person(dog, yaw, xy, vel):
+    """What to tell the person on the handle about somebody the dog is waiting
+    for: which way they are moving, and on which side of the dog they are.
+
+    The person on the handle can hear this and cannot see it, so it has to be
+    true. It used to be "crossing from the <side>" for everybody, with the side
+    read from the sign of their sideways velocity: someone overtaking past the
+    room 101 trolley, and someone coming the other way in the far lane, were
+    both "crossing from the right" -- they were on the dog's left, and neither
+    was crossing. A sideways speed of 0.1 m/s says nothing, and its sign less.
+
+    Side comes from where they are; "crossing" only when they really are going
+    across, and then from the side they started on.
+    """
+    c, s = math.cos(yaw), math.sin(yaw)
+    dx, dy = xy[0] - dog[0], xy[1] - dog[1]
+    ahead, left = dx * c + dy * s, -dx * s + dy * c
+    v_fwd, v_left = vel[0] * c + vel[1] * s, -vel[0] * s + vel[1] * c
+    side = ("on your left" if left > SIDE_DEAD else "on your right" if left < -SIDE_DEAD
+            else None)
+    if abs(v_left) >= CROSS_V and abs(v_left) >= abs(v_fwd):
+        return f"Someone crossing from the {'right' if v_left > 0 else 'left'}"
+    if v_fwd <= -CROSS_V:
+        what = "Someone coming towards us"
+    elif v_fwd >= CROSS_V and ahead < 0:
+        what = "Someone overtaking"
+    else:
+        return f"Someone {side or ('ahead' if ahead >= 0 else 'behind us')}"
+    return f"{what}, {side}" if side else what
 
 
 def lift_approach(pts, says):
@@ -550,7 +584,7 @@ class Run:
         self.waited = 0                # ticks spent yielding to it
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
-        self.ped = {"yields": 0, "waited": 0, "near": 0, "min_d": 99.0}
+        self.ped = {"yields": 0, "waited": 0, "near": 0, "min_d": 99.0, "since": None}
         self.place_crowd()
 
         if out is not None:
@@ -983,11 +1017,19 @@ class Run:
         now = self.handler_room(live, x, y, yaw)
         if now >= HANDLER_ROOM:
             return 0.0
-        best, w_best = now + 0.02, 0.0
+        # The walls first, as in spare_handler: with the person waited for at
+        # their elbow, room is near zero whichever way the dog turns, and it
+        # stood 28 deg into a sidestep holding its user on the wall for 3.5 s
+        # (room 101 seed 6, --vamos).
+        def rank(x_, y_, yaw_):
+            walls = self.handler_room(live, x_, y_, yaw_, walls_only=True)
+            return (min(walls, HANDLER_ROOM), self.handler_room(live, x_, y_, yaw_))
+        here = rank(x, y, yaw)
+        best, w_best = here, 0.0
         for w in (UNPIN_W, -UNPIN_W):
-            room = self.handler_room(live, x, y, yaw + w * dt)
-            if room > best:
-                best, w_best = room, w
+            r = rank(x, y, yaw + w * dt)
+            if (r[0] > best[0] + 0.02 or (r[0] >= best[0] - 1e-9 and r[1] > best[1] + 0.02)):
+                best, w_best = r, w
         return w_best
 
     @staticmethod
@@ -1236,11 +1278,28 @@ class Run:
         Same rule as score_collision -- never fed back into the robot. The
         dog stops for people because it tracked them, or it does not stop.
         """
-        for px, py in self.crowds[floor].positions():
-            d = math.hypot(px - x, py - y)
+        near = []
+        for w in self.crowds[floor].walkers:
+            d = math.hypot(w.x - x, w.y - y)
             self.ped["min_d"] = min(self.ped["min_d"], d)
             if d < PED_NEAR:
                 self.ped["near"] += 1
+                near.append((d, w))
+        # When and where, as for the handle: a total alone cannot be traced
+        # back to the moment it happened.
+        yaw = self.robot.get_pose()[2]
+        if near and self.ped["since"] is None:
+            self.ped["since"] = self.robot.sim_time
+            d, w = min(near, key=lambda n: n[0])
+            hx, hy = w.heading()
+            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT starts: dog ({x:.2f}, {y:.2f}) "
+                  f"heading {math.degrees(yaw):.0f} deg, {w.kind} walker ({w.x:.2f}, {w.y:.2f}) "
+                  f"heading {math.degrees(math.atan2(hy, hx)):.0f} deg, {d:.2f} m")
+        elif not near and self.ped["since"] is not None:
+            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT ends after "
+                  f"{self.robot.sim_time - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
+                  f"heading {math.degrees(yaw):.0f} deg")
+            self.ped["since"] = None
 
     def yield_to(self, tracks, xy, yaw, speed):
         """The person to wait for, or None. Holds the decision between ticks.
@@ -1278,7 +1337,10 @@ class Run:
                 self.ped["waited"] += 1
                 return held
             if self.held_still >= PATIENCE * FPS:
-                self.say("They have stopped. I will go around them.")
+                # Not "they have stopped": the track can be a person who has
+                # walked on, merged into the crate beside them (room 101 seed
+                # 6, the trolley). Either way the way is not clearing.
+                self.say("The way is still blocked. Going around.")
                 self.passing = (held.x, held.y)
                 self.waiting_for, self.waited, self.held_still = None, 0, 0
                 return None
@@ -1299,11 +1361,10 @@ class Run:
                 print(f"    [trace] yield to ({person.x:.1f},{person.y:.1f}) "
                       f"v=({person.vx:.2f},{person.vy:.2f}) |v|={person.speed:.2f} "
                       f"r={person.r:.2f} from ({xy[0]:.1f},{xy[1]:.1f})")
-            # Which way they are going, because the person on the handle can
-            # hear that and cannot see it.
-            side = "right" if (person.vx * -math.sin(yaw)
-                               + person.vy * math.cos(yaw)) < 0 else "left"
-            self.say(f"Someone crossing from the {side}. Waiting.")
+            # Who, and where, because the person on the handle can hear that
+            # and cannot see it.
+            self.say(describe_person(xy, yaw, (person.x, person.y),
+                                     (person.vx, person.vy)) + ". Waiting.")
         self.waiting_for = person
         self.waited += 1
         self.ped["waited"] += 1

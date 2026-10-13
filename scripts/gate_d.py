@@ -70,7 +70,7 @@ def served_model(url):
         return None
 
 
-def drive(route, seed, vamos, url, log_dir):
+def drive(route, seed, vamos, url, log_dir, crowd="oblivious"):
     """One run. Returns its parsed summary; the raw output goes to a log.
 
     A candidate run first checks the server is still up. The first campaign
@@ -86,7 +86,7 @@ def drive(route, seed, vamos, url, log_dir):
         return r
     cmd = [sys.executable, "-m", "cyberdog.sim.run_building", route,
            "--pedestrians", str(PEDESTRIANS), "--seed", str(seed),
-           "--auto-confirm", "--no-video"]
+           "--auto-confirm", "--no-video", "--crowd", crowd]
     if vamos:
         cmd += ["--vamos", "--vamos-url", url, "--vlm-latency", str(VLM_LATENCY)]
     t0 = time.time()
@@ -149,6 +149,9 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--routes", nargs="+", default=ROUTES)
     ap.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
+    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="oblivious",
+                    help="pedestrian behaviour (scene/pedestrians.py): oblivious is the "
+                         "stress test every campaign before 2026-10-12 used; aware make room")
     ap.add_argument("--vamos-url", default="http://127.0.0.1:8009")
     ap.add_argument("--jobs", type=int, default=4, help="map-only runs at a time")
     # One: the server answers one request at a time anyway, and at two
@@ -166,6 +169,7 @@ def main():
     if args.resume:
         prev = json.loads((Path(args.resume) / "summary.json").read_text())
         args.routes, args.seeds = prev["routes"], prev["seeds"]
+        args.crowd = prev.get("crowd", "oblivious")
         kept = {(r["arm"], r["route"], r["seed"]): r for r in prev["runs"] if usable(r)}
 
     if not server_up(args.vamos_url):
@@ -191,7 +195,7 @@ def main():
     pairs = [(r, s) for r in args.routes for s in args.seeds]
     print(f"Gate D: {len(args.routes)} routes x seeds {args.seeds} = {len(pairs)} pairs, "
           f"{2 * len(pairs)} runs; logs in {log_dir}")
-    print(f"VAMOS model: {model}")
+    print(f"VAMOS model: {model}; crowd: {args.crowd}")
     if args.resume:
         print(f"resuming: {len(kept)} complete runs kept, "
               f"{2 * len(pairs) - len(kept)} to drive")
@@ -203,7 +207,7 @@ def main():
             f = Future()
             f.set_result(prev)
             return f
-        return pool.submit(drive, *k, vamos, args.vamos_url, log_dir)
+        return pool.submit(drive, *k, vamos, args.vamos_url, log_dir, args.crowd)
 
     t0 = time.time()
     with ThreadPoolExecutor(args.jobs) as base_pool, \
@@ -295,6 +299,7 @@ def main():
 
     (log_dir / "summary.json").write_text(json.dumps({
         "routes": args.routes, "seeds": args.seeds, "pedestrians": PEDESTRIANS,
+        "crowd": args.crowd,
         "vlm_latency": VLM_LATENCY, "model": model,
         **({"model_end": model_end} if model_end not in (None, model) else {}),
         "passed": passed,

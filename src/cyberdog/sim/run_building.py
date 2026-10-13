@@ -204,6 +204,12 @@ UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for someb
                           # lab seed 9, --vamos): 7.5 of the arm's 11.2 s of D2.
 SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
+HOLD_TURN_S = 3.0         # seconds a turn that would put the person on the handle
+                          # into a wall (closer than HANDLER_R) is held, when no
+                          # eased or sideways version avoids it, before the
+                          # best of those goes ahead anyway. What made it worth
+                          # waiting for is usually somebody at their elbow, and
+                          # people move on; a wall does not, so never for ever.
 
 # Doorways. The route goes through each one's middle, but the dog is not always
 # on the route when it gets there -- stepped round a person, or on a VAMOS
@@ -452,7 +458,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
-                 affordance_shadow=None, autolabel=None):
+                 affordance_shadow=None, autolabel=None, aware=False):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -511,6 +517,7 @@ class Run:
         self.handler_hits = {"ticks": 0, "boxes": set(), "since": None}
         self.dog_geoms, self.touchable = self.body_contacts()
         self.obs = {"crawl": 0, "stopped": 0, "seen": 0, "min_clear": 99.0, "eased": 0}
+        self.turn_held = 0        # ticks spare_handler has held a turn (HOLD_TURN_S)
         # The affordance network watching, not steering (--affordance-shadow):
         # what it would say about the walk ahead, against what was really
         # there. `affordance_shadow` is the log file; None is off.
@@ -529,7 +536,7 @@ class Run:
             self.autolabel = AutoLabel(autolabel, self.cam)
         # People. Not in any grid either, and unlike the crates they move, so
         # one scan cannot describe them -- `tracker` is what two scans give.
-        self.crowds = {n: pedestrians.Crowd(n, crowd, seed) for n in (1, 2, 3)}
+        self.crowds = {n: pedestrians.Crowd(n, crowd, seed, aware=aware) for n in (1, 2, 3)}
         if crowd and not self.robot.has_body("ped_f1_0"):
             # A mocap body cannot be added to a loaded model, so people only
             # exist if the scene was built with them. Silently walking an
@@ -956,13 +963,15 @@ class Run:
             return (entry[0] + ux * ahead, entry[1] + uy * ahead), -DOOR_NEAR < s < 0.0
         return target, False
 
-    def handler_room(self, live, x, y, yaw):
+    def handler_room(self, live, x, y, yaw, walls_only=False):
         """What the dog can know of the room around the person, for a dog pose:
         walls from the map, measured to their real faces rather than the
         planner's inflated ones (clearance.wall_face_field -- the person's
         shoulder lives in the inflation band), and crates from the LiDAR's
         standing field."""
         px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
+        if walls_only:
+            return live.wall_at(px, py)
         return min(live.wall_at(px, py), live.detected_at(px, py))
 
     def unpin(self, live, pose, dt=0.3):
@@ -1007,22 +1016,24 @@ class Run:
         the dog itself stays clear -- of everything by ROBOT_R, and of where
         each of `people` is heading by SWING_PEOPLE, or by as much as it has
         now if that is less: someone stopped 0.55 m in front of it would
-        otherwise rule out stepping away from them too)."""
+        otherwise rule out stepping away from them too -- and least room
+        between the person and the walls alone)."""
         x, y, yaw = pose
         vx, vy, w = cmd
         keep = [min(SWING_PEOPLE, math.dist((x, y), (p.x, p.y)) - 1e-6) for p in people]
-        worst, clear = INF, True
+        worst, walls, clear = INF, INF, True
         for k in range(1, int(round(SWING_T / dt)) + 1):
             yaw += w * dt
             x += (vx * math.cos(yaw) - vy * math.sin(yaw)) * dt
             y += (vx * math.sin(yaw) + vy * math.cos(yaw)) * dt
             worst = min(worst, self.handler_room(live, x, y, yaw))
+            walls = min(walls, self.handler_room(live, x, y, yaw, walls_only=True))
             clear = (clear and live(x, y) >= ROBOT_R
                      and live.detected_at(x + SWING_NOSE * math.cos(yaw),
                                           y + SWING_NOSE * math.sin(yaw)) >= ROBOT_R
                      and all(math.dist((x, y), p.predict(k * dt)) >= d
                              for p, d in zip(people, keep)))
-        return worst, clear
+        return worst, clear, walls
 
     def spare_handler(self, live, pose, cmd, limit, people=()):
         """`cmd`, with its turn eased where it would swing the person into
@@ -1038,36 +1049,63 @@ class Run:
         to it, whether or not it added a step, turned the dog's easing off
         wherever anyone was near, and put the person on the handle back
         against walls on 5 seeds of 12."""
+        # The walls apart from everything else. Room is the least distance to a
+        # wall *or* anything the LiDAR has found, and a pedestrian at the
+        # person's elbow takes it to zero -- after which every turn looked no
+        # worse than now, and a full pivot went through as commanded, sweeping
+        # them into the wall (room 101 seed 5, --vamos, 5.3 s). Whatever is
+        # standing beside them, a turn may not take them nearer a wall than
+        # HANDLER_ROOM, or than they already are.
         now = self.handler_room(live, *pose)
-        worst, _ = self.swing(live, pose, cmd)
-        if worst >= HANDLER_ROOM or worst >= now:
+        wall_now = self.handler_room(live, *pose, walls_only=True)
+
+        def ok(room, walls):
+            return ((room >= HANDLER_ROOM or room >= now)
+                    and (walls >= HANDLER_ROOM or walls >= wall_now))
+
+        def rank(room, walls):
+            return (min(walls, HANDLER_ROOM, wall_now), room)
+
+        worst, _, walls = self.swing(live, pose, cmd)
+        if ok(worst, walls):
+            self.turn_held = 0
             return cmd
         vx, vy, w = cmd
         v = max(vx, min(SWING_V, limit))
         best = None
         for f in SWING_EASE:
             alt = (v, vy, w * f)
-            room, clear = self.swing(live, pose, alt, people if v > vx else ())
+            room, clear, aw = self.swing(live, pose, alt, people if v > vx else ())
             if not clear:
                 continue
-            if room >= HANDLER_ROOM or room >= now:
-                best = (room, alt)
+            if ok(room, aw):
+                best = (rank(room, aw), alt)
                 break
-            if best is None or room > best[0]:
-                best = (room, alt)
-        if (best is None or best[0] < min(HANDLER_ROOM, now)) and w != 0.0:
+            if best is None or rank(room, aw) > best[0]:
+                best = (rank(room, aw), alt)
+        if (best is None or best[0] < rank(min(HANDLER_ROOM, now), wall_now)) and w != 0.0:
             # Nothing walking forward will do: step sideways. See SIDE_V.
             for f in SWING_EASE:
                 alt = (0.0, math.copysign(SIDE_V, w), w * f)
-                room, clear = self.swing(live, pose, alt, people)
+                room, clear, aw = self.swing(live, pose, alt, people)
                 if not clear:
                     continue
-                if room >= HANDLER_ROOM or room >= now:
-                    best = (room, alt)
+                if ok(room, aw):
+                    best = (rank(room, aw), alt)
                     break
-                if best is None or room > best[0]:
-                    best = (room, alt)
-        if best is None or best[0] <= worst:
+                if best is None or rank(room, aw) > best[0]:
+                    best = (rank(room, aw), alt)
+        touch = min(HANDLER_R, wall_now)
+        if (w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
+                and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT):
+            # Every way of making this turn puts them into a wall: hold it.
+            # Standing still keeps them where they are; the turn is asked for
+            # again next tick, and goes once something has moved.
+            self.turn_held += 1
+            self.obs["eased"] += 1
+            return (0.0, 0.0, 0.0)
+        self.turn_held = 0
+        if best is None or best[0] <= rank(worst, walls):
             return cmd
         self.obs["eased"] += 1
         return best[1]
@@ -1136,7 +1174,7 @@ class Run:
         follow, and the scripted lift moves. A crowd that freezes while the
         dog rides the lift would have the whole building hold still for it.
         """
-        dog = self.robot.get_pose()[:2]
+        dog = tuple(self.robot.get_pose())      # an aware crowd needs the heading too
         for floor, crowd in self.crowds.items():
             crowd.step(self.robot.CONTROL_DT, dog if floor == self.floor else None)
         self.place_crowd()
@@ -1968,6 +2006,11 @@ def main():
                          "they are on no map, and the dog stops for them")
     ap.add_argument("--seed", type=int, default=0,
                     help="which crowd -- the same seed is the same people every run")
+    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="oblivious",
+                    help="how the people behave: oblivious (the stress test: they only "
+                         "stop for a dog right in front of them) or aware (they make "
+                         "room for the dog and its user, as people do); "
+                         "scene/pedestrians.py")
     ap.add_argument("--handle", default="", metavar="EVENTS",
                     help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
                          '"pull@20-25", "push@26-28" (see sim/handle.py). Its continue '
@@ -2019,7 +2062,7 @@ def main():
         if len(first) > 1 else 0.0
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
-              crowd=args.pedestrians, seed=args.seed,
+              crowd=args.pedestrians, seed=args.seed, aware=args.crowd == "aware",
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               handle=handle if args.handle else None,

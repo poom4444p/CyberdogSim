@@ -63,6 +63,27 @@ wait for each other until the run ends. That is all they know about the dog.
 They do not slow down early, and they will happily walk into the side of it
 if it is not in front of them. Making them any cleverer would be quietly
 solving the robot's problem for it.
+
+That is the default, `Crowd(..., aware=False)`: a stress test, and what every
+Gate D campaign before 2026-10-12 was scored on. It is not what a corridor is
+like. People see a guide dog and a person with a cane from metres away and
+make room, and the oblivious crowd makes situations no real one would: in
+`room 101` seed 5 a crosser froze 0.75 m in front of the dog because the dog
+was there, the dog went round them, and the turn swung its user into the
+wall. `aware=True` is the other end. Within AWARE_R of the party -- the dog
+and the person behind it, on one line -- people:
+
+  - crossing: do not step into its path while it is coming. One still at the
+    wall waits there until it has gone by; one already across its line
+    finishes crossing, a little faster, instead of stopping in it.
+  - along, head-on: drift over to leave PASS_ROOM between their line and its.
+  - along, the same way: do not tailgate. They stay FOLLOW_GAP behind, or
+    pass on the far side if there is PASS_ROOM there.
+  - never stand in front of it: caught in its path within NOTICE, they step
+    aside at once instead of after GIVE_WAY.
+
+They still know nothing else: not where the dog is going to turn, and not
+the crates. Both modes are the same people, seed for seed.
 """
 import math
 import random
@@ -118,6 +139,15 @@ SEEN_R = 12.0           # lidar.MAX_R: past this the dog reports nothing at
                         # Mid-360 is a 360-degree sensor, so "behind the dog"
                         # is not unseen.
 TURN = (0.3, 1.2)       # seconds spent turning round at the end of a leg
+
+# aware=True only. The party is the dog and its user, HANDLER_BEHIND (1.1 m,
+# run_building) straight behind it: one line, PARTY_BACK long.
+AWARE_R = 5.0           # metres: within this of the dog, people take it into account
+PASS_ROOM = 1.1         # metres between their line and the party's when passing
+PARTY_BACK = 1.6        # metres behind the dog that are still the party (user + 0.5)
+FOLLOW_GAP = 2.0        # metres kept behind the user when walking the same way
+DRIFT_V = 0.8           # m/s sideways, when moving over to give room
+CROSS_HURRY = 1.25      # pace multiplier for a crosser finishing in its path
 ONWARD = (8.0, 20.0)    # metres of corridor walked after turning
 
 
@@ -134,6 +164,7 @@ class Walker:
         self.waiting = 0.0              # seconds left before this leg starts
         self.done = False               # walked it; wants a new one
         self.held = 0.0                 # seconds stood behind the dog
+        self.off = 0.0                  # aware: sideways shift off the leg's line
         self._place()
 
     def _step_round(self, dx, dy):
@@ -160,17 +191,24 @@ class Walker:
     def _place(self):
         self.x = self.a[0] + (self.b[0] - self.a[0]) * self.t
         self.y = self.a[1] + (self.b[1] - self.a[1]) * self.t
+        if self.off:
+            # Only an `along` walker drifts, and its leg runs along x, so the
+            # shift is in y. Kept inside the corridor's lanes.
+            self.y = max(LANE_Y[0], min(LANE_Y[1], self.y + self.off))
 
     def heading(self):
         dx, dy = self.b[0] - self.a[0], self.b[1] - self.a[1]
         d = math.hypot(dx, dy) or 1.0
         return (dx / d, dy / d)
 
-    def step(self, dt, dog=None):
-        """Advance one control tick. `dog` is (x, y), for NOTICE only."""
+    def step(self, dt, dog=None, aware=False):
+        """Advance one control tick. `dog` is (x, y) or (x, y, yaw); `aware`
+        needs the yaw, and without it falls back to the oblivious rules."""
         if self.waiting > 0.0:
             self.waiting -= dt
             return
+        if aware and dog is not None and len(dog) == 3:
+            return self._step_aware(dt, dog)
 
         # The one thing they know about the robot: do not walk into the thing
         # directly in front of you -- and do not stand behind it for ever.
@@ -185,7 +223,10 @@ class Walker:
                 return
         self.held = 0.0
 
-        self.t += self.speed * dt / (self.length or 1.0)
+        self._advance(self.speed * dt)
+
+    def _advance(self, metres):
+        self.t += metres / (self.length or 1.0)
         if self.t >= 1.0:
             # Walked it. They do NOT turn round and walk back down the same
             # line: a crosser pacing the same two metres for ever is a moving
@@ -195,12 +236,101 @@ class Walker:
             self.t, self.done = 1.0, True
         self._place()
 
+    def _step_aware(self, dt, dog):
+        """One tick of somebody who has seen the dog and its user coming.
+
+        In the party's frame: `along` is how far ahead of the dog they are
+        (negative: beside or behind the user), `lat` how far off its line.
+        """
+        x, y, yaw = dog
+        ux, uy = math.cos(yaw), math.sin(yaw)
+        rx, ry = self.x - x, self.y - y
+        along, lat = rx * ux + ry * uy, -rx * uy + ry * ux
+        hx, hy = self.heading()
+        if math.hypot(rx, ry) > AWARE_R or along < -(PARTY_BACK + FOLLOW_GAP + 1.0):
+            self._relax(dt)
+            self._advance(self.speed * dt)
+            return
+        in_path = abs(lat) < PASS_ROOM and -PARTY_BACK < along
+        facing = hx * ux + hy * uy            # +1 same way as the party, -1 head-on
+        # The party's left, in world y: an `along` walker can only drift in y,
+        # and the party's left-hand normal (-uy, ux) has y-component ux.
+        left_y = 1.0 if ux >= 0 else -1.0
+
+        if self.kind == "crossing":
+            if in_path and along < NOTICE:
+                # Caught in front of it: out of the way now, not in 2 s.
+                self._step_round(-rx, -ry)
+                return
+            if not in_path:
+                # Would stepping on take them into its path before it has gone?
+                nxt_lat = lat + (-hx * uy + hy * ux) * self.speed * dt
+                entering = abs(nxt_lat) < abs(lat) and abs(nxt_lat) < PASS_ROOM + 0.2
+                if entering and along > -PARTY_BACK:
+                    return                    # wait at the side till it has passed
+            self._advance(self.speed * (CROSS_HURRY if in_path else 1.0) * dt)
+            return
+
+        if facing < 0:
+            # Head-on: move over to whichever side of it has room -- their own
+            # if it can, across if the wall leaves too little -- slowing until
+            # they are clear, and stay over until they are past the user.
+            if along > -PARTY_BACK - 0.5:
+                if abs(lat) < PASS_ROOM - 0.05:
+                    room = self._room_beside(y, lat, left_y)
+                    if not room:          # neither side has it: the roomier one
+                        room = 1.0 if (LANE_Y[1] - y) > (y - LANE_Y[0]) else -1.0
+                    self._drift(room * DRIFT_V * dt)
+                    self._advance(self.speed * 0.6 * dt)
+                    return
+            else:
+                self._relax(dt)
+            self._advance(self.speed * 0.8 * dt)
+            return
+
+        # The same way as the party.
+        if along > 1.0:
+            self._relax(dt)                   # ahead of it and walking away
+        elif abs(lat) >= PASS_ROOM - 0.05:
+            pass                              # in a passing lane: keep it till past
+        else:
+            room = self._room_beside(y, lat, left_y)
+            gap = -along - PARTY_BACK         # metres from the user's back
+            if room:
+                self._drift(room * DRIFT_V * dt)
+                self._advance(self.speed * 0.6 * dt)
+                return
+            if along < 0 and gap < FOLLOW_GAP:
+                return                        # no room to pass: hang back, as people do
+        self._advance(self.speed * dt)
+
+    @staticmethod
+    def _room_beside(party_y, lat, left_y):
+        """Which way to drift (world y, +1/-1) to overtake the party with
+        PASS_ROOM, the side they are already on first; 0 if neither has it."""
+        for side in ((1.0, -1.0) if lat >= 0 else (-1.0, 1.0)):
+            dy = side * left_y
+            if LANE_Y[0] <= party_y + dy * PASS_ROOM <= LANE_Y[1]:
+                return dy
+        return 0.0
+
+    def _drift(self, dy):
+        lo, hi = LANE_Y[0] - (self.y - self.off), LANE_Y[1] - (self.y - self.off)
+        self.off = max(lo, min(hi, self.off + dy))
+
+    def _relax(self, dt):
+        """Back towards their own lane once the party is past."""
+        if self.off:
+            step = min(abs(self.off), DRIFT_V * dt)
+            self.off -= math.copysign(step, self.off)
+
 
 class Crowd:
     """The people on one floor, and where their bodies are this tick."""
 
-    def __init__(self, floor, n, seed=0):
+    def __init__(self, floor, n, seed=0, aware=False):
         self.floor = floor
+        self.aware = aware
         self.z = floor_z(floor)
         self.walkers = []
         self._rng = random.Random(seed * 1000 + floor)
@@ -258,8 +388,9 @@ class Crowd:
         return SIDE_LANES[0] if dx > 0 else SIDE_LANES[1]
 
     def step(self, dt, dog=None):
+        """`dog` is (x, y), or (x, y, yaw) -- which an aware crowd needs."""
         for w in self.walkers:
-            w.step(dt, dog)
+            w.step(dt, dog, self.aware)
             if not w.done:
                 continue
             if self._unseen(w, dog):
@@ -275,7 +406,7 @@ class Crowd:
         new leg's start: RESPAWN_CLEAR already covers where they arrive, and
         what was missing was where they left from.
         """
-        return dog is None or math.dist((w.x, w.y), dog) > SEEN_R
+        return dog is None or math.dist((w.x, w.y), dog[:2]) > SEEN_R
 
     def _onward(self, w):
         """Turn and carry on, from exactly where the last leg ended.
@@ -339,7 +470,7 @@ class Crowd:
             fresh = self._make(self._rng, boxes)
             if fresh is None:
                 continue
-            if dog is not None and math.dist((fresh.a[0], fresh.a[1]), dog) < RESPAWN_CLEAR:
+            if dog is not None and math.dist((fresh.a[0], fresh.a[1]), dog[:2]) < RESPAWN_CLEAR:
                 continue
             w.reset(fresh.a, fresh.b, fresh.speed, fresh.pause, fresh.kind)
             w.waiting = self._rng.uniform(*PAUSE)

@@ -157,6 +157,9 @@ Cyberdog Executes → haptic/audio feedback loop
 4. **Safety mux:** merges CE-RRT* velocity with handle override + confidence gate + LiDAR hard-stop bubble → `/cmd_vel_final`.
 
 **PoC stub:** plain RRT* or DWA first; upgrade to chance-constrained version second.
+
+**Status (2026-10-14): CE-RRT\* built, `--planner cerrt`, off by default** (`src/cyberdog/planning/ce_rrt.py`). RRT\* in space and time, curves not pivots, warm-started, replanned every 0.2 s, about 15–40 ms a plan. It goes round people only; crates stay with `free_destination`. The chance constraint is calibrated, not assumed: the tracker's straight-line prediction is out by 0.64 m (99th percentile) half a second ahead and 1.3 m a second ahead (`scripts/ce_rrt_calibrate.py`), so P(contact) < 0.01 is held over the committed 0.5 s, with the fallback -- waiting -- for when no plan meets it. A waiting dog steps sideways out of a passer-by's predicted line. Judged by its own paired gate (`scripts/planner_ab.py`, P2–P6 on Gate D's bars): **passes on both arms**, waiting for people −53% map-only and −42% `--vamos`, contact 1.7 → 0.0 s and 1.2 → 0.8 s (`docs/dreaming_safety_kpis.md`). It does not avoid every pedestrian without a stop: 80–106 stops remain per 70 runs, most of them (66 of 86 in one map-only sweep) where no path keeps the 1% margin in a 2.5 m corridor. Better prediction, not more tuning, is what removes those.
+
 **Acceptance:** avoids a synthetic pedestrian without full stops; tug → zero velocity in < 100 ms; stair zone → STOP + voice **and no planned route ever enters one**; a cross-floor route is refused out loud when no lift serves the target floor; a candidate path aimed at a stairwell scores 0.00 and is rejected by the gate, without anything stair-specific being coded into the scorer.
 **Feeds:** Execution (L7).
 

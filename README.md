@@ -583,10 +583,12 @@ to be binding.
   at 12 m, wrong the moment something is occluded. Tracking adds half a second
   of it, enough for a velocity and not enough to survive an occlusion: someone
   who steps behind a crate is a lost track.
-- The dog **stops** for a person rather than flowing around one. Spec L6 wants a
-  pedestrian avoided without a full stop, which needs a planner that can commit
-  to a curve; until CE-RRT\* exists, stopping is the honest version, and every
-  run counts its stops.
+- By default the dog **stops** for a person rather than flowing around one.
+  `--planner cerrt` (spec L6 s2, `planning/ce_rrt.py`) goes round them on a
+  path planned where they will be, and halves the waiting, but still stops
+  where no path keeps P(contact) < 1%: the tracker's straight line is out by
+  1.3 m a second ahead, and a 2.5 m corridor often has no room for that.
+  Every run counts its stops, and with the planner why each one was a stop.
 - The pedestrians are capsules on scripted legs, not a pedestrian model. They
   know one thing about the dog — do not walk into what is in front of you — and
   making them cleverer would quietly solve the robot's problem for it.

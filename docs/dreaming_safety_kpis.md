@@ -359,6 +359,60 @@ The one map-only miss (`room 101` seed 1, 173 s) predates these fixes.
 
 ---
 
+## The planner's gate — CE-RRT* against itself switched off
+
+`--planner cerrt` (spec L6 s2) changes what the dog does about people in both
+Gate D arms, so Gate D cannot judge it: with the planner on, the map-only arm
+had no pedestrian contact at all, and Gate D then asks the `--vamos` arm for
+none on all 70 runs -- one reshuffled encounter fails it. The planner is
+judged the way Gate D judges VAMOS, against itself switched off, per arm,
+paired run by run, on Gate D's bars (`scripts/planner_ab.py`):
+
+| ID | KPI | Threshold |
+|---|---|---|
+| P2 | Collisions + handle contact | with ≤ without |
+| P3 | Pedestrian contact | with ≤ without |
+| P4 | Stair / no-go entries | 0 |
+| P5 | Arrivals on the intended floor | with ≥ without |
+| P6 | Mean time to goal | with ≤ without × 1.10 |
+| P7 | Stops for people, waiting, gone round | report |
+
+### 2026-10-14: aware crowd, base VAMOS, seeds 1–10
+
+Without: `output/gate_d/20261014-113902`. With: `output/gate_d/20261014-202542`.
+
+| KPI | map-only without → with | `--vamos` without → with | |
+|---|---|---|---|
+| P2 collisions + handle (s) | 0.0 → 0.0 | 0.0 → 0.0 | PASS |
+| P3 pedestrian contact (s) | 1.7 → 0.0 | 1.2 → 0.8 | PASS |
+| P4 stair / no-go | 0 → 0 | 0 → 0 | PASS |
+| P5 arrivals | 69 → 70 | 70 → 70 | PASS |
+| P6 mean time (s) | 54.8 → 57.2 | 59.3 → 61.4 | PASS |
+| P7 stops / waiting (s) / gone round | 95 / 183 / 0 → 80 / 87 / 77 | 99 / 226 / 0 → 106 / 132 / 99 | report |
+
+Gate D on the with-planner campaign itself: D3 FAILS, 0.8 s against 0.0 --
+all of it `room 201` seed 10 `--vamos`, a walker cutting diagonally across
+the corridor at a dog that had just waited for somebody else. Gate D for
+promoting VAMOS stays the no-planner campaign above.
+
+What it took (each found by a campaign or a 70-run map-only sweep, each fixed
+before the next): the margin, measured instead of guessed -- the guess was a
+third of the real error; a goal held for the whole going-round instead of
+sliding with the dog (stop-start); a goal kept short of the next corner (a
+plan that cut the cafeteria corner left the dog in the door frame until the
+run timed out); people checked by time, not distance, along an edge; anybody
+inside `tracking.NEAR_R` walking into the dog's way asked about; the dog's
+front checked against walls, not only its centre; thresholds fixed for a
+whole going-round, not re-taken at each replan (they ratcheted the dog onto
+the cafeteria-door wall); and a waiting dog stepping sideways out of a
+passer-by's line.
+
+- [x] P2–P6 pass on both arms (2026-10-14)
+- [ ] Margin re-measured on real people (`scripts/ce_rrt_calibrate.py` wants
+      ground truth: a ceiling camera or a motion-capture room)
+
+---
+
 ## Reporting KPIs (not pass/fail)
 
 **Outcome:** arrival rate, time to goal, collisions, contacts, stops for

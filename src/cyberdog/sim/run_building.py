@@ -39,6 +39,7 @@ import numpy as np
 
 
 from cyberdog import paths
+from cyberdog.planning import ce_rrt
 from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute, Transit
 from cyberdog.planning.checkpoint_projector import (load_camera_config,
                                                     pick_destination, project_route,
@@ -57,7 +58,7 @@ from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
-                                           Tracker, closest_approach, conflict)
+                                           NEAR_R, Tracker, closest_approach, conflict)
 from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
@@ -142,6 +143,44 @@ PASS_SIDE = 0.90          # metres either side of the dog's heading a standing
 YIELD_MAX = 30.0          # the backstop under all of it: still waiting after
                           # this long, creep and keep asking. Reachable only
                           # by a queue of people arriving one after another.
+# --planner cerrt: going round a person instead of waiting for them, on a
+# path planned where they will be (planning/ce_rrt.py). The wait above stays,
+# for when no plan is safe -- a person square in a narrow corridor, a doorway.
+PLAN_D = 4.0              # metres along the route the plan aims at: past a
+                          # person met head-on, with room to rejoin the lane
+PLAN_DOOR = 2.0           # metres from a doorway inside which nobody is gone
+                          # round: lining up for the door is the funnel's job,
+                          # and a sidestep there is the frame
+PLAN_CORNER = math.radians(30)  # a route turning more than this is a corner,
+PLAN_SHORT = 1.0          # ...and a plan's goal stays this far short of it.
+                          # Aimed PLAN_D along the route whatever the route did
+                          # in between, the goal before the cafeteria door was
+                          # round the corner: the plan cut it, left the dog
+                          # 0.6 m off the door's axis nose-first in the frame,
+                          # and it stood there until the run timed out (seeds
+                          # 1 and 2, 17 s against the wall). Corners stay with
+                          # the turn and the funnel.
+PLAN_MIN = 1.5            # metres of straight route needed to plan at all
+PLAN_NOSE = 0.25          # metres from the dog's front (SWING_NOSE ahead) to a
+                          # real wall face: NOSE_HALF_W and a hand's width. The
+                          # centre alone was checked, and a plan bending in
+                          # towards the cafeteria door held the dog 40 deg to
+                          # the corridor wall with its centre 0.35 m off and
+                          # its front legs on it (Gate D, --vamos, seed 2).
+PLAN_CRATE = 0.30         # metres a plan keeps from anything the LiDAR found
+# ...and while it waits. A dog standing still for somebody is still in the way
+# of whoever comes next: on room 201 seed 10 (--vamos) a walker cut diagonally
+# across the corridor and passed the waiting dog at 0.549 m, inside PED_NEAR,
+# with no way round them to plan. So a waiting dog steps sideways, out of the
+# line somebody is predicted on. Sideways, never back and never a turn: a
+# step along the axis keeps the handle where it is, so the person on it moves
+# over with the dog instead of being swung (see BACK_V for why not back).
+EVADE_R = 0.80            # metres: predicted closer than this (PED_NEAR + 0.25)
+EVADE_T = 1.5             # ...within this many seconds starts a step aside
+EVADE_STEP_T = 0.5        # seconds of SIDE_V each step is judged over
+EVADE_GAIN = 0.05         # metres a step must win over standing still
+EVADE_V = 0.30            # m/s: slower tracks are not about to arrive anywhere
+                          # that is not walking: ROBOT_R and a hand's width
 CROSS_V = 0.3             # m/s: slower than this, across or along, is not a
                           # direction worth telling anybody (describe_person)
 SIDE_DEAD = 0.3           # metres off the dog's line still called "ahead"
@@ -492,7 +531,8 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
-                 affordance_shadow=None, autolabel=None, aware=False):
+                 affordance_shadow=None, autolabel=None, aware=False, planner="map",
+                 track_log=None):
         self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
                                  start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
@@ -585,6 +625,21 @@ class Run:
         self.held_still = 0            # ...of which it has not moved at all
         self.movers = np.empty((0, 2))  # this tick's moving things, for the video
         self.ped = {"yields": 0, "waited": 0, "near": 0, "min_d": 99.0, "since": None}
+        self.planner = planner         # "map": wait for people; "cerrt": go round
+        self.plan = None               # the ce_rrt.Plan being walked, if any
+        self.plan_at = -1              # tick it was made
+        self.plan_floor = None         # (static, crate, nose, handle) room this
+                                       # going-round may not go below: fixed
+                                       # when it starts, like the goal
+        self.plan_goal = None          # where this going-round is going: fixed
+                                       # until it is reached, so each replan
+                                       # aims where the last one did
+        self.plans = {"rounds": 0, "made": 0, "none": 0, "ms": 0.0, "ticks": 0}
+        self.why_wait = collections.Counter()  # why a wait was not a going-round
+        self.evading = 0.0             # sideways m/s while stepping aside, or 0
+        self.evade = {"steps": 0, "ticks": 0}
+        self.track_log = open(track_log, "w") if track_log else None
+        self.no_plan = None                    # ...this tick's reason, for yield_to
         self.place_crowd()
 
         if out is not None:
@@ -722,6 +777,8 @@ class Run:
     def close(self):
         if self.writer is not None:
             self.writer.close()
+        if self.track_log is not None:
+            self.track_log.close()
 
     # -- driving --------------------------------------------------------
     def clearance(self, floor):
@@ -1374,6 +1431,8 @@ class Run:
 
         if self.waiting_for is None:
             self.ped["yields"] += 1
+            if self.planner == "cerrt":
+                self.why_wait[self.no_plan or "not asked"] += 1
             if os.environ.get("CYBERDOG_TRACE"):
                 # Every yield in a building with nobody in it is a crate being
                 # mistaken for a person. This is how to see which crate.
@@ -1388,6 +1447,225 @@ class Run:
         self.waited += 1
         self.ped["waited"] += 1
         return person
+
+    @staticmethod
+    def straight_goal(xy, route):
+        """Where a going-round aims: PLAN_D along the route, or PLAN_SHORT before
+        its next corner if that comes first. None if there is not PLAN_MIN of
+        straight route to go round anybody on."""
+        pts = [tuple(xy)] + [tuple(p) for p in route]
+        walked, heading = 0.0, None
+        for a, b in zip(pts, pts[1:]):
+            d = math.dist(a, b)
+            if d < 1e-6:
+                continue
+            h = math.atan2(b[1] - a[1], b[0] - a[0])
+            if heading is not None and abs(wrap(h - heading)) > PLAN_CORNER:
+                reach = walked - PLAN_SHORT          # a corner at `a`
+                break
+            heading = h
+            if walked + d >= PLAN_D:
+                reach = PLAN_D
+                break
+            walked += d
+        else:
+            reach = walked                           # the route ends first
+        if reach < PLAN_MIN:
+            return None
+        walked = 0.0
+        for a, b in zip(pts, pts[1:]):
+            d = math.dist(a, b)
+            if walked + d >= reach and d > 1e-6:
+                f = (reach - walked) / d
+                return (a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f)
+            walked += d
+        return pts[-1]
+
+    def go_round(self, live, tracks, pose, route, gates, n, speed):
+        """(where to steer to go round people, or None to carry on as before;
+        somebody to stand still for). --planner cerrt.
+
+        Asked every tick; plans every ce_rrt.REPLAN_S while somebody's path
+        meets the dog's or a plan is being walked. A plan that cannot be made
+        again, and is no longer safe as it stands (ce_rrt.still_good), is
+        dropped there and then, and the dog falls back on the wait:
+        the chance constraint only covers the next ce_rrt.COMMIT_T, and that
+        promise rests on there being a fallback when the next plan fails.
+
+        The static rules are the ones the dog already keeps -- the map, the
+        crates, the room round the person on the handle -- each held to its
+        threshold, or to what the dog has now if that is less: a plan
+        starting 0.2 m from a wall is not refused for being there, only for
+        going closer."""
+        x, y, yaw = pose
+        vel = (speed * math.cos(yaw), speed * math.sin(yaw))
+        held = self.waiting_for if self.waiting_for in tracks else None
+        threat = conflict((x, y), vel, tracks, radius=MISS_R) or held
+        close = None
+        if threat is None:
+            # conflict() stops asking inside NEAR_R, and yield_to with it. A
+            # going-round leaves the dog beside people, though, and room 101
+            # seed 8 stood a metre from somebody who then walked across its
+            # nose: nothing asked, and it walked on into them (0.50 m). Here
+            # anybody that close whose way meets the dog's is asked about.
+            for t in tracks:
+                if (t.moving and math.dist((x, y), (t.x, t.y)) < NEAR_R
+                        and closest_approach((x, y), vel, (t.x, t.y), (t.vx, t.vy))
+                        - min(t.r, 0.4) < MISS_R):
+                    threat = close = t
+                    break
+        self.no_plan = None
+        if threat is None and self.plan is None:
+            return None, None
+        if self.door_near(gates, (x, y), PLAN_DOOR):
+            self.plan, self.no_plan = None, "doorway"
+            return None, close
+        if self.plan is None or n - self.plan_at >= round(ce_rrt.REPLAN_S * FPS):
+            # The same goal for the whole of one going-round. Picked afresh
+            # PLAN_D ahead at every replan, it slid along with the dog, the
+            # last plan no longer ended at it, and every replan was a new
+            # search that now and then found nothing: room 201 seed 10 went
+            # from 1 stop to 11, stopping and starting between plans.
+            if (self.plan is None or self.plan_goal is None
+                    or math.dist((x, y), self.plan_goal) < PLAN_D / 2):
+                self.plan_goal = self.straight_goal((x, y), route)
+            goal = self.plan_goal
+            if goal is None:
+                self.plan, self.no_plan = None, "corner"   # wait, as before
+                return None, close
+            people = [ce_rrt.Person(t.x, t.y, t.vx, t.vy, t.r) for t in tracks
+                      if t.moving or (t.walked and MIN_RADIUS <= t.r <= MAX_RADIUS)]
+            def nose(px, py, pyaw):
+                return live.wall_at(px + SWING_NOSE * math.cos(pyaw),
+                                    py + SWING_NOSE * math.sin(pyaw))
+
+            # Each threshold, or what the dog has now if that is less -- taken
+            # once, when this going-round starts. Taken at every replan, it
+            # ratcheted: each plan could end a little nearer the wall than the
+            # last began, and 53 replans walked the dog's front onto the
+            # corridor wall by the cafeteria door (Gate D, --vamos, seed 2).
+            if self.plan is None or self.plan_floor is None:
+                self.plan_floor = (min(ROBOT_R, live.static_at(x, y)),
+                                   min(PLAN_CRATE, live.detected_at(x, y)),
+                                   min(PLAN_NOSE, nose(x, y, yaw)),
+                                   min(HANDLER_ROOM, self.handler_room(live, x, y, yaw)))
+            s0, c0, n0, h0 = self.plan_floor
+
+            def ok(px, py, pyaw):
+                return (live.static_at(px, py) >= s0 and live.detected_at(px, py) >= c0
+                        and nose(px, py, pyaw) >= n0
+                        and self.handler_room(live, px, py, pyaw) >= h0)
+
+            near = min((math.dist((x, y), (p.x, p.y)) for p in people), default=INF)
+            if near < ce_rrt.need(0.0):
+                # Already inside the chance margin: no plan can start here.
+                self.plan, self.no_plan = None, "too close"
+                return None, close
+
+            t0 = time.perf_counter()
+            warm = ahead(self.plan.path, (x, y)) if self.plan else None
+            new = None
+            for v in ce_rrt.SPEEDS:
+                new = ce_rrt.plan((x, y, yaw), goal, ok, people, warm=warm,
+                                  handler_behind=HANDLER_BEHIND, v=v, seed=n)
+                if new is not None:
+                    break
+            self.plans["ms"] += (time.perf_counter() - t0) * 1000
+            self.plan_at = n
+            if new is None and self.plan is not None and ce_rrt.still_good(
+                    (x, y, yaw), warm, ok, people, handler_behind=HANDLER_BEHIND,
+                    v=self.plan.v):
+                # Nothing new found, and the plan being walked is still safe
+                # against where everybody is predicted now: keep walking it.
+                new = self.plan._replace(path=[(x, y)] + list(warm[1:]))
+            if new is None:
+                self.plans["none"] += 1
+                self.plan, self.no_plan = None, "no safe path"
+                # No way round. Further off, yield_to waits for them; this
+                # close it would not, so stand still here.
+                return None, close
+            self.plans["made"] += 1
+            if self.plan is None and threat is not None:
+                # Said before the dog leans, as for a crate: which way the
+                # handle is about to go is what the person cannot see coming.
+                self.plans["rounds"] += 1
+                side = "left" if new.side > 0 else "right"
+                self.say(describe_person((x, y), yaw, (threat.x, threat.y),
+                                         (threat.vx, threat.vy))
+                         + f". Going round, to your {side}.")
+                self.waiting_for, self.waited, self.held_still = None, 0, 0
+            self.plan = new
+        rest = ahead(self.plan.path, (x, y))
+        if len(rest) < 2 or math.dist((x, y), rest[-1]) < ce_rrt.GOAL_TOL:
+            self.plan = None             # walked to its end: back on the route
+            return None, close
+        self.plans["ticks"] += 1
+        return path_target(rest, (x, y)), None
+
+    def step_aside(self, live, tracks, pose):
+        """Sideways m/s for a waiting dog to get out of somebody's way, or 0.
+        See EVADE_R.
+
+        Left, right or stay, judged by the least predicted distance to anybody
+        walking over the next EVADE_T, the dog stepping at SIDE_V for
+        EVADE_STEP_T and then standing. A step must win by EVADE_GAIN, and it
+        must not take the dog -- centre or front -- or the room round the
+        person on the handle below its threshold, or below what it is now if
+        that is less, nor bring the person on the handle within
+        ce_rrt.HANDLER_SEP of anybody's predicted path."""
+        x, y, yaw = pose
+        people = [t for t in tracks
+                  if (t.moving or t.walked) and t.speed >= EVADE_V]
+        if not people:
+            self.evading = 0.0
+            return 0.0
+        lx, ly = -math.sin(yaw), math.cos(yaw)          # the dog's left
+        bx, by = -HANDLER_BEHIND * math.cos(yaw), -HANDLER_BEHIND * math.sin(yaw)
+
+        def least(v):
+            dog = handle = INF
+            for k in range(1, int(round(EVADE_T / 0.1)) + 1):
+                t = k * 0.1
+                s_ = v * min(t, EVADE_STEP_T)
+                dx, dy = x + lx * s_, y + ly * s_
+                for p in people:
+                    px, py = p.predict(t)
+                    dog = min(dog, math.hypot(dx - px, dy - py))
+                    handle = min(handle, math.hypot(dx + bx - px, dy + by - py))
+            return dog, handle
+
+        stay, stay_h = least(0.0)
+        if stay >= EVADE_R:
+            self.evading = 0.0
+            return 0.0
+
+        def nose(px, py):
+            return live.wall_at(px + SWING_NOSE * math.cos(yaw),
+                                py + SWING_NOSE * math.sin(yaw))
+
+        floors = (min(ROBOT_R, live.static_at(x, y)), min(ROBOT_R, live.detected_at(x, y)),
+                  min(PLAN_NOSE, nose(x, y)),
+                  min(HANDLER_ROOM, self.handler_room(live, x, y, yaw)))
+        best, best_d = 0.0, stay + EVADE_GAIN
+        for v in (SIDE_V, -SIDE_V):
+            s_ = v * EVADE_STEP_T
+            ex, ey = x + lx * s_, y + ly * s_
+            if (live.static_at(ex, ey) < floors[0] or live.detected_at(ex, ey) < floors[1]
+                    or nose(ex, ey) < floors[2]
+                    or self.handler_room(live, ex, ey, yaw) < floors[3]):
+                continue
+            d, h = least(v)
+            if h < min(ce_rrt.HANDLER_SEP, stay_h):
+                continue
+            if d > best_d:
+                best, best_d = v, d
+        if best and not self.evading:
+            self.evade["steps"] += 1
+            self.say(f"Someone close. Stepping to your {'left' if best > 0 else 'right'}.")
+        if best:
+            self.evade["ticks"] += 1
+        self.evading = best
+        return best
 
     def follow(self, waypoints, floor, announcements=None, verbose=True,
                goal_r=GOAL_R):
@@ -1463,6 +1741,15 @@ class Run:
             # since last tick. A crate answers "none of me".
             tracks = self.tracker.update(live.points)
             walking = self.tracker.movers()
+            if self.track_log is not None:
+                # What the tracker believed and where everybody really was,
+                # every tick: scripts/ce_rrt_calibrate.py measures the
+                # planner's chance margin from it. Ground truth -- for the
+                # log only, never read back.
+                self.track_log.write(json.dumps({
+                    "t": round(self.robot.sim_time, 3), "floor": floor,
+                    "tracks": [(t.x, t.y, t.vx, t.vy) for t in tracks if t.moving],
+                    "walkers": self.crowds[floor].positions()}) + "\n")
             # Somebody standing still ahead who was seen walking is a person,
             # not a crate, whether or not the dog waited for them first: go
             # round with a person's room (PASS_NEED), at PASS_V. Only the ones
@@ -1672,7 +1959,24 @@ class Run:
             # them can see that the thing ahead is walking. free_destination would
             # happily route the dog through the gap behind somebody, and the
             # gap moves.
-            person = self.yield_to(tracks, (x, y), yaw, speed)
+            round_to, close = (self.go_round(live, tracks, (x, y, yaw), waypoints[i:],
+                                             gates, n, speed)
+                               if self.planner == "cerrt" else (None, None))
+            if round_to is None and close is not None:
+                # Somebody within NEAR_R walking into the dog's way, and no
+                # way round them: stand still, as for any other wait.
+                person = close
+                self.waited += 1
+                self.ped["waited"] += 1
+            elif round_to is not None:
+                # Going round them: not waiting, and at the pace the plan
+                # was timed at, since where it passes them depends on when.
+                tx, ty = round_to
+                err = wrap(math.atan2(ty - y, tx - x) - yaw)
+                speed = min(speed, self.plan.v)
+                person = None
+            else:
+                person = self.yield_to(tracks, (x, y), yaw, speed)
             # And so does the safety factor: a path the dog only just believes
             # it can walk is walked at half pace.
             if not len(live.points):
@@ -1775,6 +2079,12 @@ class Run:
             if speed > 0.0:
                 people = [t for t in tracks if t.moving or MIN_RADIUS <= t.r <= MAX_RADIUS]
                 cmd = self.spare_handler(live, (x, y, yaw), cmd, speed, people)
+            if self.planner == "cerrt" and person is not None:
+                side = self.step_aside(live, tracks, (x, y, yaw))
+                if side:
+                    cmd = (0.0, side, 0.0)
+            elif self.evading:
+                self.evading = 0.0
             # Last: the person on the handle overrules everything above.
             self.handle_tick()
             cmd = self.mux.apply(cmd, self.robot.MAX_V)
@@ -2093,6 +2403,14 @@ def main():
                          "stop for a dog right in front of them) or aware (they make "
                          "room for the dog and its user, as people do); "
                          "scene/pedestrians.py")
+    ap.add_argument("--planner", choices=["map", "cerrt"], default="map",
+                    help="what to do about a person in the way: map (wait for them) "
+                         "or cerrt (go round them on a path planned where they will "
+                         "be, waiting only when no path is safe; planning/ce_rrt.py)")
+    ap.add_argument("--track-log", default=None, metavar="PATH",
+                    help="write the tracker's moving tracks and every walker's true "
+                         "position, each tick, as JSON lines "
+                         "(scripts/ce_rrt_calibrate.py)")
     ap.add_argument("--handle", default="", metavar="EVENTS",
                     help='scripted Smart Handle, at seconds of sim time: "tug@30,continue@35", '
                          '"pull@20-25", "push@26-28" (see sim/handle.py). Its continue '
@@ -2145,6 +2463,7 @@ def main():
     run = Run(scene, start_xy, yaw0, router, out=None if args.no_video else args.out,
               vamos=args.vamos, auto_confirm=args.auto_confirm, speed=args.speed,
               crowd=args.pedestrians, seed=args.seed, aware=args.crowd == "aware",
+              planner=args.planner, track_log=args.track_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               handle=handle if args.handle else None,
@@ -2274,6 +2593,19 @@ def main():
         pd = run.ped
         print(f"people: {pd['yields']} times it stopped to let someone past, "
               f"{pd['waited'] / FPS:.1f}s waiting in total")
+        if run.planner == "cerrt":
+            pl = run.plans
+            tried = pl["made"] + pl["none"]
+            print(f"planner: CE-RRT*, went round somebody {pl['rounds']} times, "
+                  f"{pl['ticks'] / FPS:.1f}s on a plan; {tried} plans, "
+                  f"{pl['none']} found nothing, "
+                  f"{pl['ms'] / max(tried, 1):.0f} ms each")
+            if run.evade["steps"]:
+                print(f"planner: stepped aside for somebody {run.evade['steps']} times, "
+                      f"{run.evade['ticks'] / FPS:.1f}s stepping")
+            if run.why_wait:
+                print("planner: waited instead because -- " + ", ".join(
+                    f"{why} {k}" for why, k in run.why_wait.most_common()))
         if pd["near"]:
             print(f"CONTACT: {pd['near'] / FPS:.1f}s within {PED_NEAR} m of a person "
                   f"(closest {pd['min_d']:.2f} m)")

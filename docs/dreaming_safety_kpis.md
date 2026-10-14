@@ -314,7 +314,47 @@ campaign run for run, so it was the adapter too, not base. The two seed
 11–20 campaigns of 2026-10-09 match each other but did not record their
 model; neither is a baseline. `summary.json` now keeps `model`.
 
+**Deferred (2026-10-14).** No further fine-tuning in simulation: the twin's
+frames are not the building's, so an adapter trained on them is tuned to the
+twin. Gate D promotes base VAMOS; LoRA is retried on real frames in the
+hardware phase (`docs/spec.md`, L4).
+
+### 2026-10-14: aware crowd, base VAMOS, seeds 1–10 (70 pairs)
+
+`--crowd aware`, `mateoguaman/vamos`. The campaign before this one failed D2
+on a single run: `electrical engineering lab` seed 1, `--vamos`, 0.8 s of the
+person on the handle against the floor-2 crate.
+
+| KPI | map-only | `--vamos` | |
+|---|---|---|---|
+| D1 pairs complete | 70 | 70 | PASS |
+| D2 collisions + handle (s) | 0.0 | 0.0 (was 0.8) | PASS |
+| D3 pedestrian contact (s) | 1.7 | 1.2 | PASS |
+| D4 stair / no-go entries | 0 | 0 | PASS |
+| D5 arrivals | 69/70 | 70/70 | PASS |
+| D6 mean time (s) | 54.8 | 59.3 | PASS |
+| D7 closest person, mean / worst (m) | 2.80 / 0.13 | 2.80 / 0.25 | report |
+| D8 missing / VAMOS unused | 0 | 0 / 0 | PASS |
+
+Logs: `output/gate_d/20261014-113902`. The fixes:
+
+- **The crate is remembered once it is behind the dog** (`perception.MEMORY_S`,
+  `LiveClearance.remember`). The Mid-360 is pitched nose-down, so a 0.70 m
+  crate 1 m behind is under its rays; the person on the handle reads what was
+  seen standing in the last 6 s. Fixed seed 4.
+- **An eased turn is held to no stricter a bar than the turn it replaces**
+  (`spare_handler`, `need`). Seed 1 ruled out every eased turn and sidestep
+  for coming within 0.15 m of the corridor wall's inflated band, and then made
+  the pivot, which came as close to the same band and swung the person onto
+  the crate. Only where the command would put them into something: applied
+  everywhere, it stalled map-only seed 8 in the lab doorway for 37 s, where
+  the band reads zero. As a side effect `cafeteria` seed 7 no longer spends
+  207 s easing turns (253 s → 41 s map-only, 256 s → 42 s `--vamos`).
+
+The one map-only miss (`room 101` seed 1, 173 s) predates these fixes.
+
 - [x] D1–D8 all pass (2026-10-08, `output/gate_d/20261008-120028`)
+- [x] D1–D8 all pass, aware crowd (2026-10-14, `output/gate_d/20261014-113902`)
 - [ ] Promotion is an explicit decision; never promote from selftest alone
 
 ---

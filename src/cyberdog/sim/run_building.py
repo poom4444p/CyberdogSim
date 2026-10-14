@@ -1002,11 +1002,14 @@ class Run:
         walls from the map, measured to their real faces rather than the
         planner's inflated ones (clearance.wall_face_field -- the person's
         shoulder lives in the inflation band), and crates from the LiDAR's
-        standing field."""
+        standing field plus what it saw standing in the last few seconds: a
+        crate the dog has just passed is behind it, under its rays, and is
+        exactly what a pivot swings the person into (perception.MEMORY_S)."""
         px, py = x - HANDLER_BEHIND * math.cos(yaw), y - HANDLER_BEHIND * math.sin(yaw)
         if walls_only:
             return live.wall_at(px, py)
-        return min(live.wall_at(px, py), live.detected_at(px, py))
+        return min(live.wall_at(px, py), live.detected_at(px, py),
+                   live.remembered_at(px, py))
 
     def unpin(self, live, pose, dt=0.3):
         """Yaw rate while standing still for somebody: 0, unless the person on
@@ -1053,29 +1056,31 @@ class Run:
         y += cmd[0] * math.sin(yaw) * dt
         return any(a < NOSE_MIN and b < a for a, b in zip(now, corners(x, y, yaw)))
 
-    def swing(self, live, pose, cmd, people=(), dt=0.1):
+    def swing(self, live, pose, cmd, people=(), dt=0.1, need=ROBOT_R):
         """Roll `cmd` forward SWING_T: (least room around the person, whether
-        the dog itself stays clear -- of everything by ROBOT_R, and of where
+        the dog itself stays clear -- of everything by `need`, and of where
         each of `people` is heading by SWING_PEOPLE, or by as much as it has
         now if that is less: someone stopped 0.55 m in front of it would
         otherwise rule out stepping away from them too -- and least room
-        between the person and the walls alone)."""
+        between the person and the walls alone, and least room the dog's
+        centre or front had along the way)."""
         x, y, yaw = pose
         vx, vy, w = cmd
         keep = [min(SWING_PEOPLE, math.dist((x, y), (p.x, p.y)) - 1e-6) for p in people]
-        worst, walls, clear = INF, INF, True
+        worst, walls, body, clear = INF, INF, INF, True
         for k in range(1, int(round(SWING_T / dt)) + 1):
             yaw += w * dt
             x += (vx * math.cos(yaw) - vy * math.sin(yaw)) * dt
             y += (vx * math.sin(yaw) + vy * math.cos(yaw)) * dt
             worst = min(worst, self.handler_room(live, x, y, yaw))
             walls = min(walls, self.handler_room(live, x, y, yaw, walls_only=True))
-            clear = (clear and live(x, y) >= ROBOT_R
-                     and live.detected_at(x + SWING_NOSE * math.cos(yaw),
-                                          y + SWING_NOSE * math.sin(yaw)) >= ROBOT_R
+            body = min(body, live(x, y),
+                       live.detected_at(x + SWING_NOSE * math.cos(yaw),
+                                        y + SWING_NOSE * math.sin(yaw)))
+            clear = (clear and body >= need
                      and all(math.dist((x, y), p.predict(k * dt)) >= d
                              for p, d in zip(people, keep)))
-        return worst, clear, walls
+        return worst, clear, walls, body
 
     def spare_handler(self, live, pose, cmd, limit, people=()):
         """`cmd`, with its turn eased where it would swing the person into
@@ -1108,16 +1113,30 @@ class Run:
         def rank(room, walls):
             return (min(walls, HANDLER_ROOM, wall_now), room)
 
-        worst, _, walls = self.swing(live, pose, cmd)
+        worst, _, walls, body = self.swing(live, pose, cmd)
         if ok(worst, walls):
             self.turn_held = 0
             return cmd
         vx, vy, w = cmd
         v = max(vx, min(SWING_V, limit))
+        # The dog is held to ROBOT_R -- or, where the command would put the
+        # person into something, to what the command itself would leave it,
+        # if that is less. The command goes ahead whenever nothing else is
+        # clear, so a stricter bar for the alternatives then only ever picks
+        # the turn that hurts: pivoting into the electrical engineering lab,
+        # every eased turn and sidestep came within 0.15 m of the corridor
+        # wall's inflated band (its face was 0.4 m off), so all were ruled out
+        # -- and the pivot, 0.15 m from the same band, swung its user onto the
+        # floor-2 crate (Gate D, --vamos, seed 1). Only then: in a doorway the
+        # band reads zero, the bar went with it, and a sidestep the frame did
+        # not allow won every tick for 37 s, where walking on would have kept
+        # its user 0.30 m off the frame (Gate D, map-only, seed 8).
+        need = min(ROBOT_R, body) if worst < HANDLER_R else ROBOT_R
         best = None
         for f in SWING_EASE:
             alt = (v, vy, w * f)
-            room, clear, aw = self.swing(live, pose, alt, people if v > vx else ())
+            room, clear, aw, _ = self.swing(live, pose, alt, people if v > vx else (),
+                                            need=need)
             if not clear:
                 continue
             if ok(room, aw):
@@ -1129,7 +1148,7 @@ class Run:
             # Nothing walking forward will do: step sideways. See SIDE_V.
             for f in SWING_EASE:
                 alt = (0.0, math.copysign(SIDE_V, w), w * f)
-                room, clear, aw = self.swing(live, pose, alt, people)
+                room, clear, aw, _ = self.swing(live, pose, alt, people, need=need)
                 if not clear:
                     continue
                 if ok(room, aw):
@@ -1463,6 +1482,8 @@ class Run:
             # Out of the planning field, still in the safety one. A person is
             # waited for; only a crate is gone round. See LiveClearance.exclude.
             live.exclude([(t.x, t.y, t.r) for t in walking])
+            live.remember([(t.x, t.y, t.r) for t in tracks if t.walked],
+                          self.robot.sim_time, (x, y))
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
             self.score_handler(floor)

@@ -128,6 +128,9 @@ Cyberdog Executes → haptic/audio feedback loop
 6. Add `goal` adapter (instruction → endpoint pixel) as second LoRA on same backbone.
 
 **PoC stub:** zero-shot checkpoint is acceptable for first closed-loop test; fine-tune is the upgrade.
+
+**Decision (2026-10-14): steps 5–6 are deferred to the hardware phase; the PoC ships with base VAMOS.** Fine-tuning on the twin's rendered frames teaches the model the twin, not the building: the frames are synthetic and the labels are the twin's own walked paths. The one adapter trained (`scripts/vamos/README.md`) did not lower goal-pixel error with the live prompt (0.231 → 0.230), drew near-straight lines to the prompt's goal, and failed Gate D on D2 and D3 (`docs/dreaming_safety_kpis.md`, 2026-10-11). The training and scoring code stays in `scripts/vamos/`; it is re-run on real camera frames from the brain rig, which is the data a fine-tune is worth doing on.
+
 **Acceptance:** end-to-end image+pixel → 5 paths at ≥0.5 Hz; paths track the moving destination.
 **Feeds:** Affordance (L5).
 
@@ -197,7 +200,7 @@ Cyberdog Executes → haptic/audio feedback loop
 |---|---|---|
 | 1 | L1 map pipeline + L2 twin setup | Route + checkpoints in RViz; 200 rendered frames |
 | 2 | L3 planner/projector + L4 VAMOS zero-shot wiring | Moving pixel pointer; VAMOS returns 5 paths on twin |
-| 3 | L4 LoRA (auto-labeled data) + L5 affordance stub→MLP | Fine-tuned goal pixel error ↓; stair candidate never wins |
+| 3 | ~~L4 LoRA (auto-labeled data)~~ deferred to hardware (see L4) + L5 affordance stub→MLP | ~~Fine-tuned goal pixel error ↓~~; stair candidate never wins |
 | 4 | L6 safety + CE-RRT* (+pedestrians) | Smooth avoidance; tug < 100 ms |
 | 5 | L7 closed loop + voice; full-route runs | ≥80% route success over 10 runs; latency budget measured |
 | 6 | Eval report + optional NaviTrace diagnostic | **Go/No-Go** for hardware phase |

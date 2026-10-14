@@ -5,6 +5,11 @@ any sidestep wider than that is still the map's to make (`sim/README.md`, *Who
 actually does the avoiding*). This folder is the fine-tune that is meant to
 move it to the model.
 
+**On hold until the hardware phase (2026-10-14).** Fine-tuning on the twin's
+frames tunes the model to the twin; the adapter below failed Gate D, and the
+PoC ships with base VAMOS. This pipeline is kept to be re-run on real camera
+frames from the brain rig (`docs/spec.md`, L4).
+
 | Step | Command | Env | Time |
 |---|---|---|---|
 | 1. Collect train data | `python scripts/vamos/collect.py` | `cyberdog_sim` | ~11 min, 4 jobs (216 runs) |

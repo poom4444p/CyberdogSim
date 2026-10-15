@@ -87,9 +87,10 @@ Q_RATE = 0.84           # ...growing this much per second of prediction:
                         # Measured, scripts/ce_rrt_calibrate.py. A straight
                         # fit, good to COMMIT_T and not beyond: at 1 s the
                         # data says 1.33 m and the line 1.06 m.
-COMMIT_T = 0.5          # seconds held to the chance constraint: the next two
+COMMIT_T = 0.5          # seconds held to the chance constraint: the next few
                         # replans (REPLAN_S) and a stop.
-REPLAN_S = 0.20         # seconds between plans, for the caller
+REPLAN_S = 0.10         # seconds between plans, for the caller: spec L6 asks
+                        # >= 10 Hz, and a plan costs 15-40 ms
 PREDICT_T = 3.0         # seconds of prediction looked at at all
 HANDLER_SEP = 0.55      # metres from the person on the handle to anybody. No
                         # chance margin: they are behind the dog, so a person

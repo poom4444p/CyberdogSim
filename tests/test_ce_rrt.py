@@ -100,15 +100,15 @@ def test_warm_start_keeps_the_side():
 
 
 def test_fast_enough_for_the_control_loop():
-    # Spec L6: >= 10 Hz. Python on a laptop, so judged loosely here and
-    # measured for the report separately.
+    # Spec L6: >= 10 Hz, so a plan must fit inside the REPLAN_S it is
+    # asked at. Measured at 15-40 ms on an M-series Mac.
     them = [Person(4.0, 0.3, -1.0, 0.0), Person(6.0, -0.5, -0.8, 0.1)]
     ok = corridor([(2.5, 3.0, 0.6, 1.25)])
     t0 = time.perf_counter()
     for s in range(5):
         plan((0.0, 0.0, 0.0), (4.5, 0.0), ok, people=them, seed=s)
     per = (time.perf_counter() - t0) / 5
-    assert per < 0.5, f"{per * 1000:.0f} ms per plan"
+    assert per < ce_rrt.REPLAN_S, f"{per * 1000:.0f} ms per plan"
 
 
 def test_lets_someone_overtake():

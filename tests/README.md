@@ -139,7 +139,9 @@ The last lines are the verdict. Lines in capitals are problems:
 
 | Line | Means |
 |---|---|
-| `ARRIVED` / `FAILED` | Did it get there |
+| `ARRIVED` / `FAILED` / `STOPPED` | Did it get there (`STOPPED`: the person on the handle stopped it) |
+| `FAILED BY <layer>:` / `STOPPED BY handle:` | Which layer ended the run, and why: `perception` (no way past what the LiDAR saw), `control` (ran out of ticks), `behavior layer` (entered a no-go zone), `planning`, `vamos`, `handle` |
+| `REFUSED BY <layer>:` | The run never started: `language` (no destination in the command) or `planning` (no such place or floor, no accessible route) |
 | `COLLISIONS:` | The dog's body touched a wall or an obstacle (`collisions: none` if clean) |
 | `HANDLER:` | The person on the handle touched something (`handler: none` if clean) |
 | `CONTACT:` | Came within 0.55 m of a pedestrian (`contact: none` if clean) |

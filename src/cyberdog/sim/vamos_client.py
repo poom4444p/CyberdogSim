@@ -95,7 +95,9 @@ class VamosPolicy:
         # the dream never ran. Shadow mode logs this; nothing steers by it.
         self.verdicts = []
         self.stats = {"calls": 0, "failures": 0, "rejected": 0,
-                      "rejected_by_gate": 0, "safety_sum": 0.0, "chosen": 0}
+                      "rejected_by_gate": 0, "rejected_behind": 0,
+                      "safety_sum": 0.0, "chosen": 0}
+        self.last_error = None     # why the latest failed call failed, for the log
 
     def available(self):
         try:
@@ -165,7 +167,8 @@ class VamosPolicy:
         """
         try:
             pixel_paths = self._request(image, prompt)
-        except (requests.RequestException, ValueError):
+        except (requests.RequestException, ValueError) as e:
+            self.last_error = f"{type(e).__name__}: {e}"[:200]
             return None
 
         paths = []
@@ -199,6 +202,7 @@ class VamosPolicy:
         spent = [p for p in rest if len(p) < 2]
         paths = [p for p in rest if len(p) >= 2]
         self.stats["rejected"] += len(spent)
+        self.stats["rejected_behind"] += len(spent)
         self.verdicts = [(p, None, "behind") for p in spent]
 
         # Cheap test first: no sense imagining a path already through a wall.

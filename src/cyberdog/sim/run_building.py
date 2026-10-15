@@ -513,7 +513,16 @@ class HazardStop(Exception):
     The planner will not route through a stairwell, so this firing means
     something upstream is wrong -- which is exactly when a guide robot should
     stop moving and say so rather than carry on.
+
+    `layer` is the part of the stack that ended the run, for the FAILED BY
+    line (spec DoD: every layer's failure logged, which layer rejected what).
     """
+    layer = "behavior layer"
+
+    def __init__(self, message, layer=None):
+        super().__init__(message)
+        if layer is not None:
+            self.layer = layer
 
 
 class HandleStop(HazardStop):
@@ -523,6 +532,7 @@ class HandleStop(HazardStop):
     Only a scripted handle can know that no continue is coming; the run ends
     here, standing where it waited, rather than at MAX_TICKS.
     """
+    layer = "handle"
 
 
 class Run:
@@ -636,6 +646,7 @@ class Run:
                                        # aims where the last one did
         self.plans = {"rounds": 0, "made": 0, "none": 0, "ms": 0.0, "ticks": 0}
         self.why_wait = collections.Counter()  # why a wait was not a going-round
+        self.gave_up = None       # (layer, why) when follow() ends a leg short
         self.evading = 0.0             # sideways m/s while stepping aside, or 0
         self.evade = {"steps": 0, "ticks": 0}
         self.track_log = open(track_log, "w") if track_log else None
@@ -812,7 +823,7 @@ class Run:
                                             live, x, y, yaw)), url=url,
                             sample=self.vamos_sample)
             if not p.available():
-                raise SystemExit(f"VAMOS server is not answering on {url} -- "
+                raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first")
             self.policies[floor] = p
         return self.policies[floor]
@@ -2021,6 +2032,9 @@ class Run:
                     speed, err = -BACK_V, 0.0
                 if stalled > BLOCKED_S * FPS:
                     self.say("I cannot find a way past this. Stopping here.")
+                    self.gave_up = ("perception", f"something within {ROBOT_R} m of the "
+                                    f"dog for {BLOCKED_S:.0f} s at ({x:.1f}, {y:.1f}), "
+                                    f"and nothing clear behind to back away into")
                     return False, n
             elif on_vamos:
                 speed *= safety
@@ -2044,6 +2058,10 @@ class Run:
                         self.say("Stopping. I have no clear way past.")
                     if stalled > BLOCKED_S * FPS:
                         self.say("I cannot find a way past this. Stopping here.")
+                        self.gave_up = ("perception", f"free_destination found no gap "
+                                        f"round what the LiDAR saw for {BLOCKED_S:.0f} s at "
+                                        f"({x:.1f}, {y:.1f})"
+                                        + (", and no VAMOS path passed" if self.vamos else ""))
                         return False, n
                 else:
                     stalled, halted = 0, False
@@ -2097,6 +2115,8 @@ class Run:
                 print(f"    t={self.robot.sim_time:6.1f}s  floor {floor}  "
                       f"pos=({x:5.1f},{y:5.1f})  wp={i}/{len(waypoints) - 1}  "
                       f"{state['state']}")
+        self.gave_up = ("control", f"{MAX_TICKS} ticks on floor {floor} without arriving, "
+                        f"last at checkpoint {i}/{len(waypoints) - 1}, ({x:.1f}, {y:.1f})")
         return False, MAX_TICKS
 
     def confirm(self, prompt, what="lift", enter="once the lift is here and the doors are open"):
@@ -2214,7 +2234,7 @@ class Run:
         ask, walk in, ride, announce, step back out.
         """
         if to_floor not in lift.FLOORS_SERVED:
-            raise HazardStop(f"the lift does not serve floor {to_floor}")
+            raise HazardStop(f"the lift does not serve floor {to_floor}", layer="planning")
 
         self.in_lift = True
         z_from = levels.floor_z(from_floor)
@@ -2447,15 +2467,19 @@ def main():
                             lift_in_service=not args.lift_out_of_service)
     # A refusal -- stairs as a destination, or a floor the lift misses -- is an
     # answer, not a crash. It is the sentence the user would hear.
+    layer = "language"
     try:
         stops = resolve_stops(router, args.command, use_nlu=args.nlu)
         print(f'command: "{args.command}"')
         for k, (name, floor) in enumerate(stops, 1):
             print(f"  stop {k}: {name}" + (f" (floor {floor})" if floor else ""))
 
+        layer = "planning"
         start_xy, legs, faces = plan_stops(router, stops)
     except NoAccessibleRoute as refusal:
-        raise SystemExit(f"[voice] {refusal}")
+        raise SystemExit(f"[voice] {refusal}\nREFUSED BY planning: no accessible route")
+    except SystemExit as refusal:
+        raise SystemExit(f"REFUSED BY {layer}: {refusal}")
 
     print(f"{len(legs)} leg(s) across floors "
           f"{sorted({leg[0] for leg in legs})}, starting at {START_LOCATION}")
@@ -2488,7 +2512,7 @@ def main():
                                                      consent=lambda *_: False)
                 except NoAccessibleRoute as refusal:
                     run.say(str(refusal))
-                    raise HazardStop(f"on floor {floor}: {refusal}")
+                    raise HazardStop(f"on floor {floor}: {refusal}", layer="planning")
                 legs = legs[:k] + [leg._replace(stop=leg.stop + stop) for leg in rest]
                 faces = {i: p for i, p in faces.items() if i < k}
                 faces.update({k + i: p for i, p in rest_faces.items()})
@@ -2528,13 +2552,24 @@ def main():
     outcome = "ARRIVED" if ok else "STOPPED" if isinstance(halted, HandleStop) else "FAILED"
     print(f"{outcome} on floor {run.floor} at ({x:.1f}, {y:.1f}) "
           f"after {run.robot.sim_time:.0f}s of sim time")
+    if not ok:
+        # One line naming the layer that ended the run, so a failed log
+        # answers "which layer, and why" without reading the trace above.
+        layer, why = ((halted.layer, str(halted)) if halted is not None
+                      else run.gave_up or ("control", "leg ended without arriving"))
+        print(f"{outcome} BY {layer}: {why}")
     for floor, p in sorted(run.policies.items()):
         st = p.stats
         mean = st["safety_sum"] / st["chosen"] if st["chosen"] else 0.0
+        off_map = st["rejected"] - st["rejected_by_gate"] - st["rejected_behind"]
         print(f"VAMOS floor {floor}: {st['calls']} calls, {st['failures']} failed, "
               f"{st['rejected']} candidates rejected "
-              f"({st['rejected_by_gate']} of them by the safety gate), "
+              f"({st['rejected_by_gate']} of them by the safety gate, {off_map} by "
+              f"traversable() through a wall or obstacle, {st['rejected_behind']} "
+              f"already behind the dog), "
               f"mean safety of the paths it followed {mean:.2f}")
+        if st["failures"] and p.last_error:
+            print(f"  last VAMOS failure: {p.last_error}")
     if args.vamos or args.shadow:
         v = run.vlm
         k = max(v["answers"], 1)

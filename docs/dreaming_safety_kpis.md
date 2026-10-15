@@ -413,8 +413,10 @@ passer-by's line.
 - [x] P2–P6 pass on both arms (2026-10-14)
 - [x] Made `run_building`'s default, with the aware crowd (2026-10-15).
       `gate_d.py` still defaults to `--planner map`, for the reason above
-- [ ] Re-run at 10 Hz: `REPLAN_S` 0.2 → 0.1 s on 2026-10-15 (spec L6 asks
-      ≥ 10 Hz). The results above are at 5 Hz
+- [x] Re-run at 10 Hz: `REPLAN_S` 0.2 → 0.1 s on 2026-10-15 (spec L6 asks
+      ≥ 10 Hz). P2–P6 pass on both arms (`output/gate_d/20261015-115039`).
+      Pedestrian contact on the VAMOS arm fell from 0.8 s at 5 Hz to 0; the
+      dog goes round people a little more often (map arm 77 → 98)
 - [ ] Margin re-measured on real people (`scripts/ce_rrt_calibrate.py` wants
       ground truth: a ceiling camera or a motion-capture room)
 

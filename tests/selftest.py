@@ -868,8 +868,13 @@ def run():
              # the crossing committed to one side it arrives, 0.32 m clear.
              ("chemistry lab", "arrives", []),
              # And once more through a corridor with people in it, who are on
-             # no map either and who have to be waited for rather than dodged.
-             ("room 201", "arrives", ["--pedestrians", "3", "--seed", "1"])]
+             # no map either: as run_building runs by default (an aware crowd,
+             # CE-RRT* going round them), then the stress test the suite ran
+             # before that, people who only stop for a dog right in front of
+             # them, waited for rather than gone round.
+             ("room 201", "arrives", ["--pedestrians", "3", "--seed", "1"]),
+             ("room 201", "arrives", ["--pedestrians", "3", "--seed", "1",
+                                      "--crowd", "oblivious", "--planner", "map"])]
     for dest, expect, extra in cases:
         out = subprocess.run(
             [py, "-m", "cyberdog.sim.run_building", dest,
@@ -878,7 +883,8 @@ def run():
         arrived = "ARRIVED" in out
         hit = "COLLISIONS:" in out or "CONTACT:" in out
         got = "collides" if hit else "arrives" if arrived else "stops short"
-        label = dest + (" (with people)" if extra else "")
+        label = dest + (" (with people, stress test)" if "--crowd" in extra
+                        else " (with people)" if extra else "")
         if expect != "arrives":
             label += f" (known limit: {expect})"
         check(f"route: {label}", got == expect,

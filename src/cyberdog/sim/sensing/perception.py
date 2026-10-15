@@ -37,7 +37,9 @@ it. That is the standard costmap answer and it is deliberately conservative --
 it can over-claim when the real object is thinner than SHADOW.
 
 Honest limits. No memory: each scan stands alone, which is fine for a 360-degree
-sensor at 12 m and wrong the moment something is occluded. Beyond the local
+sensor at 12 m and wrong the moment something is occluded -- or behind the dog
+and under its tilted rays, which is why the person on the handle alone reads a
+short memory (MEMORY_S). Beyond the local
 window and beyond LiDAR range, clearance falls back to the static map, so an
 imagined rollout that runs 10 m ahead is scored optimistically at its far end.
 And returns the static field already explains are dropped wholesale, so an
@@ -89,6 +91,16 @@ MAX_OFFSET = 1.6        # how far sideways the goal may be moved, metres.
                         # crossing is half done. Keep it short until something
                         # plans the curve (CE-RRT*, spec L6 s2).
 OFFSET_STEP = 0.10
+MEMORY_S = 6.0          # seconds a standing return is remembered once out of
+                        # sight. Only the person on the handle reads it
+                        # (`remembered_at`). The Mid-360 is pitched 20 deg
+                        # nose-down, so behind the dog its lowest ray climbs
+                        # at ~12 deg and passes over a 0.70 m crate 1 m back:
+                        # the floor-2 crate went out of the scan the moment the
+                        # dog was past it, and the pivot into the electrical
+                        # engineering lab swung its user into it with nothing
+                        # left to say so (Gate D, --vamos, seeds 1 and 4).
+                        # Long enough to cover 1.1 m of handle at a crawl.
 INF = 99.0
 
 
@@ -110,6 +122,8 @@ class LiveClearance:
         self.still = None               # ...the same, minus anything walking
         self.points = np.empty((0, 2))  # the unexplained returns, for drawing
         self._scan = None               # this tick's returns, for `exclude`
+        self.memory = {}                # (col, row) world cell -> sim time last seen
+        self.recent = None              # (edt, x0, y0) over `memory`
 
     def _static(self, x, y):
         """Vectorised static lookup. Outside the map reads as zero clearance."""
@@ -176,11 +190,30 @@ class LiveClearance:
         self.still = (self._field(px[keep], py[keep], centre, origin)
                       if keep.any() else None)
 
+    def _shadowed(self, px, py, origin):
+        """The returns plus SHADOW metres of ray behind each, as world points
+        a cell apart: everything the local costmap counts as occupied."""
+        # Everything behind a return is unknown, not free. Without this the
+        # inside of a crate reads as open floor -- only its near face is ever
+        # seen -- and a goal can be placed in the middle of one.
+        if origin is None or SHADOW <= 0:
+            return px, py
+        ox_, oy_ = float(origin[0]), float(origin[1])
+        dx, dy = px - ox_, py - oy_
+        d = np.hypot(dx, dy)
+        live = d > 1e-6
+        ux, uy = dx[live] / d[live], dy[live] / d[live]
+        bx, by = px[live], py[live]
+        steps = np.arange(self.res, SHADOW + 1e-9, self.res)
+        return (np.concatenate([px] + [bx + ux * t for t in steps]),
+                np.concatenate([py] + [by + uy * t for t in steps]))
+
     def _field(self, px, py, centre, origin):
         """(edt, x0, y0) for a set of returns -- the local costmap itself."""
         # One small distance transform instead of rebuilding the 385x964 static
         # field, which costs 125 ms and would not survive a 20 Hz control loop.
         x0, y0 = centre[0] - WINDOW, centre[1] - WINDOW
+        px, py = self._shadowed(px, py, origin)
         occ = np.zeros((self.n, self.n), dtype=bool)
         c = ((px - x0) / self.res).astype(int)
         r = ((py - y0) / self.res).astype(int)
@@ -189,23 +222,59 @@ class LiveClearance:
             return None
         occ[r[ok], c[ok]] = True
 
-        # Everything behind a return is unknown, not free. Without this the
-        # inside of a crate reads as open floor -- only its near face is ever
-        # seen -- and a goal can be placed in the middle of one.
-        if origin is not None and SHADOW > 0:
-            ox_, oy_ = float(origin[0]), float(origin[1])
-            dx, dy = px - ox_, py - oy_
-            d = np.hypot(dx, dy)
-            live = d > 1e-6
-            ux, uy = dx[live] / d[live], dy[live] / d[live]
-            bx, by = px[live], py[live]
-            for t in np.arange(self.res, SHADOW + 1e-9, self.res):
-                sc = ((bx + ux * t - x0) / self.res).astype(int)
-                sr = ((by + uy * t - y0) / self.res).astype(int)
-                m2 = (sr >= 0) & (sr < self.n) & (sc >= 0) & (sc < self.n)
-                occ[sr[m2], sc[m2]] = True
-
         return (ndimage.distance_transform_edt(~occ) * self.res, x0, y0)
+
+    def remember(self, people, now, centre):
+        """Fold this tick's standing returns into the memory, forget what is
+        older than MEMORY_S, and rebuild the field `remembered_at` reads.
+
+        `people` is (x, y, radius) per track that has ever walked: a person
+        who stops is still a person, and remembering where they stood would
+        leave a ghost the turn-easing steers the handle round. Call after
+        `exclude`, once per scan."""
+        if self._scan is not None:
+            px, py, _, origin = self._scan
+            keep = np.ones(len(px), dtype=bool)
+            for mx, my, mr in people:
+                keep &= np.hypot(px - mx, py - my) > mr + CLUSTER_PAD
+            # The shadow too, as `detected_at` had it. Bare returns are the
+            # near face only: from the east, the floor-2 crate's east face,
+            # and its north edge -- what the pivot into the electrical
+            # engineering lab swings the person into -- was never in memory
+            # at all, and the person touched it (Gate D, --vamos, seed 1,
+            # after remembering bare returns had fixed seed 4).
+            px, py = self._shadowed(px[keep], py[keep], origin)
+            cells = np.unique(np.column_stack([(px / self.res).astype(int),
+                                               (py / self.res).astype(int)]), axis=0)
+            for c, r in cells:
+                self.memory[(int(c), int(r))] = now
+        self.memory = {k: t for k, t in self.memory.items() if now - t <= MEMORY_S}
+        self.recent = None
+        if not self.memory:
+            return
+        x0, y0 = centre[0] - WINDOW, centre[1] - WINDOW
+        cells = np.array(list(self.memory), dtype=float)
+        c = ((cells[:, 0] + 0.5) * self.res - x0) / self.res
+        r = ((cells[:, 1] + 0.5) * self.res - y0) / self.res
+        c, r = c.astype(int), r.astype(int)
+        ok = (r >= 0) & (r < self.n) & (c >= 0) & (c < self.n)
+        if not ok.any():
+            return
+        occ = np.zeros((self.n, self.n), dtype=bool)
+        occ[r[ok], c[ok]] = True
+        self.recent = (ndimage.distance_transform_edt(~occ) * self.res, x0, y0)
+
+    def remembered_at(self, x, y):
+        """Distance to the nearest standing thing seen in the last MEMORY_S,
+        in sight now or not. See MEMORY_S for why only the handle asks."""
+        if self.recent is None:
+            return INF
+        edt, x0, y0 = self.recent
+        c = int((x - x0) / self.res)
+        r = int((y - y0) / self.res)
+        if 0 <= r < self.n and 0 <= c < self.n:
+            return float(edt[r, c])
+        return INF
 
     def detected_at(self, x, y):
         """Distance to the nearest *detected* thing, ignoring the static map.

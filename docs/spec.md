@@ -128,6 +128,9 @@ Cyberdog Executes → haptic/audio feedback loop
 6. Add `goal` adapter (instruction → endpoint pixel) as second LoRA on same backbone.
 
 **PoC stub:** zero-shot checkpoint is acceptable for first closed-loop test; fine-tune is the upgrade.
+
+**Decision (2026-10-14): steps 5–6 are deferred to the hardware phase; the PoC ships with base VAMOS.** Fine-tuning on the twin's rendered frames teaches the model the twin, not the building: the frames are synthetic and the labels are the twin's own walked paths. The one adapter trained (`scripts/vamos/README.md`) did not lower goal-pixel error with the live prompt (0.231 → 0.230), drew near-straight lines to the prompt's goal, and failed Gate D on D2 and D3 (`docs/dreaming_safety_kpis.md`, 2026-10-11). The training and scoring code stays in `scripts/vamos/`; it is re-run on real camera frames from the brain rig, which is the data a fine-tune is worth doing on.
+
 **Acceptance:** end-to-end image+pixel → 5 paths at ≥0.5 Hz; paths track the moving destination.
 **Feeds:** Affordance (L5).
 
@@ -154,6 +157,9 @@ Cyberdog Executes → haptic/audio feedback loop
 4. **Safety mux:** merges CE-RRT* velocity with handle override + confidence gate + LiDAR hard-stop bubble → `/cmd_vel_final`.
 
 **PoC stub:** plain RRT* or DWA first; upgrade to chance-constrained version second.
+
+**Status (2026-10-15): CE-RRT\* built, and the default since 2026-10-15** (`--planner cerrt`; `--planner map` waits instead) (`src/cyberdog/planning/ce_rrt.py`). RRT\* in space and time, curves not pivots, warm-started, replanned every 0.2 s, about 15–40 ms a plan. It goes round people only; crates stay with `free_destination`. The chance constraint is calibrated, not assumed: the tracker's straight-line prediction is out by 0.64 m (99th percentile) half a second ahead and 1.3 m a second ahead (`scripts/ce_rrt_calibrate.py`), so P(contact) < 0.01 is held over the committed 0.5 s, with the fallback -- waiting -- for when no plan meets it. A waiting dog steps sideways out of a passer-by's predicted line. Judged by its own paired gate (`scripts/planner_ab.py`, P2–P6 on Gate D's bars): **passes on both arms**, waiting for people −53% map-only and −42% `--vamos`, contact 1.7 → 0.0 s and 1.2 → 0.8 s (`docs/dreaming_safety_kpis.md`). It does not avoid every pedestrian without a stop: 80–106 stops remain per 70 runs, most of them (66 of 86 in one map-only sweep) where no path keeps the 1% margin in a 2.5 m corridor. Better prediction, not more tuning, is what removes those.
+
 **Acceptance:** avoids a synthetic pedestrian without full stops; tug → zero velocity in < 100 ms; stair zone → STOP + voice **and no planned route ever enters one**; a cross-floor route is refused out loud when no lift serves the target floor; a candidate path aimed at a stairwell scores 0.00 and is rejected by the gate, without anything stair-specific being coded into the scorer.
 **Feeds:** Execution (L7).
 
@@ -193,16 +199,17 @@ Cyberdog Executes → haptic/audio feedback loop
 
 ## 5. Six-Week PoC Schedule & Exit Gates
 
-| Week | Work | Exit gate |
-|---|---|---|
-| 1 | L1 map pipeline + L2 twin setup | Route + checkpoints in RViz; 200 rendered frames |
-| 2 | L3 planner/projector + L4 VAMOS zero-shot wiring | Moving pixel pointer; VAMOS returns 5 paths on twin |
-| 3 | L4 LoRA (auto-labeled data) + L5 affordance stub→MLP | Fine-tuned goal pixel error ↓; stair candidate never wins |
-| 4 | L6 safety + CE-RRT* (+pedestrians) | Smooth avoidance; tug < 100 ms |
-| 5 | L7 closed loop + voice; full-route runs | ≥80% route success over 10 runs; latency budget measured |
-| 6 | Eval report + optional NaviTrace diagnostic | **Go/No-Go** for hardware phase |
+| Week | Work | Exit gate | Status (2026-10-15) |
+|---|---|---|---|
+| 1 | L1 map pipeline + L2 twin setup | Route + checkpoints in RViz; 200 rendered frames | done (MuJoCo twin, not Isaac Sim; routes checked as PNGs, not RViz) |
+| 2 | L3 planner/projector + L4 VAMOS zero-shot wiring | Moving pixel pointer; VAMOS returns 5 paths on twin | done |
+| 3 | ~~L4 LoRA (auto-labeled data)~~ deferred to hardware (see L4) + L5 affordance stub→MLP | ~~Fine-tuned goal pixel error ↓~~; stair candidate never wins | stub done (a stair candidate scores 0.00, Gate B4); MLP trained in Isaac, running in shadow mode only |
+| 4 | L6 safety + CE-RRT* (+pedestrians) | Smooth avoidance; tug < 100 ms | done: CE-RRT\* passes its gate and is the default; a tug stops the dog on the tick it is felt (50 ms). Not every pedestrian is avoided without a stop |
+| 5 | L7 closed loop + voice; full-route runs | ≥80% route success over 10 runs; latency budget measured | success done (Gate D: 69–70 of 70 per arm); latency measured piecewise (`docs/architecture.md`), not yet written up against the budget |
+| 6 | Eval report + optional NaviTrace diagnostic | **Go/No-Go** for hardware phase | not started |
 
 **Latency budget to measure:** VAMOS ≤ 2–3 s/plan (known), projector 1–2 Hz, CE-RRT* ≥ 10 Hz, safety mux 50 Hz, handle stop < 100 ms.
+Measured so far: VAMOS ~1.6–1.8 s per call on an M-series Mac; projector and VAMOS asked at 1 Hz; CE-RRT\* 15–40 ms a plan but replanned at 5 Hz (`REPLAN_S` = 0.2 s), under the 10 Hz asked; the safety mux runs at the 20 Hz control rate, not 50 Hz, so a tug stops the dog within one 50 ms tick.
 
 ---
 
@@ -218,8 +225,8 @@ Cyberdog Executes → haptic/audio feedback loop
 
 ## 7. Definition of Done (PoC)
 
-- [ ] Closed-loop *"go to the library"* completes in the digital twin with zero hardware.
-- [ ] A multi-floor run completes with **zero unplanned stair traversal**: the lift is announced, confirmed and ridden; stairs are used only through rule 0's fallback, after both confirmations.
+- [x] Closed-loop *"go to the library"* completes in the digital twin with zero hardware. (2026-10-15, PoC defaults, three people: `library` and `library on the 2nd floor` both arrive with no collision or contact.)
+- [x] A multi-floor run completes with **zero unplanned stair traversal**: the lift is announced, confirmed and ridden; stairs are used only through rule 0's fallback, after both confirmations. (Gate D, 2026-10-14: 140 runs, D4 stair / no-go entries 0.)
 - [ ] Every layer's failure is individually logged and interpretable (which layer rejected what).
 - [ ] Latency + success metrics recorded; go/no-go report written.
 - [ ] **Only then** buy hardware: Jetson Orin NX 16 GB, Livox Mid-360 (~$800), USB cam, ESP32 handle (~$40) — the brain rig phase.

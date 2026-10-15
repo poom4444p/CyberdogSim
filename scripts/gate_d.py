@@ -61,7 +61,16 @@ def server_up(url):
         return False
 
 
-def drive(route, seed, vamos, url, log_dir):
+def served_model(url):
+    """The model the server says it loaded last, as it was given: base or a
+    LoRA adapter. None from a server too old to say, or one that is down."""
+    try:
+        return requests.get(f"{url}/health", timeout=5).json().get("model_path")
+    except (requests.RequestException, ValueError):
+        return None
+
+
+def drive(route, seed, vamos, url, log_dir, crowd="oblivious", planner="map"):
     """One run. Returns its parsed summary; the raw output goes to a log.
 
     A candidate run first checks the server is still up. The first campaign
@@ -77,7 +86,7 @@ def drive(route, seed, vamos, url, log_dir):
         return r
     cmd = [sys.executable, "-m", "cyberdog.sim.run_building", route,
            "--pedestrians", str(PEDESTRIANS), "--seed", str(seed),
-           "--auto-confirm", "--no-video"]
+           "--auto-confirm", "--no-video", "--crowd", crowd, "--planner", planner]
     if vamos:
         cmd += ["--vamos", "--vamos-url", url, "--vlm-latency", str(VLM_LATENCY)]
     t0 = time.time()
@@ -111,6 +120,8 @@ def parse(out):
     ahead = re.search(r"least clearance ahead (\d+\.\d+) m", out)
     calls = [(int(a), int(b)) for a, b in
              re.findall(r"^VAMOS floor \d+: (\d+) calls, (\d+) failed", out, re.M)]
+    stops = re.search(r"^people: (\d+) times .*?, (\d+\.\d+)s waiting", out, re.M)
+    rounds = re.search(r"^planner: CE-RRT\*, went round somebody (\d+) times", out, re.M)
     return {
         "arrived": bool(end and end.group(1) == "ARRIVED"),
         "floor": int(end.group(2)) if end else None,
@@ -125,6 +136,9 @@ def parse(out):
         "clearance_ahead_m": float(ahead.group(1)) if ahead else None,
         "vamos_calls": sum(c for c, _ in calls),
         "vamos_failed": sum(f for _, f in calls),
+        "stops": int(stops.group(1)) if stops else 0,
+        "waiting_s": float(stops.group(2)) if stops else 0.0,
+        "rounds": int(rounds.group(1)) if rounds else 0,
         "missing": missing,
     }
 
@@ -140,6 +154,16 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--routes", nargs="+", default=ROUTES)
     ap.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
+    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="aware",
+                    help="pedestrian behaviour (scene/pedestrians.py): aware make room, "
+                         "as in the PoC default; oblivious is the stress test every "
+                         "campaign before 2026-10-12 used")
+    # Not run_building's default: Gate D judges VAMOS, and with the planner in
+    # both arms one reshuffled encounter fails D3 (docs/dreaming_safety_kpis.md).
+    ap.add_argument("--planner", choices=["map", "cerrt"], default="map",
+                    help="both arms: wait for people (map) or go round them (cerrt, "
+                         "planning/ce_rrt.py). Gate D still compares the arms; the "
+                         "planner's own effect is this campaign against one without it")
     ap.add_argument("--vamos-url", default="http://127.0.0.1:8009")
     ap.add_argument("--jobs", type=int, default=4, help="map-only runs at a time")
     # One: the server answers one request at a time anyway, and at two
@@ -157,11 +181,22 @@ def main():
     if args.resume:
         prev = json.loads((Path(args.resume) / "summary.json").read_text())
         args.routes, args.seeds = prev["routes"], prev["seeds"]
+        args.crowd = prev.get("crowd", "oblivious")
+        args.planner = prev.get("planner", "map")
         kept = {(r["arm"], r["route"], r["seed"]): r for r in prev["runs"] if usable(r)}
 
     if not server_up(args.vamos_url):
         raise SystemExit(f"VAMOS server is not answering on {args.vamos_url} -- "
                          "start it first (README, step 6)")
+    # The server keeps whatever it loaded last, evaluate.py --load included,
+    # so the campaign records what it was scored on.
+    model = served_model(args.vamos_url)
+    if model is None:
+        raise SystemExit("the VAMOS server does not say which model it serves -- "
+                         "restart it from vendor/VAMOS/server with this repo's vlm_server.py")
+    if args.resume and prev.get("model", model) != model:
+        raise SystemExit(f"{args.resume} was driven on {prev['model']}, "
+                         f"the server now serves {model}")
     if not paths.BUILDING_SCENE.exists():
         raise SystemExit("no building scene yet -- run: "
                          "python -m cyberdog.sim.scene.build_scene --building")
@@ -173,6 +208,7 @@ def main():
     pairs = [(r, s) for r in args.routes for s in args.seeds]
     print(f"Gate D: {len(args.routes)} routes x seeds {args.seeds} = {len(pairs)} pairs, "
           f"{2 * len(pairs)} runs; logs in {log_dir}")
+    print(f"VAMOS model: {model}; crowd: {args.crowd}; planner: {args.planner}")
     if args.resume:
         print(f"resuming: {len(kept)} complete runs kept, "
               f"{2 * len(pairs) - len(kept)} to drive")
@@ -184,7 +220,8 @@ def main():
             f = Future()
             f.set_result(prev)
             return f
-        return pool.submit(drive, *k, vamos, args.vamos_url, log_dir)
+        return pool.submit(drive, *k, vamos, args.vamos_url, log_dir, args.crowd,
+                           args.planner)
 
     t0 = time.time()
     with ThreadPoolExecutor(args.jobs) as base_pool, \
@@ -208,9 +245,14 @@ def main():
     base = {k: f.result() for k, f in base.items()}
     cand = {k: f.result() for k, f in cand.items()}
     print(f"\n{2 * len(pairs)} runs in {(time.time() - t0) / 60:.1f} min\n")
+    model_end = served_model(args.vamos_url)
+    if model_end not in (None, model):
+        print(f"VAMOS model CHANGED mid-campaign: {model} -> {model_end}. "
+              f"The candidate arm is a mix; do not score it.\n")
 
     def arm_sum(runs, key):
-        return round(sum(r[key] for r in runs.values()), 2)
+        # .get: a run kept by --resume from before a field existed has none.
+        return round(sum(r.get(key, 0) for r in runs.values()), 2)
 
     def arrivals(runs):
         return sum(r["arrived"] and r["floor"] == floors[k[0]] for k, r in runs.items())
@@ -259,6 +301,10 @@ def main():
         ("D7", "Least clearance ahead, mean / worst (m)",
          "{} / {}".format(*worst(base, "clearance_ahead_m")),
          "{} / {}".format(*worst(cand, "clearance_ahead_m")), None),
+        ("D7", "Stops for people / waiting (s) / went round",
+         f"{arm_sum(base, 'stops')} / {arm_sum(base, 'waiting_s'):.1f} / {arm_sum(base, 'rounds')}",
+         f"{arm_sum(cand, 'stops')} / {arm_sum(cand, 'waiting_s'):.1f} / {arm_sum(cand, 'rounds')}",
+         None),
         ("D8", "Runs with missing metrics / VAMOS not used", "-",
          f"{missing} / {len(silent)}", missing == 0 and not silent),
     ]
@@ -272,7 +318,10 @@ def main():
 
     (log_dir / "summary.json").write_text(json.dumps({
         "routes": args.routes, "seeds": args.seeds, "pedestrians": PEDESTRIANS,
-        "vlm_latency": VLM_LATENCY, "passed": passed,
+        "crowd": args.crowd, "planner": args.planner,
+        "vlm_latency": VLM_LATENCY, "model": model,
+        **({"model_end": model_end} if model_end not in (None, model) else {}),
+        "passed": passed,
         "kpis": [{"id": k, "name": n, "map": b, "vamos": c,
                   "result": None if ok is None else bool(ok)} for k, n, b, c, ok in rows],
         "runs": [base[k] for k in pairs] + [cand[k] for k in pairs],

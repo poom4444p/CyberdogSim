@@ -54,6 +54,9 @@ if hasattr(torch, "compile"):
 # Global variables for model and processor
 model = None
 processor = None
+# What load_model was last given, as given: a PeftModel's config names its
+# base model, so it cannot tell an adapter from the base.
+loaded_model_path = None
 device = ("cuda" if torch.cuda.is_available()
           else "mps" if torch.backends.mps.is_available()
           else "cpu")   # Apple Silicon: use the GPU instead of falling back to CPU
@@ -195,7 +198,7 @@ def decode_trajectory_string(trajectory_string, img_height, img_width, expected_
 
 def load_model(model_path, use_fp32=False, trust_remote_code=True):
     """Load the VLM model and processor."""
-    global model, processor, device
+    global model, processor, device, loaded_model_path
     
     if not model_path or model_path.strip() == "":
         return False, "Error: Please provide a valid model path."
@@ -224,6 +227,7 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
             logger.info(f"LoRA model loaded: model={model is not None}, processor={processor is not None}")
             logger.info(f"Model object: {type(model)}, Processor object: {type(processor)}")
             logger.info(f"Global model id: {id(model)}, Global processor id: {id(processor)}")
+            loaded_model_path = model_path
             return True, f"LoRA model loaded successfully from {model_path} on {device.upper()}!"
         else:
             # Load regular model
@@ -238,6 +242,7 @@ def load_model(model_path, use_fp32=False, trust_remote_code=True):
                 trust_remote_code=trust_remote_code
             ).to(device)
             
+            loaded_model_path = model_path
             return True, f"Model loaded successfully from {model_path} on {device.upper()}!"
     except Exception as e:
         # Clear memory on error
@@ -357,6 +362,7 @@ def health():
         "cuda": torch.cuda.is_available(), 
         "gpus": torch.cuda.device_count(),
         "model_loaded": model is not None and processor is not None,
+        "model_path": loaded_model_path,
         "device": device
     })
 

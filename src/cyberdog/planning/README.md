@@ -30,6 +30,7 @@ pipeline (command → model → this layer): `python -m cyberdog.main_planner`.
 | `building_router.py` | Loads the building (per-floor grids + `locations.json`), resolves place names, plans multi-floor routes |
 | `checkpoint_projector.py` | Destination-point selection + pinhole projection to a pixel; self-test when run directly |
 | `visualize_route.py` | Draws a planned trip on the floor maps (PNG) to check routes by eye |
+| `ce_rrt.py` | CE-RRT\* (spec L6 s2): a chance-constrained RRT\* in space and time that plans a curve round people where they *will* be. `run_building` uses it by default (`--planner cerrt`); `--planner map` goes back to waiting for them |
 
 Data and config it reads (resolved through `cyberdog.paths`):
 
@@ -244,11 +245,14 @@ first on purpose — keep that order if you write another entry point.
   only adds `robot_radius - grid_inflation` on top (both in
   `map_config.yaml`, currently 0), so the clearance is not applied twice.
   Doorways are 1.2 m, so total inflation above ~0.5 m closes them.
-- **Stairs are a single point per floor**; no elevator, no stair traversal
-  time/cost, no "press to confirm" handling yet.
-- **No state machine yet.** The diagram's deterministic FSM
-  (IDLE → GLOBAL_NAV → ALIGN → TRACK → ARRIVED) is only printed, not run as
-  a loop that rotates on ALIGN and re-projects.
+- **The state machine is not a module of its own.** The spec's FSM runs
+  inside `sim/run_building.py`'s control loop: the projector's ALIGN / TRACK
+  / ARRIVED, the lift handover that waits for a continue, the two
+  confirmations before any stairs (`offer_stairs`, `stairs_ride`) and the
+  hard stops (`HazardStop`). `main_planner.py` still only prints the states.
+- **CE-RRT\* goes round people only.** Crates and other unmapped boxes stay
+  with `perception.free_destination`. Where no plan keeps P(contact) < 1%
+  (often, in a 2.5 m corridor) it waits, as `--planner map` does.
 - **Visual QA isn't answered.** A stop with a question is navigated to and
   the question is printed as unanswered.
 - **Fallback PaliGemma goal adapter** (for places not in the map) isn't built;

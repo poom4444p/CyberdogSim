@@ -391,7 +391,7 @@ Worth stating plainly, because the parts have different maturity.
 | A | A learned dream beats the kinematic one | not run (future) |
 | B | The safety factor is discriminating, calibrated, stable | B1–B17 pass (`selftest.py dreaming`) |
 | C | VAMOS in shadow changes no command | pass, fake and real server |
-| D | `--vamos` no worse than map-only, 70 paired runs | pass, aware crowd, base VAMOS (2026-10-14); promotion not yet decided |
+| D | `--vamos` no worse than map-only, 70 paired runs | pass, aware crowd, base VAMOS (2026-10-14); **not promoted**: `--vamos` stays opt-in until it is tuned on real frames |
 | Planner | CE-RRT\* no worse than waiting, per arm | P2–P6 pass on both arms (2026-10-14); now the default |
 
 The VAMOS LoRA failed Gate D (D2, D3) and is deferred to real camera frames

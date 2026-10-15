@@ -104,6 +104,7 @@ Cyberdog Executes → haptic/audio feedback loop
 `LIFT_WAIT` is a stop with a spoken handover ("press the call button for floor N, then press continue") and does not advance without human confirmation. `STAIRS_OFFER` and `STAIRS_WAIT` are the two confirmations of rule 0's fallback. `LIFT_RIDE` and `STAIRS_WALK` are the only states in which the robot's height changes. `STAIRS_STOP` — walking into a stairwell without having agreed to — has no resume: it is a halt, not a confirm-and-continue.
 **Sub-modules:**
 1. **Intent parser:** lookup/fuzzy match of destination against Behavior Layer node list. (PaliGemma `intent` adapter optional later.)
+   **Status (2026-10-15):** exact name first, then a fuzzy match (`run_building.fuzzy_place`, difflib ≥ 0.8, room numbers exact, ambiguous near misses refused). A fuzzy match is never taken on trust: the dog says *"I heard 'libary'. Did you mean the library?"* and waits for continue on the handle; no is `STOPPED BY language`. Free-form commands ("I need to pee") use the Gemma LoRA parser, opt-in with `--nlu`.
 2. **Route consumer:** reads A* polyline + checkpoints from L1.
 3. **Checkpoint Projector:** sample destination 2–4 m ahead; project:
    `P_cam = T_body→cam⁻¹ · T_map→body⁻¹ · P_map` ; `(u,v) = project(K, P_cam)`;

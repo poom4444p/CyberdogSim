@@ -267,7 +267,9 @@ explanation instead of writing a broken scene.
 **`no destination found in '...'`**
 You named a place the map does not carry — `"pee"` rather than `"restroom"`.
 Without `--nlu` the destination must match a name in
-`data/building/locations.json`. Name the place, or add `--nlu`.
+`data/building/locations.json`, exactly or nearly: a near miss (`"libary"`,
+`"chemistry lap"`) is matched, and the dog asks *"Did you mean the library?"*
+and waits for continue before it moves. Name the place, or add `--nlu`.
 
 **`can't open file '.../vlm_server.py'`**
 `start_server.sh` was run from the wrong directory. `cd vendor/VAMOS/server`

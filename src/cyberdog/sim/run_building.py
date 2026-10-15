@@ -26,6 +26,7 @@ keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
 import collections
+import difflib
 import hashlib
 import json
 import math
@@ -289,13 +290,55 @@ BACK_V = 0.15             # m/s, backwards -- slow enough to feel deliberate on
                           # the handle rather than like a flinch
 BACK_STEP = 0.45          # how far behind is checked before reversing into it
 
+# Speech-to-text gets place names nearly right -- "libary", "chemistry lap",
+# "rest room" -- and an exact match refuses every one of them. The spec's PoC
+# intent parser is a "lookup/fuzzy match of destination against Behavior Layer
+# node list", so a near miss is matched too, but never taken on trust: the dog
+# says what it understood and waits for continue before it sets off.
+FUZZY_MIN = 0.8           # difflib ratio; "libary" is 0.92, "the chemistry" 0.69
+FUZZY_MARGIN = 0.05       # a runner-up this close is ambiguous: refuse, not guess
 
-def resolve_stops(router, text, use_nlu=False):
+
+def fuzzy_place(names, command):
+    """The place `command` nearly names, as (name, what was heard), or None.
+
+    Each name is compared with every run of as many words in the command, and
+    one more ("cafe teria"). Numbers must match exactly: "room 210" is a
+    different room from "room 201", not a misspelling of it. Two names about
+    as close as each other is a question this cannot answer, so it is None.
+    """
+    words = [w.strip(".,!?;:'\"") for w in command.lower().split()]
+    words = [w for w in words if w]
+    best = {}
+    for name in names:
+        n = len(name.split())
+        digits = [c for c in name if c.isdigit()]
+        for k in (n, n + 1):
+            for i in range(len(words) - k + 1):
+                heard = " ".join(words[i:i + k])
+                if [c for c in heard if c.isdigit()] != digits:
+                    continue
+                r = difflib.SequenceMatcher(None, heard, name).ratio()
+                if r > best.get(name, (0.0, ""))[0]:
+                    best[name] = (r, heard)
+    ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)
+    if not ranked or ranked[0][1][0] < FUZZY_MIN:
+        return None
+    if len(ranked) > 1 and ranked[1][1][0] > ranked[0][1][0] - FUZZY_MARGIN:
+        return None
+    name, (_, heard) = ranked[0]
+    return name, heard
+
+
+def resolve_stops(router, text, use_nlu=False, guessed=None):
     """Command -> [(destination name, floor or None)], one entry per stop.
 
     Splitting and floor phrases are rules either way (that is where they live
     in the pipeline); only the destination itself needs the model, and with
-    --nlu off it is matched against the map's own names instead.
+    --nlu off it is matched against the map's own names instead -- exactly
+    first, then fuzzily (fuzzy_place). A fuzzy match is appended to `guessed`
+    as (stop index, name, what was heard), for main to confirm before the dog
+    moves.
     """
     from cyberdog.language.command_splitter import split_destinations
     from cyberdog.language.floor_parser import extract_floor
@@ -333,6 +376,12 @@ def resolve_stops(router, text, use_nlu=False):
             # location's name contains another's.
             name = next((k for k in sorted(router.locations, key=len, reverse=True)
                          if k in command.lower()), "")
+            if not name:
+                near = fuzzy_place(router.locations, command)
+                if near is not None:
+                    name = near[0]
+                    if guessed is not None:
+                        guessed.append((len(stops), name, near[1]))
         if not name:
             raise SystemExit(f"no destination found in {text_i!r} "
                              f"(try --nlu, or name a place from locations.json)")
@@ -2467,9 +2516,9 @@ def main():
                             lift_in_service=not args.lift_out_of_service)
     # A refusal -- stairs as a destination, or a floor the lift misses -- is an
     # answer, not a crash. It is the sentence the user would hear.
-    layer = "language"
+    layer, guessed = "language", []
     try:
-        stops = resolve_stops(router, args.command, use_nlu=args.nlu)
+        stops = resolve_stops(router, args.command, use_nlu=args.nlu, guessed=guessed)
         print(f'command: "{args.command}"')
         for k, (name, floor) in enumerate(stops, 1):
             print(f"  stop {k}: {name}" + (f" (floor {floor})" if floor else ""))
@@ -2498,6 +2547,15 @@ def main():
 
     ok, halted = True, None
     try:
+        # A name matched fuzzily is what the dog thinks it heard, so it asks
+        # before setting off -- on the handle, as at the lift. No is a stop,
+        # by the layer that guessed.
+        for _, name, heard in guessed:
+            place = name if name.startswith("room") else f"the {name}"
+            if not run.ask(f'I heard "{heard}". Did you mean {place}? Press continue '
+                           f"to go there.", what="destination"):
+                raise HandleStop(f'"{heard}" was not confirmed as {place}',
+                                 layer="language")
         k = 0
         while k < len(legs):
             floor, name, waypoints, announcements, via, stop, transit = legs[k]

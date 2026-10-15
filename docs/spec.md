@@ -227,6 +227,6 @@ Measured so far: VAMOS ~1.6–1.8 s per call on an M-series Mac; projector and V
 
 - [x] Closed-loop *"go to the library"* completes in the digital twin with zero hardware. (2026-10-15, PoC defaults, three people: `library` and `library on the 2nd floor` both arrive with no collision or contact.)
 - [x] A multi-floor run completes with **zero unplanned stair traversal**: the lift is announced, confirmed and ridden; stairs are used only through rule 0's fallback, after both confirmations. (Gate D, 2026-10-14: 140 runs, D4 stair / no-go entries 0.)
-- [ ] Every layer's failure is individually logged and interpretable (which layer rejected what).
+- [x] Every layer's failure is individually logged and interpretable (which layer rejected what). (2026-10-15: a run that does not arrive ends with `FAILED BY <layer>: <why>` -- `perception`, `control`, `behavior layer`, `planning`, `vamos` -- or `STOPPED BY handle`; a command that is refused before the dog moves says `REFUSED BY language` or `REFUSED BY planning`. Inside a run, CE-RRT\* logs why it waited instead of going round, and VAMOS logs its rejected candidates by filter (safety gate, `traversable()`, already behind) and the reason for its last failed call. `tests/README.md` lists the lines.)
 - [ ] Latency + success metrics recorded; go/no-go report written.
 - [ ] **Only then** buy hardware: Jetson Orin NX 16 GB, Livox Mid-360 (~$800), USB cam, ESP32 handle (~$40) — the brain rig phase.

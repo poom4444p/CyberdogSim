@@ -39,7 +39,7 @@ def drive(out):
         r, s = rs
         subprocess.run([sys.executable, "-m", "cyberdog.sim.run_building", r,
                         "--pedestrians", "3", "--seed", str(s), "--auto-confirm",
-                        "--no-video", "--crowd", "aware",
+                        "--no-video", "--crowd", "aware", "--planner", "map",
                         "--track-log", str(out / f"{r.replace(' ', '_')}_{s}.jsonl")],
                        capture_output=True, check=True)
     with ThreadPoolExecutor(4) as ex:

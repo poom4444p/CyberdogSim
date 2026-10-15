@@ -55,7 +55,10 @@ def drive(command, seed, split_dir):
     out = split_dir / rid
     cmd = [sys.executable, "-m", "cyberdog.sim.run_building", command,
            "--auto-confirm", "--no-video", "--autolabel", str(out),
-           "--pedestrians", str(PEDESTRIANS if seed else 0), "--seed", str(seed)]
+           "--pedestrians", str(PEDESTRIANS if seed else 0), "--seed", str(seed),
+           # The crowd and waiting the 2026-10 dataset was collected with,
+           # not run_building's defaults: the labels are the path walked.
+           "--crowd", "oblivious", "--planner", "map"]
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     out.mkdir(parents=True, exist_ok=True)

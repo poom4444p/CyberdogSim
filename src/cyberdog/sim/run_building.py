@@ -2398,15 +2398,18 @@ def main():
                          "they are on no map, and the dog stops for them")
     ap.add_argument("--seed", type=int, default=0,
                     help="which crowd -- the same seed is the same people every run")
-    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="oblivious",
-                    help="how the people behave: oblivious (the stress test: they only "
-                         "stop for a dog right in front of them) or aware (they make "
-                         "room for the dog and its user, as people do); "
-                         "scene/pedestrians.py")
-    ap.add_argument("--planner", choices=["map", "cerrt"], default="map",
-                    help="what to do about a person in the way: map (wait for them) "
-                         "or cerrt (go round them on a path planned where they will "
-                         "be, waiting only when no path is safe; planning/ce_rrt.py)")
+    # The defaults are the PoC configuration, the one Gate D and the planner's
+    # gate passed on (docs/dreaming_safety_kpis.md, 2026-10-14).
+    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="aware",
+                    help="how the people behave: aware (the default: they make room "
+                         "for the dog and its user, as people do) or oblivious (the "
+                         "stress test: they only stop for a dog right in front of "
+                         "them); scene/pedestrians.py")
+    ap.add_argument("--planner", choices=["map", "cerrt"], default="cerrt",
+                    help="what to do about a person in the way: cerrt (the default: "
+                         "go round them on a path planned where they will be, waiting "
+                         "only when no path is safe; planning/ce_rrt.py) or map (wait "
+                         "for them)")
     ap.add_argument("--track-log", default=None, metavar="PATH",
                     help="write the tracker's moving tracks and every walker's true "
                          "position, each tick, as JSON lines "

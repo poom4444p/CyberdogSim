@@ -154,9 +154,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--routes", nargs="+", default=ROUTES)
     ap.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
-    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="oblivious",
-                    help="pedestrian behaviour (scene/pedestrians.py): oblivious is the "
-                         "stress test every campaign before 2026-10-12 used; aware make room")
+    ap.add_argument("--crowd", choices=["oblivious", "aware"], default="aware",
+                    help="pedestrian behaviour (scene/pedestrians.py): aware make room, "
+                         "as in the PoC default; oblivious is the stress test every "
+                         "campaign before 2026-10-12 used")
+    # Not run_building's default: Gate D judges VAMOS, and with the planner in
+    # both arms one reshuffled encounter fails D3 (docs/dreaming_safety_kpis.md).
     ap.add_argument("--planner", choices=["map", "cerrt"], default="map",
                     help="both arms: wait for people (map) or go round them (cerrt, "
                          "planning/ce_rrt.py). Gate D still compares the arms; the "

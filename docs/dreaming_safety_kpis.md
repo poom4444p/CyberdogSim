@@ -408,6 +408,8 @@ the cafeteria-door wall); and a waiting dog stepping sideways out of a
 passer-by's line.
 
 - [x] P2–P6 pass on both arms (2026-10-14)
+- [x] Made `run_building`'s default, with the aware crowd (2026-10-15).
+      `gate_d.py` still defaults to `--planner map`, for the reason above
 - [ ] Margin re-measured on real people (`scripts/ce_rrt_calibrate.py` wants
       ground truth: a ceiling camera or a motion-capture room)
 
@@ -429,6 +431,7 @@ If a value cannot be measured, write **N/A**, never 0.
 
 ## Fair comparison protocol
 
+- [ ] Pass `--crowd` and `--planner` explicitly, never by default: `run_building`'s defaults moved to `aware` / `cerrt` on 2026-10-15, and every campaign before 2026-10-12 is `oblivious` / `map`. `summary.json` keeps both
 - [ ] Freeze route, pedestrian seed, scene build (`output/scene_cache/building.xml` hash), code commit, `Dream` seed, `--speed`
 - [x] **Pin the VLM.** The client asks for its candidates by beam search (`num_beams=5`, `temperature=0`), so the same frame gives the same 5 paths. Run both arms with a fixed `--vlm-latency` (e.g. 1.8): with it, a `--vamos` run repeats tick for tick; without it, answers land after the measured call time and runs drift. Do not pass `--vamos-sample` in a campaign
 - [ ] Several seeds per route; report mean + dispersion or 95% CI

@@ -13,7 +13,8 @@ No hardware required. No AI. Pure geometry + data structures.
 |---|---|
 | `occupancy_grid.py` | Load mesh/point cloud → 2D occupancy grid (ROS map_server compatible) |
 | `behavior_layer.py` | Semantic zone annotations (grass, stairs, crosswalk) with point-in-polygon queries |
-| `astar_planner.py` | A* pathfinding + Ramer–Douglas–Peucker simplification → checkpoints |
+| `astar_planner.py` | A* pathfinding + Ramer–Douglas–Peucker simplification → checkpoints; a simplified segment never leaves free space |
+| `lane.py` | Moves the A* path to the right-hand side of corridors (0.75 m from the wall, `lane` in `config/map_config.yaml`) and rounds its corners into arcs, so the person on the handle is not swung into walls |
 
 ## Architecture Reference
 
@@ -54,9 +55,10 @@ src/cyberdog/mapping/
 ├── __init__.py          re-exports the three classes
 ├── occupancy_grid.py    OccupancyGrid
 ├── behavior_layer.py    BehaviorLayer, BehaviorZone
-└── astar_planner.py     AStarPlanner
+├── astar_planner.py     AStarPlanner
+└── lane.py              keep-right lane and corner arcs
 
-config/map_config.yaml   grid + A* settings (checkpoint spacing, turn threshold)
+config/map_config.yaml   grid + A* settings (checkpoint spacing, turn threshold, lane)
 data/building/           the three-storey building: grids, meshes, locations, zones
 data/samples/            sample_grid, sample_zones -- for the unit tests and demos
 scripts/mapping/         rebuilding grids and meshes from point clouds

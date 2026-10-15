@@ -35,19 +35,30 @@ built against, see [`spec.md`](spec.md).
   |   every tick:                                                |
   |     lidar.scan()            -> ~2000 world points            |
   |     perception.update()     -> which of them the map cannot  |
-  |                                explain                       |
+  |                                explain (crates kept 6 s)     |
+  |     tracking.update()       -> which of those are walking    |
   |     perception.free_destination() -> the goal to aim at      |
   |     control.advance()       -> which checkpoint we are on    |
+  |     a person in the way:                                     |
+  |       --planner cerrt (default) -> ce_rrt.plan() round them, |
+  |                                    replanned every 0.2 s     |
+  |       no safe plan, or --planner map -> wait for them        |
+  |     spare_handler()         -> ease a turn that would swing  |
+  |                                the person on the handle      |
+  |                                into something                |
   |                                                              |
   |   every 20 ticks (1 Hz), if --vamos:                         |
   |     checkpoint_projector.project_route()  -> goal PIXEL      |
   |     vamos_client.plan()     -> 5 candidate paths -> 1        |
   |       |- traversable()      cheap geometry test              |
   |       \- dreaming.factor()  imagined rollouts -> safety      |
+  |     (asynchronous: the answer lands --vlm-latency s later,   |
+  |      and is re-dreamed from where the dog is by then)        |
   +-------------------------------------------------------------+
               |  target point
               v
-        control law (control.py) -> velocity -> MuJoCo
+        control law (control.py) -> handle.SafetyMux -> velocity -> MuJoCo
+                                    (a tug stops it on the tick)
 ```
 
 ---
@@ -163,13 +174,16 @@ Arrows point from importer to imported. No cycles.
                       |
   sim/run_building ---+
        |
+       +--> planning/ce_rrt     (numpy only)
        +--> sim/control ------> planning/building_router
+       +--> sim/handle
        +--> sim/clearance ----> mapping/behavior_layer
        |                        sim/scene/build_scene
        +--> sim/overlay ------> planning/checkpoint_projector
        +--> sim/vamos_client -> (HTTP :8009)
        +--> sim/sensing/lidar ------> (mujoco)
        +--> sim/sensing/perception -> sim/clearance
+       +--> sim/sensing/tracking
        +--> sim/sensing/dreaming ---> sim/control
        +--> sim/robot/mujoco_robot -> sim/scene/build_scene
        +--> sim/scene/* -----------> cyberdog.paths
@@ -201,6 +215,8 @@ Measured by `tests/selftest.py latency` on an M-series Mac:
 | Perception + `free_destination` | 2.4 ms | 50 ms (one 20 Hz tick) — 5% |
 | `Dream.factor()` × 5 candidates | 7.4 ms | ~1.8 s (a VLM call) |
 | Static clearance field (once per floor) | ~125 ms | cached — cannot be rebuilt per tick |
+| CE-RRT\* plan (only with a person in the way) | ~15–40 ms | 200 ms (`ce_rrt.REPLAN_S`); the spec asks ≥ 10 Hz, this is 5 Hz |
+| VAMOS call (real server, M-series `mps`) | ~1.6–1.8 s | spec: ≤ 2–3 s per plan |
 
 The control loop runs at 20 Hz; VAMOS is asked at 1 Hz, which is near its own
 receding-horizon rate. The rate drops to 2 Hz (`REPLAN_BLOCKED`) while nothing

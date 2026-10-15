@@ -47,7 +47,18 @@ python -m cyberdog.sim.run_building "server room" --vamos               # VLM st
 python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 python -m cyberdog.sim.run_building "server room" --speed 2            # play back 2x faster
 python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1  # people in the corridors
+python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1 \
+    --crowd oblivious --planner map                                     # the old stress test
 ```
+
+**The defaults are the PoC configuration**, the one Gate D and the planner's
+gate passed on (`docs/dreaming_safety_kpis.md`, 2026-10-14): an aware crowd
+(`--crowd aware`, people make room for the dog and its user) and CE-RRT\*
+going round people (`--planner cerrt`). Neither changes anything in an empty
+building. `--crowd oblivious --planner map` is the stress test every result
+before 2026-10-12 was measured on, where people only stop for a dog right in
+front of them and the dog waits for them. `--vamos` stays opt-in, because it
+needs the VLM server.
 
 ### The one that shows everything
 
@@ -143,16 +154,20 @@ correctly enough, and depth-testing a caption is not worth a depth buffer.
 ## The lift, and the stairs it refuses
 
 This robot guides someone who cannot see the steps and has one hand on the
-handle. Stairs are a hazard, not a route. So:
+handle. Stairs are a hazard, not a route: no walking route crosses one, and a
+floor change takes them only through spec rule 0's fallback -- the lift out of
+service (`--lift-out-of-service`) or far longer, and the person asked twice
+(`offer_stairs`, `stairs_ride`; `--no-stairs` turns the fallback off). So:
 
 - `lift.py` holds the shaft at the east dead-end of the corridor, and both the
   scene builder and the driver read it -- the car cannot stop at a height the
   scene has no opening at. Its footprint is cut out of every upper slab, and
   the boarding point is `elevator` in `locations.json`, read at import so the
   car and the map agree.
-- `stairs.py` still draws the flights at the *west* end, and nothing climbs
-  them. They are there so the dog's camera and VAMOS's candidate paths have
-  the real hazard to be scored against. The two ends are opposite so a route
+- `stairs.py` draws the flights at the *west* end. Nothing walks onto them;
+  the fallback above climbs them as a scripted transfer, like the lift ride.
+  They are there so the dog's camera and VAMOS's candidate paths have the real
+  hazard to be scored against. The two ends are opposite so a route
   heading the wrong way is wrong on sight.
 - The stairwells are `stairs` zones in `data/building/zones.json`,
   which `BuildingRouter` stamps into its planning grids as obstacles. No A*
@@ -351,6 +366,16 @@ the corridor is: a turn wider than the horizon is still the map's to make, and
 spec L4 step 5, the LoRA fine-tune, is what would move it to the model.
 
 ### People, who are not crates
+
+**By default the dog goes round people** (`--planner cerrt`,
+`planning/ce_rrt.py`): an RRT\* in space and time that plans a curve where
+the tracker predicts they will be, holds P(contact) < 1% over the committed
+0.5 s, and waits only when no plan meets that. Against waiting, on 70 runs per
+arm of the aware crowd, it took pedestrian contact from 1.7 to 0.0 s
+(map-only) and 1.2 to 0.8 s (`--vamos`), and roughly halved the time spent
+waiting; 80-106 stops remain, mostly where a 2.5 m corridor has no room for
+the margin. Everything below this paragraph is the waiting it falls back on,
+measured with `--planner map`, and mostly on the oblivious crowd.
 
 `pedestrians.py` adds the other half of the experiment, and it is deliberately
 the opposite of the crates in every way that matters. They are on no map
@@ -570,9 +595,11 @@ make the turn (`perception.free_destination`). This route no longer demands it.
 Treat "arrives under `--vamos`" as a statement about this corridor, not about
 zero-shot VAMOS: **0 failed calls** in either run is the part that generalises.
 
-It is also not reproducible from a seed. The VLM samples at `temperature=1.0`
-and `vamos_client.py` sends no temperature, so two identical commands give
-different paths; the two runs above differed by 2 calls and 16 candidates.
+These two runs were not reproducible from a seed: the VLM sampled at
+`temperature=1.0`, and they differed by 2 calls and 16 candidates. The client
+now asks for beam search (`num_beams=5`, `temperature=0`), so with
+`--vlm-latency` fixed a `--vamos` run repeats tick for tick; `--vamos-sample`
+goes back to sampling.
 
 The floor-1 numbers in that block are small for a reason that is not the VLM's:
 `main entrance` (45, 4) is 1.6 m from the lift, so the floor-1 leg of any
@@ -588,10 +615,15 @@ path -- the block above is the only score it has.
 ## Known limits
 
 - The dog is kinematic -- no contacts, and the gait is drawn, not simulated.
-- The obstacles are seen, but there is no memory: each scan stands alone, which
-  is fine for a 360-degree sensor and wrong the moment something is occluded.
-  Beyond LiDAR range an imagined rollout is still scored on the static map.
-- CE-RRT* (L6 §2) does not exist -- VAMOS proposes and the gate disposes.
+- Memory is short. A crate seen standing is remembered for 6 s once it is
+  behind the dog (`perception.MEMORY_S`), because the nose-down Mid-360 no
+  longer sees it and the person on the handle still has to pass it. People
+  get half a second of tracking and nothing more: someone who steps behind a
+  crate is a lost track. Beyond LiDAR range an imagined rollout is still
+  scored on the static map.
+- CE-RRT\* (L6 §2, `planning/ce_rrt.py`, on by default) goes round people
+  only. Crates stay with `free_destination`, and VAMOS still proposes while
+  the gate disposes.
 - **A detour holds its side for as long as the obstacle is in sight, and
   nothing plans the curve past that.** Which side has more room is judged
   afresh every tick, from a scan that changes as the dog closes in, and level
@@ -602,7 +634,7 @@ path -- the block above is the only score it has.
   `free_destination(prefer=...)` commits to the first side chosen and only
   reconsiders when that side has nothing reachable left, which is what those two
   routes were waiting for. A genuine curve -- round an obstacle and immediately
-  through a door -- is still CE-RRT* (L6 §2), and still does not exist.
+  through a door -- would be CE-RRT\*'s, which today plans round people only.
 
 Three entries that used to be on this list are gone, and all three were the same
 kind of mistake -- a test that asked a question other than the one that
@@ -630,19 +662,24 @@ were measured first, and none of them was binding in any of the three failures.
 - `--vamos` completed `room 201` on the current geometry (2 runs for 2, 94 s
   against 83 s map-only) and could not on the 1.45 m boxes (0 runs for 4). Its
   +/-0.25 m spread makes it a measurement of the corridor as much as of the
-  model: a turn wider than its 2 m horizon is still the map's to make, and spec
-  L4 s5, the LoRA fine-tune, is what would change that.
-- `--vamos` is **not reproducible**: the server samples at `temperature=1.0` and
-  the client sends no temperature or seed, so two identical commands differ.
-  `--seed` fixes the crowd, not the VLM.
-- The people are capsules on scripted legs, not a pedestrian model. They know
-  exactly one thing about the dog -- do not walk into the thing in front of
-  you -- and making them any cleverer would quietly solve the robot's problem
-  for it. They do not step around it, and they will walk into its side.
-- The dog stops for a person rather than flowing around one. The spec (L6
-  acceptance) wants a pedestrian avoided *without* a full stop, which needs a
-  planner that can commit to a curve; until CE-RRT* exists, stopping is the
-  honest version and the full stops are counted in every run's summary.
+  model: a turn wider than its 2 m horizon is still the map's to make. Spec
+  L4 s5, the LoRA fine-tune, was tried on the twin's frames, failed Gate D, and
+  is deferred to real frames in the hardware phase (`scripts/vamos/README.md`).
+- `--vamos` is reproducible only with `--vlm-latency` fixed: the client asks
+  for beam search, so the same frame gives the same paths, but without a fixed
+  latency answers land at the call's measured time, which varies.
+- The people are capsules on scripted legs, not a pedestrian model. The
+  oblivious crowd knows exactly one thing about the dog -- do not walk into the
+  thing in front of you -- and will walk into its side. The aware crowd, the
+  default, also makes room for the dog and its user, as people do; that is
+  kinder to the robot than the stress test, which is why both are kept.
+  The oblivious crowd never overtakes, and its west-bound walkers share the
+  dog's lane; the aware one overtakes when there is room.
+- The dog still stops for people where CE-RRT\* finds no path that keeps
+  P(contact) < 1%: the tracker's straight line is out by 1.3 m a second ahead,
+  and a 2.5 m corridor often has no room for that. The spec (L6 acceptance)
+  wants a pedestrian avoided *without* a full stop; better prediction, not more
+  tuning, is what removes the rest. Every run counts its stops, and why.
 - Tracking has no occlusion model and matches by nearest centroid, so someone
   who steps behind a crate is a lost track that has to earn `moving` again,
   and two people passing each other can swap identities.

@@ -124,6 +124,12 @@ That is the whole stack in one line: routing, the lift, voice announcements,
 LiDAR, obstacle avoidance, and a video written to
 `output/scene_cache/building.mp4`. Add `--no-video` for a faster run.
 
+It runs the **PoC configuration** by default, the one the safety gates passed
+on (`docs/dreaming_safety_kpis.md`, 2026-10-14): when there are people, they
+behave as an aware crowd that makes room for the dog (`--crowd aware`), and
+the dog goes round them with CE-RRT\* instead of waiting (`--planner cerrt`).
+Only VAMOS is opt-in (`--vamos`, step 6), because it needs its server.
+
 At the end it prints a score:
 
 ```
@@ -288,13 +294,19 @@ All commands run in `cyberdog_sim`, from the repo root. Flags combine freely.
 | `python -m cyberdog.sim.run_building "room 201"` | Full stack, three floors, with video |
 | `python -m cyberdog.sim.run_building "room 201" --no-video` | Same, faster — no rendering |
 | `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
-| `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog stops for them |
+| `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog goes round them (CE-RRT\*), and waits only where no path is safe |
+| `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --crowd oblivious --planner map` | The stress test: people who only stop for a dog right in front of them, and a dog that waits for them instead of going round |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
 | `python -m cyberdog.sim.run_building restroom --handle "tug@10,continue@15"` | The person on the handle: a tug at 10 s stops the dog until continue at 15 s; `pull@T1-T2` slows it, `push@T1-T2` undoes a pull. With `--handle`, a continue is also what answers the lift prompt, in place of `--auto-confirm` (`sim/handle.py`) |
 | `python -m cyberdog.sim.run_building "take me upstairs" --nlu` | Parse the command through the Gemma layer (needs `.[language]`) |
+| `python -m cyberdog.sim.run_building "room 201" --vamos --vlm-latency 1.8` | VAMOS in the loop, repeatable tick for tick (fixed answer latency) |
+| `python -m cyberdog.sim.run_building "room 201" --lift-out-of-service` | Floor changes by the stairs, after asking twice (`--no-stairs`: never) |
 | `python -m cyberdog.sim.run_building "room 201" --speed 4` | Play the video back 4× faster (control still runs at 20 Hz) |
 | `python -m cyberdog.sim.scene.build_scene --building` | Rebuild all three storeys |
 | `python -m cyberdog.sim.scene.build_scene 2` | Rebuild one floor only |
+| `bash scripts/check.sh` | `pytest`, then the self-test, stopping at the first failure (`gate all` adds the full Gate D campaign, ~50 min) |
+| `python scripts/gate_d.py --seeds 1 2 3` | Gate D: map-only vs `--vamos`, paired run by run (needs the server; `tests/README.md`) |
+| `python scripts/planner_ab.py output/gate_d/<without> output/gate_d/<with>` | The planner's gate: two Gate D campaigns, `--planner map` vs `cerrt` |
 
 Three of these are also on your `PATH` after `pip install -e .`:
 `cyberdog-building`, `cyberdog-demo`, `cyberdog-record`.
@@ -315,8 +327,8 @@ details.
 |---|---|---|
 | [`language/`](src/cyberdog/language/README.md) | `"take me upstairs to the lab"` → structured destinations. gemma-2b-it + LoRA, with deterministic rules for splitting multi-stop commands and reading floor numbers. | `infer.py`, `command_splitter.py` |
 | [`mapping/`](src/cyberdog/mapping/README.md) | The ground truth: occupancy grids per floor, RDog-style semantic zones (stairs, grass, slow areas), and A* that respects both. | `occupancy_grid.py`, `behavior_layer.py`, `astar_planner.py` |
-| [`planning/`](src/cyberdog/planning/README.md) | Destination → route across floors, including which lift and which refusals. Then projects the next checkpoint into a camera pixel for the VLM. | `building_router.py`, `checkpoint_projector.py` |
-| [`sim/`](src/cyberdog/sim/README.md) | The twin: the Go2, a virtual Mid-360 LiDAR, perception, imagined rollouts, and VAMOS in the steering loop. | `run_building.py`, `sensing/` |
+| [`planning/`](src/cyberdog/planning/README.md) | Destination → route across floors, including lift or stairs and which refusals. Then projects the next checkpoint into a camera pixel for the VLM. CE-RRT\* plans the way round people. | `building_router.py`, `checkpoint_projector.py`, `ce_rrt.py` |
+| [`sim/`](src/cyberdog/sim/README.md) | The twin: the Go2, a virtual Mid-360 LiDAR, perception and tracking, imagined rollouts, the person on the handle, and VAMOS in the steering loop. | `run_building.py`, `sensing/` |
 
 `"map decides WHERE, VLM decides HOW"` is the division of labour between
 `planning/` and the VLM, and it is worth knowing before reading either.
@@ -330,25 +342,31 @@ src/cyberdog/
   paths.py            every filesystem location, in one place
   main_planner.py     command -> route, no simulator (needs [language])
   language/           the command parser
-  mapping/            grids, zones, A*
-  planning/           multi-floor routing + pixel projection
+  mapping/            grids, zones, A*, the keep-right lane
+  planning/           multi-floor routing, pixel projection, CE-RRT*
+  affordance/         the Isaac-trained walkability network (shadow mode)
   sim/
     control.py        the control law and its gains
     clearance.py      static clearance from the map (walls + no-go zones)
+    handle.py         the Smart Handle mock and the safety mux
+    autolabel.py      walked paths -> VAMOS training pairs
     overlay.py        drawing onto the camera frame
     vamos_client.py   the VLM as a service: 5 candidates -> 1 chosen
     scene/            building the MuJoCo XML
     robot/            the Go2: kinematics, gait, pose
-    sensing/          lidar -> perception -> dreaming
+    sensing/          lidar -> perception/tracking -> dreaming
     run_building.py   ENTRY POINT: full stack, three floors
     run_demo.py       one floor, headless
     record_demo.py    one floor, with video
 
 config/               map_config.yaml, camera_config.yaml
 data/building/        grids, meshes, locations.json, zones.json
-docs/                 spec.md, architecture.md
+docs/                 spec.md, architecture.md, dreaming_safety_kpis.md (the gates)
+scripts/              check.sh, gate_d.py, planner_ab.py, ce_rrt_calibrate.py, train_affordance.py
 scripts/mapping/      rebuilding grids and meshes from point clouds
 scripts/language/     interactive parser prompt
+scripts/vamos/        the VAMOS LoRA: collect, train, evaluate (deferred to hardware)
+scripts/isaac/        the affordance data collector for Isaac Lab
 tests/                unit tests + selftest.py (the layer-by-layer harness)
 vendor/VAMOS/         the upstream VAMOS repo and its VLM server
 
@@ -364,6 +382,23 @@ recorded video go to `output/`, weights to `models/`, generated datasets to
 ## What is and isn't verified
 
 Worth stating plainly, because the parts have different maturity.
+
+**Where the PoC stands (2026-10-15).** The gates in
+[`docs/dreaming_safety_kpis.md`](docs/dreaming_safety_kpis.md):
+
+| Gate | What it asks | Status |
+|---|---|---|
+| A | A learned dream beats the kinematic one | not run (future) |
+| B | The safety factor is discriminating, calibrated, stable | B1–B17 pass (`selftest.py dreaming`) |
+| C | VAMOS in shadow changes no command | pass, fake and real server |
+| D | `--vamos` no worse than map-only, 70 paired runs | pass, aware crowd, base VAMOS (2026-10-14); promotion not yet decided |
+| Planner | CE-RRT\* no worse than waiting, per arm | P2–P6 pass on both arms (2026-10-14); now the default |
+
+The VAMOS LoRA failed Gate D (D2, D3) and is deferred to real camera frames
+in the hardware phase. What the spec's Definition of Done still needs:
+every layer's failure logged and interpretable, the latency budget written
+down against the spec's targets, and the go/no-go report
+([`docs/spec.md`](docs/spec.md) §7).
 
 **Verified against ground truth.** The crates in `sim/scene/obstacles.py` are
 deliberately absent from the occupancy grid, so A* routes straight through them
@@ -457,8 +492,9 @@ to be binding.
   instead of 113 of 149, at a mean safety of 1.00. Nothing about the VLM changed — same
   server, same prompt, same gate — so read that as a fact about this corridor,
   not about zero-shot VAMOS. Where a turn does exceed its horizon the map still
-  makes it (`perception.free_destination`), until the LoRA fine-tune of spec
-  L4 s5 exists. **`--vamos` can still perform worse than without it** on a floor
+  makes it (`perception.free_destination`). The LoRA fine-tune of spec L4 s5
+  was tried on the twin's frames and failed Gate D, so it is deferred to the
+  hardware phase. **`--vamos` can still perform worse than without it** on a floor
   the map already describes well: it replaces a globally-correct A* line with a
   2 m horizon and throttles speed by its own confidence, costing 11 s on that
   route.
@@ -577,18 +613,22 @@ to be binding.
   What is left is not boxes: people walking into a dog that is standing and
   waiting, going round somebody who has stopped, overtaking in the same
   lane -- people heading west keep to the north lane (y = 10.40), which is
-  also the dog's lane (y ≈ 10.10), and pedestrians do not yet overtake on
-  the left -- and the person against a wall on a turn round somebody.
-- Perception has **no memory** — each scan stands alone. Fine for a 360° sensor
-  at 12 m, wrong the moment something is occluded. Tracking adds half a second
-  of it, enough for a velocity and not enough to survive an occlusion: someone
-  who steps behind a crate is a lost track.
-- By default the dog **stops** for a person rather than flowing around one.
-  `--planner cerrt` (spec L6 s2, `planning/ce_rrt.py`) goes round them on a
-  path planned where they will be, and halves the waiting, but still stops
-  where no path keeps P(contact) < 1%: the tracker's straight line is out by
-  1.3 m a second ahead, and a 2.5 m corridor often has no room for that.
-  Every run counts its stops, and with the planner why each one was a stop.
+  also the dog's lane (y ≈ 10.10), and the oblivious crowd does not overtake
+  on the left -- and the person against a wall on a turn round somebody.
+  These figures are the oblivious crowd with the dog waiting
+  (`--crowd oblivious --planner map`), the defaults before 2026-10-15.
+- Perception has **little memory**. A crate seen standing is remembered for
+  6 s once it is behind the dog (`perception.MEMORY_S`), because the
+  nose-down Mid-360 no longer sees it and the person on the handle still has
+  to pass it. Tracking keeps half a second of people, enough for a velocity
+  and not enough to survive an occlusion: someone who steps behind a crate is
+  a lost track.
+- By default the dog **goes round** people (`--planner cerrt`, spec L6 s2,
+  `planning/ce_rrt.py`) on a path planned where they will be, which halves
+  the waiting, but it still stops where no path keeps P(contact) < 1%: the
+  tracker's straight line is out by 1.3 m a second ahead, and a 2.5 m
+  corridor often has no room for that. Every run counts its stops, and why
+  each one was a stop. `--planner map` waits for everybody, as before.
 - The pedestrians are capsules on scripted legs, not a pedestrian model. They
   know one thing about the dog — do not walk into what is in front of you — and
   making them cleverer would quietly solve the robot's problem for it.

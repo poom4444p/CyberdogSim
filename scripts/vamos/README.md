@@ -32,7 +32,10 @@ the camera can first see the floor and cut where the path leaves the image.
 Each frame keeps two prompts: `prompt`, whose goal is that path's end
 (hindsight), and `map_prompt`, the projector's goal, which is what the live
 stack sends. Only clean runs are used: arrived, with no collision, no handle
-contact and no person contact.
+contact and no person contact. `collect.py` drives with `--crowd oblivious
+--planner map`, the setup the 2026-10 dataset was collected with, not
+`run_building`'s PoC defaults: the label is the path walked, and CE-RRT\*
+walks a different one round people.
 
 **Prompt.** `train_lora.py` and `evaluate.py` use `map_prompt` by default
 (`--prompt hindsight` for the other). The hindsight prompt hands the model

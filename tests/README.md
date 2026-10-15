@@ -10,14 +10,14 @@ conda activate cyberdog_sim
 
 | What | Command | Time | Needs |
 |---|---|---|---|
-| Unit tests | `pytest` | ~1 s | nothing |
+| Unit tests | `pytest` | ~5 s | nothing |
 | Self-test, every stage | `python tests/selftest.py` | ~1.5 min | the building scene |
 | Self-test, one stage | `python tests/selftest.py lidar` | 1–40 s | the building scene |
 | Location check | `python tests/test_locations.py` | ~2 s | nothing |
 | Location check with the parser | `python tests/test_locations.py --with-model` | slow | the trained parser |
 
 Before a commit, run `pytest` and `python tests/selftest.py`. Both should end
-clean (`193 passed`, `ALL PASS`).
+clean (`240 passed`, `ALL PASS`).
 
 ## Before the first run
 
@@ -51,14 +51,19 @@ pytest -q                               # quieter
 | `test_occupancy_grid.py` | The occupancy grid: construction, world ↔ grid coordinates, editing cells, save/load | 14 |
 | `test_astar.py` | The A\* planner: search, path simplification, checkpoints, config | 24 |
 | `test_behavior_layer.py` | Zones: point-in-zone tests, queries where zones overlap and what action wins, save/load | 22 |
-| `test_router_approach.py` | Where the dog stands when asked for a no-go place like the stairs, on every floor | 5 |
+| `test_router_approach.py` | Where the dog stands when asked for a no-go place like the stairs, on every floor | 9 |
 | `test_overlay_labels.py` | Room labels in the video: projected where the camera sees them, never overlapping | 16 |
-| `test_dataset.py` | The command parser's training vocabulary (no model needed) | 14 |
+| `test_dataset.py` | The command parser's training vocabulary (no model needed) | 22 |
 | `test_handle.py` | The Smart Handle mock and the safety mux: a tug stops and latches until continue, a pull lowers the pace, a push only undoes a pull, and no force leaves every command unchanged | 25 |
 | `test_affordance_data.py` | The affordance data contract shared with the Isaac Lab collector: the elevation patch (frame, highest-wins, NaN for unseen), the ground under the dog, the shard format; and the labels -- walkable / caution / not walkable, bumps measured on the path only, a ramp is a slope not a bump, the gait's own rocking is not a failure | 27 |
 | `test_affordance_model.py` | The affordance network's plumbing (needs torch): input features and the jump map (an unseen border is not an edge), left-right mirroring, the 0.2 refusal rule, save/load | 10 |
 | `test_affordance_runtime.py` | The affordance network on a running dog: the elevation memory (the ceiling is not ground, a person who walked on leaves no ghost, what was not seen again is remembered, it forgets after 3 m, a new floor starts empty, a wall the map knows reads as floor but a crate beside it does not) and the walk-ahead target in the dog's frame | 13 |
 | `test_router_stairs.py` | Lift or stairs for a floor change: the lift unless out of service or 2x and 30 m further; the stair waiting point is outside the stairwell; walking routes never cross one | 14 |
+| `test_ce_rrt.py` | CE-RRT\* on synthetic corridors (no map, no sim): a straight line when the corridor is empty, curves not pivots, passing someone walking towards it with the chance margin, no plan when the corridor is shut, same seed same plan, the warm start keeping its side, letting someone overtake, a goal short of the next corner, fast enough for the control loop | 11 |
+| `test_pedestrians.py` | The two crowds: oblivious (the stress test) and aware (makes room for the dog and its user), stepped by hand beside a dog that is just a pose | 11 |
+| `test_control.py` | `sim/control.py`: when a waypoint counts as reached | 6 |
+| `test_describe_person.py` | What the person on the handle is told about somebody the dog is waiting for | 6 |
+| `test_autolabel.py` | `sim/autolabel.py`: a walked path turned into a VAMOS training pair, checked against the projector the live loop uses | 10 |
 
 ## 2. Location check (`test_locations.py`)
 
@@ -106,7 +111,7 @@ every stage above it.
 | `vamos` | The VAMOS client against a **fake** server, and shadow mode (Gate C): steering and shadow runs give identical commands | ~20 s |
 | `affordance` | The affordance network (needs `models/affordance/mlp.pt`) walked up to every crate on the map with real scans: no walk into a box is passed, and a wall the map knows does not make it refuse. Reports, without failing, walks whose body only touches at the end and clear walks beside a box that it refuses | ~6 s |
 | `handle` | The person on the handle overrules the dog: a tug stops it where it stands until continue (walking and boarding the lift), with no continue the run ends there, the lift waits at its doors for a continue of its own, and an idle handle changes no command | ~5 s |
-| `run` | The whole stack on 8 routes across all 3 floors. Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~25 s |
+| `run` | The whole stack on 8 routes across all 3 floors, plus `room 201` with three people twice: as `run_building` runs by default (aware crowd, CE-RRT\*) and as the stress test (`--crowd oblivious --planner map`). Each must arrive with no collision, no pedestrian contact, and **no contact for the person on the handle** | ~45 s |
 
 The `vamos` stage runs its own stand-in server. It needs neither the real
 VLM server nor `vamos_mac`.
@@ -146,7 +151,9 @@ dog from the front, so it is mirrored: the dog's right is on the screen's left.
 ### Pedestrian sweep
 
 People make runs sensitive: one small change moves the whole run onto a
-different path. Judge a change on many seeds, not one:
+different path. Judge a change on many seeds, not one. This runs the defaults
+(aware crowd, CE-RRT\*); add `--crowd oblivious --planner map` for the stress
+test the 40-seed figures below were measured on:
 
 ```bash
 for s in $(seq 1 20); do
@@ -194,6 +201,11 @@ candidate runs). When that happens the script says so and prints the
 finished cleanly (a candidate run only if VAMOS answered every call) and
 drives the rest into the same directory, with the same routes and seeds.
 
+`gate_d.py` drives the aware crowd by default, as `run_building` does, but
+**not** CE-RRT\*: `--planner` stays `map`, because Gate D judges VAMOS, and
+with the planner in both arms one reshuffled encounter fails D3. Pass
+`--crowd oblivious` for the stress test.
+
 It prints one line per run as it finishes, then the D1–D8 table and
 `Gate D: PASS` or `FAIL` (exit code 0 or 1). Every run's full output is kept
 under `output/gate_d/<time>/`, with `summary.json` beside it. The candidate
@@ -207,6 +219,17 @@ One pair by hand, to look at a single result:
 python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video
 python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video \
     --vamos --vlm-latency 1.8
+```
+
+### The planner's gate (CE-RRT\* vs waiting)
+
+CE-RRT\* is judged against itself switched off, per arm, on Gate D's bars
+(P2-P7 in `docs/dreaming_safety_kpis.md`). Run two Gate D campaigns with the
+same routes, seeds, crowd and VAMOS model, the first with `--planner map` (the
+default) and the second with `--planner cerrt`, then compare them:
+
+```bash
+python scripts/planner_ab.py output/gate_d/<without> output/gate_d/<with>
 ```
 
 ---

@@ -18,7 +18,8 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = os.environ.get("KMP_DUPLICATE_LIB_OK") or "
 import json
 
 import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+from transformers import (AutoTokenizer, AutoModelForCausalLM, StoppingCriteria,
+                          StoppingCriteriaList)
 from peft import PeftModel
 
 BASE_MODEL_NAME = "unsloth/gemma-2b-it"
@@ -66,8 +67,39 @@ def load_model():
     return _tokenizer, _model
 
 
+def json_closed(text: str) -> bool:
+    """Has `text` finished its first JSON object -- every { opened so far closed?"""
+    depth = 0
+    for c in text:
+        if c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return True
+    return False
+
+
+class _JsonDone(StoppingCriteria):
+    """Stop generating once the answer's JSON closes.
+
+    The fine-tune never learned to stop: after its answer (~20 tokens) it
+    writes "model" and the same answer again until max_new_tokens, and only
+    the first copy is ever read (_extract_json). Measured on an M-series Mac,
+    "I need to pee": 100 tokens in 6.3 s as it was, 20 tokens in 1.4 s with
+    this, same answer.
+    """
+
+    def __init__(self, tokenizer, prompt_len):
+        self.tokenizer, self.prompt_len = tokenizer, prompt_len
+
+    def __call__(self, input_ids, scores, **kwargs):
+        return json_closed(self.tokenizer.decode(input_ids[0, self.prompt_len:]))
+
+
 def generate_raw(user_text: str, max_new_tokens: int = 100) -> str:
-    """Run the model on a user command and return its raw text output."""
+    """Run the model on a user command and return its raw text output,
+    up to the end of its first JSON object."""
     tokenizer, model = load_model()
 
     combined_text = SYSTEM_PROMPT + "\n\n" + user_text
@@ -75,8 +107,11 @@ def generate_raw(user_text: str, max_new_tokens: int = 100) -> str:
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
 
-    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens)
-    return tokenizer.decode(outputs[0][inputs.input_ids.shape[-1]:], skip_special_tokens=True)
+    prompt_len = inputs.input_ids.shape[-1]
+    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens,
+                             stopping_criteria=StoppingCriteriaList(
+                                 [_JsonDone(tokenizer, prompt_len)]))
+    return tokenizer.decode(outputs[0][prompt_len:], skip_special_tokens=True)
 
 
 def parse_command(user_text: str, max_new_tokens: int = 100) -> dict:

@@ -26,7 +26,6 @@ keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
 import collections
-import difflib
 import hashlib
 import json
 import math
@@ -40,6 +39,8 @@ import numpy as np
 
 
 from cyberdog import paths
+from cyberdog.language.place_match import (alias_place, movement, near_place,
+                                           numbers_to_digits)
 from cyberdog.planning import ce_rrt
 from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute, Transit
 from cyberdog.planning.checkpoint_projector import (load_camera_config,
@@ -290,55 +291,26 @@ BACK_V = 0.15             # m/s, backwards -- slow enough to feel deliberate on
                           # the handle rather than like a flinch
 BACK_STEP = 0.45          # how far behind is checked before reversing into it
 
-# Speech-to-text gets place names nearly right -- "libary", "chemistry lap",
-# "rest room" -- and an exact match refuses every one of them. The spec's PoC
-# intent parser is a "lookup/fuzzy match of destination against Behavior Layer
-# node list", so a near miss is matched too, but never taken on trust: the dog
-# says what it understood and waits for continue before it sets off.
-FUZZY_MIN = 0.8           # difflib ratio; "libary" is 0.92, "the chemistry" 0.69
-FUZZY_MARGIN = 0.05       # a runner-up this close is ambiguous: refuse, not guess
-
-
-def fuzzy_place(names, command):
-    """The place `command` nearly names, as (name, what was heard), or None.
-
-    Each name is compared with every run of as many words in the command, and
-    one more ("cafe teria"). Numbers must match exactly: "room 210" is a
-    different room from "room 201", not a misspelling of it. Two names about
-    as close as each other is a question this cannot answer, so it is None.
-    """
-    words = [w.strip(".,!?;:'\"") for w in command.lower().split()]
-    words = [w for w in words if w]
-    best = {}
-    for name in names:
-        n = len(name.split())
-        digits = [c for c in name if c.isdigit()]
-        for k in (n, n + 1):
-            for i in range(len(words) - k + 1):
-                heard = " ".join(words[i:i + k])
-                if [c for c in heard if c.isdigit()] != digits:
-                    continue
-                r = difflib.SequenceMatcher(None, heard, name).ratio()
-                if r > best.get(name, (0.0, ""))[0]:
-                    best[name] = (r, heard)
-    ranked = sorted(best.items(), key=lambda kv: kv[1][0], reverse=True)
-    if not ranked or ranked[0][1][0] < FUZZY_MIN:
-        return None
-    if len(ranked) > 1 and ranked[1][1][0] > ranked[0][1][0] - FUZZY_MARGIN:
-        return None
-    name, (_, heard) = ranked[0]
-    return name, heard
-
 
 def resolve_stops(router, text, use_nlu=False, guessed=None):
     """Command -> [(destination name, floor or None)], one entry per stop.
 
     Splitting and floor phrases are rules either way (that is where they live
-    in the pipeline); only the destination itself needs the model, and with
-    --nlu off it is matched against the map's own names instead -- exactly
-    first, then fuzzily (fuzzy_place). A fuzzy match is appended to `guessed`
-    as (stop index, name, what was heard), for main to confirm before the dog
-    moves.
+    in the pipeline). The destination is found cheapest and surest first:
+
+      1. a no-go place named out loud              -> as named (rules)
+      2. a map name in the text, as said           -> as named
+         ...or once number words are digits        -> a guess
+      3. a nickname ("toilet"), or a near miss     -> a guess (place_match)
+         on spelling or on sound
+      4. --nlu only: the Gemma parser, for         -> a guess, and only if
+         commands that name no place ("I need         its answer is a place
+         to pee")                                     on this map
+
+    So with --nlu on, a command that names its place never waits for the
+    model, and the model's answer is held to the map like everything else.
+    Every guess is appended to `guessed` as (stop index, name, what was
+    heard), for main to confirm before the dog moves.
     """
     from cyberdog.language.command_splitter import split_destinations
     from cyberdog.language.floor_parser import extract_floor
@@ -349,6 +321,9 @@ def resolve_stops(router, text, use_nlu=False, guessed=None):
         from cyberdog.language.infer import load_model, parse_command      # torch first, then the maps
         load_model()
         parse = parse_command
+    # No-go places are never matched by sound: they are taken only from their
+    # name said out loud (step 1).
+    hazards = {n for n in router.locations if router.hazard_place(n)}
 
     stops, floor = [], START_FLOOR
     for text_i in split_destinations(text):
@@ -366,25 +341,48 @@ def resolve_stops(router, text, use_nlu=False, guessed=None):
                 floor = requested
             continue
 
-        if parse is not None:
-            name = (parse(command).get("target_location") or "").strip().lower()
-            if name == UNKNOWN_LOCATION:
+        # Longest name first, so the most specific match wins when one
+        # location's name contains another's.
+        heard_as = numbers_to_digits(command).lower()
+        name = next((k for k in sorted(router.locations, key=len, reverse=True)
+                     if k in heard_as), "")
+        guess = None
+        if name and name not in command.lower():
+            guess = command.strip()            # "room two oh one": said as words
+        if not name:
+            near = (alias_place(router.locations, heard_as)
+                    or near_place(router.locations, heard_as, hazards))
+            if near is not None:
+                name, guess = near
+        if not name and movement(command):
+            # Not a trip, so not the model's to guess at (it answers "turn
+            # left" with the restroom). The dog only goes to places.
+            # Not quoted: command_splitter has made "turn left" "Go to turn left".
+            raise SystemExit(f'"{movement(command)}" is a movement, not a place. I can '
+                             f"take you to a place in this building: where would you "
+                             f"like to go?")
+        if not name and parse is not None:
+            try:
+                said = (parse(command).get("target_location") or "").strip().lower()
+            except ValueError:                 # the model's output was not JSON
+                said = ""
+            if said == UNKNOWN_LOCATION:
                 raise SystemExit(f"I don't know where that is: {text_i!r} names "
                                  f"no place in this building. Staying here.")
-        else:
-            # Longest name first, so the most specific match wins when one
-            # location's name contains another's.
-            name = next((k for k in sorted(router.locations, key=len, reverse=True)
-                         if k in command.lower()), "")
-            if not name:
-                near = fuzzy_place(router.locations, command)
-                if near is not None:
-                    name = near[0]
-                    if guessed is not None:
-                        guessed.append((len(stops), name, near[1]))
+            if said in router.locations:
+                name = said
+            elif said:
+                # The model said something near a place: held to the map
+                # like anything heard. Anything else is not on this map.
+                near = near_place(router.locations, said, hazards)
+                name = near[0] if near is not None else ""
+            guess = command.strip()
         if not name:
-            raise SystemExit(f"no destination found in {text_i!r} "
-                             f"(try --nlu, or name a place from locations.json)")
+            raise SystemExit(f"no destination found in {text_i!r}"
+                             + ("" if parse is not None else
+                                " (try --nlu, or name a place from locations.json)"))
+        if guess is not None and guessed is not None:
+            guessed.append((len(stops), name, guess))
         stops.append((name, requested))
         if requested is not None:
             floor = requested

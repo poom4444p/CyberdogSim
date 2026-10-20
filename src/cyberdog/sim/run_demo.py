@@ -9,69 +9,8 @@ import math
 
 from cyberdog import paths
 from cyberdog.planning.checkpoint_projector import load_camera_config, project_route
-from cyberdog.sim.control import (ARRIVE_R, GOAL_R, K_W, START_XY, TURN_ONLY,
-                                  advance, plan_route, wrap)
+from cyberdog.sim.control import GOAL_R, K_W, TURN_ONLY, advance, plan_route, wrap
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
-
-START_XY = (45.0, 4.0)          # main entrance, floor 1
-ARRIVE_R = 0.15                 # waypoint reached inside this -- keep it well
-                                # under half a door width (doors are 1.2 m) or the
-                                # dog turns early and clips the frame
-
-GOAL_R = 0.5
-K_W = 2.0                       # rad/s per rad of heading error
-TURN_ONLY = 0.8                 # above this error, pivot instead of walking
-
-
-def advance(i, x, y, waypoints):
-    """Move to the next waypoint once we are near it or have driven past it.
-
-    Distance alone is not enough: overshoot a waypoint by more than ARRIVE_R
-    and the dog turns back for it, overshoots again, and spins forever.
-    Projecting onto the segment catches the overshoot.
-    """
-    while i < len(waypoints) - 1:
-        px, py = waypoints[i - 1]
-        cx, cy = waypoints[i]
-        sx, sy = cx - px, cy - py
-        seg = sx * sx + sy * sy
-        t = ((x - px) * sx + (y - py) * sy) / seg if seg > 1e-9 else 1.0
-        if t >= 1.0 or math.hypot(cx - x, cy - y) < ARRIVE_R:
-            i += 1
-        else:
-            break
-    return i
-
-
-def wrap(a):
-    return (a + math.pi) % (2 * math.pi) - math.pi
-
-
-def plan_route(destination, start_xy=START_XY, floor=1):
-    """Waypoints to `destination` on this one floor.
-
-    The single-floor scenes (floor1.xml) have no lift and no other storeys,
-    so a destination elsewhere is sent to run_building.py rather than having
-    its legs from different floors strung together on this one. A refusal
-    (the stairs) is the sentence the user would hear, not a traceback.
-    """
-    router = BuildingRouter()
-    try:
-        target = router.resolve(destination, floor, start_xy, floor=floor)
-    except NoAccessibleRoute as refusal:
-        raise SystemExit(f"[voice] {refusal}")
-    if target is None:
-        floors = router.floors_of(destination)
-        if floors:
-            raise SystemExit(f"{destination} is on floor(s) {', '.join(map(str, floors))}, "
-                             f"not floor {floor}; this demo drives one floor -- "
-                             f"use: python -m cyberdog.sim.run_building")
-        raise SystemExit(f"unknown destination: {destination}")
-    legs = router.plan(floor, start_xy, target)
-    if not legs:
-        raise SystemExit("no route found")
-    return [(float(cp.position[0]), float(cp.position[1]))
-            for _, route in legs for cp in route.checkpoints]
 
 
 def drive(robot, waypoints, cam, max_steps=4000, verbose=True):

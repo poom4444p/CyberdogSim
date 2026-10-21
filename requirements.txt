@@ -15,5 +15,5 @@ pytest>=7.0.0
 
 # Optional extras, installed separately because they are large:
 #   pip install -e ".[language]"   gemma-2b-it LoRA (torch, transformers, peft, trl)
-#   pip install -e ".[mapping]"    rebuilding grids from point clouds (open3d, trimesh)
+#   pip install -e ".[mapping]"    rebuilding grids from point clouds (open3d, opencv-python)
 # The VAMOS VLM server has its own environment -- see vendor/VAMOS/environment_mac.yml

@@ -33,7 +33,7 @@ language = [
     "datasets>=2.18.0",
 ]
 # Rebuilding occupancy grids from point clouds.
-mapping = ["open3d>=0.17.0", "trimesh>=4.0.0"]
+mapping = ["open3d>=0.17.0", "opencv-python>=4.5.0"]
 dev = ["pytest>=7.0.0"]
 
 [project.scripts]

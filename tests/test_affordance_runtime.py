@@ -7,8 +7,10 @@ import math
 import numpy as np
 import pytest
 
-from cyberdog.affordance import data
-from cyberdog.affordance import runtime as R
+pytest.importorskip("torch")  # runtime.py imports model.py, which needs torch
+
+from cyberdog.affordance import data  # noqa: E402
+from cyberdog.affordance import runtime as R  # noqa: E402
 
 
 def _floor(x0, x1, y0, y1, z=0.0, step=0.05):

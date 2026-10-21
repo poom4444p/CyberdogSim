@@ -359,6 +359,12 @@ The one map-only miss (`room 101` seed 1, 173 s) predates these fixes.
       **Decided 2026-10-15: not promoted.** `--vamos` stays opt-in. It passes
       Gate D, narrowly, but it is base VAMOS, zero-shot on the twin's frames;
       it is retried once tuned on real camera frames (hardware phase, spec L4)
+- [x] **Decided 2026-10-21: base VAMOS is `run_building`'s default.** The
+      real-world release steers with VAMOS, so the simulation now runs the
+      configuration that will ship; `--no-vamos` is the map-only baseline, and
+      `scripts/gate_d.py` passes it explicitly. The evidence is unchanged: Gate
+      D passed in simulation only, narrowly on D6, with base VAMOS. Tuning on
+      real camera frames is still pending (spec L4)
 
 ---
 

@@ -89,6 +89,8 @@ def drive(route, seed, vamos, url, log_dir, crowd="oblivious", planner="map"):
            "--auto-confirm", "--no-video", "--crowd", crowd, "--planner", planner]
     if vamos:
         cmd += ["--vamos", "--vamos-url", url, "--vlm-latency", str(VLM_LATENCY)]
+    else:
+        cmd += ["--no-vamos"]   # VAMOS is run_building's default; the baseline is map-only
     t0 = time.time()
     p = subprocess.run(cmd, capture_output=True, text=True)
     out = p.stdout + p.stderr

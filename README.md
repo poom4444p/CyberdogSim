@@ -42,7 +42,7 @@ repo root. The steps are written for macOS on Apple Silicon; Linux notes are in
 | [3](#3-build-the-scene) | Build the 3D building | yes |
 | [4](#4-walk-the-dog) | Walk the dog | yes |
 | [5](#5-walk-the-dog-from-plain-english) | Walk the dog from plain English | needs step 2 |
-| [6](#6-optional-the-vlm-server) | Start the VLM server | optional, only for `--vamos` |
+| [6](#6-the-vlm-server) | Start the VLM server | for the default run; skip it with `--no-vamos` |
 | [7](#7-check-everything-works) | Run the tests | recommended |
 
 ### 1. Install
@@ -117,20 +117,30 @@ later, run it again.
 ### 4. Walk the dog
 
 ```bash
-python -m cyberdog.sim.run_building "room 201"
+python -m cyberdog.sim.run_building "room 201"              # needs the VLM server (step 6)
+python -m cyberdog.sim.run_building "room 201" --no-vamos   # map route only, no server
 ```
 
 That is the whole stack in one line: routing, the lift, voice announcements,
-LiDAR, obstacle avoidance, and a video written to
+LiDAR, obstacle avoidance, VAMOS in the steering loop, and a video written to
 `output/scene_cache/building.mp4`. Add `--no-video` for a faster run.
 
-It runs the **PoC configuration** by default, the one the safety gates passed
-on (`docs/dreaming_safety_kpis.md`, 2026-10-14): when there are people, they
+It runs the **release configuration** by default: VAMOS steers (`--vamos`),
+because the real-world robot needs it, and the map route stays the fallback
+whenever no VAMOS path passes the safety gate. When there are people, they
 behave as an aware crowd that makes room for the dog (`--crowd aware`), and
 the dog goes round them with CE-RRT\* instead of waiting (`--planner cerrt`).
-Only VAMOS is opt-in (`--vamos`, step 6), because it needs its server.
+This is the configuration Gate D passed on (`docs/dreaming_safety_kpis.md`,
+2026-10-14 and 2026-10-20), in simulation, with base VAMOS.
 
-At the end it prints a score:
+VAMOS needs its server (step 6). Without one, the run stops at once with
+`FAILED BY vamos: server is not answering`; start the server, or add
+`--no-vamos` to drive the map route alone. The same applies to every command
+below.
+
+At the end it prints a score (this example is from a `--no-vamos` run; with
+VAMOS the numbers differ a little, and extra `VAMOS floor` and `VLM ASYNC`
+lines report its calls):
 
 ```
 ARRIVED on floor 1 at (33.1, 4.5) after 32s of sim time
@@ -160,11 +170,12 @@ And with people walking the corridors, which are on no map:
 python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1
 ```
 
-### 6. (Optional) The VLM server
+### 6. The VLM server
 
-Only needed for `--vamos`, which puts the VAMOS vision-language model in the
-steering loop. The dog navigates and avoids obstacles without it. It runs in a
-second environment, the same split the real robot has, where the VLM is a
+Needed for the default run, which puts the VAMOS vision-language model in the
+steering loop. With `--no-vamos` the dog still navigates and avoids obstacles
+on the map route alone, so you can skip this step for a first run. It runs in
+a second environment, the same split the real robot has, where the VLM is a
 service rather than an import.
 
 ```bash
@@ -197,7 +208,7 @@ expect a long pause. From another terminal, check it is up, then run with it:
 curl -s http://127.0.0.1:8009/health && echo " — server up"
 
 conda activate cyberdog_sim
-python -m cyberdog.sim.run_building "room 201" --vamos
+python -m cyberdog.sim.run_building "room 201"
 ```
 
 `--vamos` can score *worse* than without it on a floor the map already solves;
@@ -290,12 +301,14 @@ or re-activate the conda environment.
 ## Command reference
 
 All commands run in `cyberdog_sim`, from the repo root. Flags combine freely.
+Every `run_building` command steers with VAMOS and needs the VLM server
+(step 6) unless it passes `--no-vamos`.
 
 | Command | What it does |
 |---|---|
-| `python -m cyberdog.sim.run_building "room 201"` | Full stack, three floors, with video |
+| `python -m cyberdog.sim.run_building "room 201"` | Full stack, three floors, VAMOS steering, with video (needs the server) |
 | `python -m cyberdog.sim.run_building "room 201" --no-video` | Same, faster — no rendering |
-| `python -m cyberdog.sim.run_building "room 201" --vamos` | VLM in the steering loop (needs the server) |
+| `python -m cyberdog.sim.run_building "room 201" --no-vamos` | Map route only, no VLM server needed |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3` | People walking the corridors, on no map — the dog goes round them (CE-RRT\*), and waits only where no path is safe |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --crowd oblivious --planner map` | The stress test: people who only stop for a dog right in front of them, and a dog that waits for them instead of going round |
 | `python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 4` | Same, a different crowd (a seed is reproducible) |
@@ -393,7 +406,7 @@ Worth stating plainly, because the parts have different maturity.
 | A | A learned dream beats the kinematic one | not run (future) |
 | B | The safety factor is discriminating, calibrated, stable | B1–B17 pass (`selftest.py dreaming`) |
 | C | VAMOS in shadow changes no command | pass, fake and real server |
-| D | `--vamos` no worse than map-only, 70 paired runs | pass, aware crowd, base VAMOS (2026-10-14); **not promoted**: `--vamos` stays opt-in until it is tuned on real frames |
+| D | `--vamos` no worse than map-only, 70 paired runs | pass, aware crowd, base VAMOS (2026-10-14, rerun 2026-10-20), in simulation only; **made the default 2026-10-21** because the real-world release steers with VAMOS. Fine-tuning still waits for real camera frames |
 | Planner | CE-RRT\* no worse than waiting, per arm | P2–P6 pass on both arms (2026-10-14); now the default |
 
 The VAMOS LoRA failed Gate D (D2, D3) and is deferred to real camera frames

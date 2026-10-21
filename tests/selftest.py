@@ -738,7 +738,7 @@ def vamos():
         base = [sys.executable, "-m", "cyberdog.sim.run_building", "room 101",
                 "--auto-confirm", "--no-video"]
         outs = [subprocess.run(base + extra, capture_output=True, text=True)
-                for extra in ([], [], ["--shadow", "--shadow-log", log,
+                for extra in (["--no-vamos"], ["--no-vamos"], ["--shadow", "--shadow-log", log,
                                        "--vamos-url", fake.url])]
         # Steering, with answers held back by the real server's ~1.8 s
         # rather than the fake's few milliseconds. See Run.ask_vamos.
@@ -878,7 +878,7 @@ def run():
     for dest, expect, extra in cases:
         out = subprocess.run(
             [py, "-m", "cyberdog.sim.run_building", dest,
-             "--auto-confirm", "--no-video"] + extra,
+             "--auto-confirm", "--no-video", "--no-vamos"] + extra,
             capture_output=True, text=True).stdout
         arrived = "ARRIVED" in out
         hit = "COLLISIONS:" in out or "CONTACT:" in out
@@ -918,7 +918,7 @@ def handle():
     import subprocess
 
     base = [sys.executable, "-m", "cyberdog.sim.run_building", "--auto-confirm",
-            "--no-video"]
+            "--no-video", "--no-vamos"]
     runs = {"plain": ["restroom"],
             "idle": ["restroom", "--handle", "continue@999"],
             "tug": ["restroom", "--handle", "tug@10,continue@15"],

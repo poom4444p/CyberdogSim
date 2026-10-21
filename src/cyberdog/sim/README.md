@@ -43,7 +43,7 @@ python -m cyberdog.sim.run_building "go to the server room"
 python -m cyberdog.sim.run_building "library on the 2nd floor, then the server room"
 python -m cyberdog.sim.run_building "restroom on floor 3" --no-video    # fast, headless
 python -m cyberdog.sim.run_building "server room" --nlu                 # through the Gemma layer
-python -m cyberdog.sim.run_building "server room" --vamos               # VLM steering
+python -m cyberdog.sim.run_building "server room" --no-vamos            # map route only, no VLM server
 python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 python -m cyberdog.sim.run_building "server room" --speed 2            # play back 2x faster
 python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1  # people in the corridors
@@ -57,8 +57,10 @@ gate passed on (`docs/dreaming_safety_kpis.md`, 2026-10-14): an aware crowd
 going round people (`--planner cerrt`). Neither changes anything in an empty
 building. `--crowd oblivious --planner map` is the stress test every result
 before 2026-10-12 was measured on, where people only stop for a dog right in
-front of them and the dog waits for them. `--vamos` stays opt-in, because it
-needs the VLM server.
+front of them and the dog waits for them. VAMOS steers by default too
+(`--vamos`, made the default 2026-10-21 because the real-world release needs
+it), so the VLM server must be running; `--no-vamos` drives the map route
+alone.
 
 ### The one that shows everything
 
@@ -477,7 +479,7 @@ Scored on ground truth the robot never sees, six seeds of three people on the
 floor-2 route:
 
 ```
-python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1 --no-video
+python -m cyberdog.sim.run_building "room 201" --pedestrians 3 --seed 1 --no-video --no-vamos
   ARRIVED on floor 2 at (3.0, 4.5) after 102s of sim time
   collisions: none -- the dog never entered an obstacle's footprint
   people: 6 times it stopped to let someone past, 16.7s waiting in total
@@ -542,10 +544,10 @@ cannot see coming.
 -- ground truth, never shown to the robot, which finds these with the LiDAR or
 not at all -- and prints the result.
 
-Map-only, no `--vamos`:
+Map-only (`--no-vamos`):
 
 ```
-python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video
+python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video --no-vamos
   ARRIVED on floor 2 at (3.1, 4.5) after 83s of sim time
   obstacles: up to 328 returns the map could not explain, 0.0s crawling, 0.0s stopped, least clearance ahead 0.11 m
   collisions: none -- the dog never entered an obstacle's footprint

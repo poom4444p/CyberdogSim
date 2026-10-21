@@ -132,7 +132,8 @@ avoidance or people.
 ### One route, with its full report
 
 ```bash
-python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video
+python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video              # needs the VLM server
+python -m cyberdog.sim.run_building "room 201" --auto-confirm --no-video --no-vamos   # map route only
 ```
 
 The last lines are the verdict. Lines in capitals are problems:
@@ -155,8 +156,9 @@ dog from the front, so it is mirrored: the dog's right is on the screen's left.
 
 People make runs sensitive: one small change moves the whole run onto a
 different path. Judge a change on many seeds, not one. This runs the defaults
-(aware crowd, CE-RRT\*); add `--crowd oblivious --planner map` for the stress
-test the 40-seed figures below were measured on:
+(VAMOS, aware crowd, CE-RRT\*), so the VLM server must be up; add
+`--no-vamos --crowd oblivious --planner map` for the map-only stress test the
+40-seed figures below were measured on:
 
 ```bash
 for s in $(seq 1 20); do
@@ -219,7 +221,8 @@ against D8: it would otherwise pass by quietly being the baseline.
 One pair by hand, to look at a single result:
 
 ```bash
-python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video
+python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video \
+    --no-vamos
 python -m cyberdog.sim.run_building "room 101" --pedestrians 3 --seed 1 --auto-confirm --no-video \
     --vamos --vlm-latency 1.8
 ```
@@ -245,7 +248,8 @@ python scripts/planner_ab.py output/gate_d/<without> output/gate_d/<with>
 - **`ModuleNotFoundError: cyberdog` or `mujoco`** -- wrong environment. Run
   `conda activate cyberdog_sim`, or `pip install -e ".[language,dev]"` if it
   was never installed.
-- **`VAMOS server is not answering`** -- only `--vamos` / `--shadow` runs need
-  it. Start it (main README, step 6) or drop the flag.
+- **`VAMOS server is not answering`** -- `run_building` steers with VAMOS by
+  default, and `--shadow` asks it too. Start it (main README, step 6), or pass
+  `--no-vamos` for the map route alone.
 - **A `run` route fails** -- rerun that one route by hand (section 4) to see
   its full report, then run the lower stages to find which layer moved.

@@ -17,7 +17,7 @@ button -- a human does that, and presses continue.
     python -m cyberdog.sim.run_building "go to the library on the 2nd floor, then the server room"
     python -m cyberdog.sim.run_building "restroom on floor 3" --no-video   # fast, headless
     python -m cyberdog.sim.run_building "server room" --nlu                # through the Gemma layer
-    python -m cyberdog.sim.run_building "server room" --vamos              # VLM in the steering loop
+    python -m cyberdog.sim.run_building "server room" --no-vamos           # map route only, no VLM server
     python -m cyberdog.sim.run_building "server room" --shadow             # VLM + dream, map still drives
     python -m cyberdog.sim.run_building "server room" --auto-confirm       # don't wait at the lift
 
@@ -871,7 +871,8 @@ class Run:
                             sample=self.vamos_sample)
             if not p.available():
                 raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
-                                 "start vendor/VAMOS/server/vlm_server.py first")
+                                 "start vendor/VAMOS/server/vlm_server.py first, "
+                                 "or pass --no-vamos to drive the map route alone")
             self.policies[floor] = p
         return self.policies[floor]
 
@@ -2436,7 +2437,9 @@ def main():
     ap.add_argument("--out", default=str(paths.SCENE_CACHE / "building.mp4"))
     ap.add_argument("--no-video", action="store_true", help="drive without rendering")
     ap.add_argument("--nlu", action="store_true", help="parse through the Gemma layer")
-    ap.add_argument("--vamos", action="store_true", help="VLM in the steering loop")
+    ap.add_argument("--vamos", action=argparse.BooleanOptionalAction, default=None,
+                    help="VLM in the steering loop (the default: the real robot "
+                         "steers with VAMOS); --no-vamos drives the map route alone")
     ap.add_argument("--shadow", action="store_true",
                     help="ask VAMOS and score its paths with the dream, but let the map "
                          "route drive; every call is logged to --shadow-log")
@@ -2501,6 +2504,10 @@ def main():
         # The label is the path the map-only stack walked. Under --vamos it
         # would be VAMOS's own answer, and the model would be trained on itself.
         ap.error("--autolabel records map-only runs; drop --vamos")
+    # On unless asked otherwise: --shadow never lets VAMOS steer, and
+    # --autolabel records the map-only walk.
+    if args.vamos is None:
+        args.vamos = not (args.shadow or args.autolabel)
     try:
         handle = HandleScript(args.handle)
     except ValueError as bad:

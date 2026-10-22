@@ -29,3 +29,7 @@ datasets/
 # --- VAMOS LoRA training: its log and the dataset tarball sent to the GPU box
 /train.log
 /vamos_train.tgz
+
+# Slide decks and Office lock files stay local
+*.pptx
+~$*

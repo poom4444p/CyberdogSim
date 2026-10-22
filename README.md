@@ -443,9 +443,9 @@ hardware phase, on real camera frames from the real building.
 
 - Gate D's time margin is narrow: `cafeteria` (+15%) and `room 201` (+18%)
   are the slow routes.
-- Under 1.5× sensor noise some passed paths collide often (B11), and paths
-  scoring near the 0.5 gate can flip between seeds (B14). Both are report-only;
-  `selftest.py dreaming` prints the counts.
+- Under 1.5× motion noise (heading, speed, slip) some passed paths collide
+  often (B11), and paths scoring near the 0.5 gate can flip between seeds
+  (B14). Both are report-only; `selftest.py dreaming` prints the counts.
 - People stand still inside the dream (it reads the last LiDAR scan), and
   the pedestrians are scripted capsules, not a pedestrian model.
 - CE-RRT\* still stops where no path keeps P(contact) < 1%, which in a 2.5 m

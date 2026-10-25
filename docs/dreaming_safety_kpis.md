@@ -149,8 +149,26 @@ is chosen, and with nothing surviving or the server down it returns no path.
 
 - [x] Shadow trace verified: the dream never changed a command (fake server)
 - [x] Same, with the real VAMOS server
+- [x] Re-run on the current code (2026-10-22): still identical
 
-Real-server run, 2026-09-29, `room 101`, commit `7f422db`, VAMOS on `mps`,
+Real-server re-run, 2026-10-22, `room 101`, code at `d7014f1` (aware crowd,
+CE-RRT\*, VAMOS by beam search):
+
+| | Map-only (run twice) | Shadow (real VAMOS) |
+|---|---|---|
+| Commands | 1366 ticks, sha256 `ccee26c44a60092f` (both runs) | 1366 ticks, sha256 `ccee26c44a60092f` |
+| Outcome | ARRIVED, 71 s, no collisions, handle untouched | ARRIVED, 71 s, no collisions, handle untouched |
+| VAMOS answers | — | 31 (32 asked, 1 dropped at the leg's end), 1.8 s old on arrival |
+| Candidates rejected | — | 15, of which 5 by the gate (10 through a wall or obstacle) |
+| C3 `steer` | — | 1 of 31 calls |
+| C3 `none` | — | 3 of 31 calls |
+
+Logs: `output/gate_c/20261022-room101/` (`map1.log`, `map2.log`,
+`shadow_real.log`, `shadow_real.jsonl`). Still one run of one route, so C3
+stays indicative. Beam search makes VAMOS give fewer `none` answers than
+the run below, which used `temperature=1.0` sampling (3 of 31 against 17 of 29).
+
+Earlier real-server run, 2026-09-29, `room 101`, commit `7f422db`, VAMOS on `mps`,
 answers arriving asynchronously at their measured latency:
 
 | | Map-only | Shadow (real VAMOS) |
@@ -353,8 +371,32 @@ Logs: `output/gate_d/20261014-113902`. The fixes:
 
 The one map-only miss (`room 101` seed 1, 173 s) predates these fixes.
 
+### 2026-10-20: release configuration, CE-RRT\* on both arms (70 pairs)
+
+`--crowd aware --planner cerrt`, `mateoguaman/vamos`, `--vlm-latency 1.8`,
+seeds 1–10. This is the configuration `run_building` ships with. Unlike the
+2026-10-14 with-planner campaign (D3 failed, see the planner's gate), it
+passes D3.
+
+| KPI | map-only | `--vamos` | |
+|---|---|---|---|
+| D1 pairs complete | 70 | 70 | PASS |
+| D2 collisions + handle (s) | 0.0 | 0.0 | PASS |
+| D3 pedestrian contact (s) | 0.0 | 0.0 | PASS |
+| D4 stair / no-go entries | 0 | 0 | PASS |
+| D5 arrivals | 70/70 | 70/70 | PASS |
+| D6 mean time (s) | 57.5 | 61.4 (+6.8%) | PASS |
+| D7 closest person, mean / worst (m) | 2.81 / 0.86 | 2.80 / 0.86 | report |
+| D8 missing / VAMOS unused | – | 0 / 0 | PASS |
+
+Logs: `output/gate_d/20261020-172845`. D6 passes narrowly: the bootstrap
+95% CI on the time cost is +3.6% to +10.4%, and two routes are slow on
+their own (`cafeteria` +15%, `room 201` +18%).
+
 - [x] D1–D8 all pass (2026-10-08, `output/gate_d/20261008-120028`)
 - [x] D1–D8 all pass, aware crowd (2026-10-14, `output/gate_d/20261014-113902`)
+- [x] D1–D8 all pass, release configuration with CE-RRT\* (2026-10-20,
+      `output/gate_d/20261020-172845`)
 - [x] Promotion is an explicit decision; never promote from selftest alone.
       **Decided 2026-10-15: not promoted.** `--vamos` stays opt-in. It passes
       Gate D, narrowly, but it is base VAMOS, zero-shot on the twin's frames;
@@ -423,6 +465,16 @@ passer-by's line.
       ≥ 10 Hz). P2–P6 pass on both arms (`output/gate_d/20261015-115039`).
       Pedestrian contact on the VAMOS arm fell from 0.8 s at 5 Hz to 0; the
       dog goes round people a little more often (map arm 77 → 98)
+- [x] Re-run 2026-10-20 at 10 Hz on the current code. Without:
+      `output/gate_d/20261020-192951` (it matches 2026-10-14 run for run).
+      With: `output/gate_d/20261020-172845`. P2–P6 pass on both arms:
+
+      | KPI | map-only without → with | `--vamos` without → with |
+      |---|---|---|
+      | P3 pedestrian contact (s) | 1.7 → 0.0 | 1.2 → 0.0 |
+      | P5 arrivals | 69 → 70 | 70 → 70 |
+      | P6 mean time (s) | 54.8 → 57.5 (+4.9%) | 59.3 → 61.4 (+3.5%) |
+      | P7 waiting (s) / gone round | 182.9 → 85.7 / 0 → 98 | 226.1 → 135.2 / 0 → 108 |
 - [ ] Margin re-measured on real people (`scripts/ce_rrt_calibrate.py` wants
       ground truth: a ceiling camera or a motion-capture room)
 

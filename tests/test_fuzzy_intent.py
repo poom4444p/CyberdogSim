@@ -11,8 +11,10 @@ import types
 
 import pytest
 
-from cyberdog.language.place_match import (ALIASES, alias_place, fuzzy_place, near_place,
-                                           numbers_to_digits, sound)
+from cyberdog.language.generate_dataset import IMPLICIT_SLANG
+from cyberdog.language.place_match import (ALIASES, NEEDS, alias_place, fuzzy_place,
+                                           near_place, need_place, numbers_to_digits,
+                                           sound)
 from cyberdog.planning.building_router import BuildingRouter
 from cyberdog.sim.run_building import resolve_stops
 
@@ -37,7 +39,7 @@ def test_near_misses_are_matched(router, said, place):
     "take me to room 211",          # no such room; 201 and 210 are not typos of it
     "take me to the moon",
     "take me to the chemistry",     # half a name is not a name
-    "I need to pee",                # no name at all: that is --nlu's job
+    "I need to pee",                # no name at all: that is need_place's job
 ])
 def test_doubtful_is_refused(router, said):
     assert fuzzy_place(router.locations, said) is None
@@ -148,8 +150,8 @@ def hazards(router):
 @pytest.fixture
 def model(monkeypatch):
     """A stand-in for language/infer.py: no torch, and it counts its calls."""
-    answers = {"I need to pee right now": "restroom", "I need to pee": "restroom", "take me to the moon": "unknown",
-               "I want to borrow a book": "librery", "go somewhere nice": "the beach",
+    answers = {"I could do with a bite": "cafeteria", "take me to the moon": "unknown",
+               "somewhere to print my essay": "librery", "go somewhere nice": "the beach",
                "garble": ValueError}
     calls = []
 
@@ -177,13 +179,13 @@ def test_nlu_is_not_asked_when_a_place_is_named(router, model):
 
 def test_nlu_answer_is_confirmed(router, model):
     guessed = []
-    assert resolve_stops(router, "I need to pee", use_nlu=True,
-                         guessed=guessed) == [("restroom", None)]
-    assert guessed == [(0, "restroom", "I need to pee")]
+    assert resolve_stops(router, "I could do with a bite", use_nlu=True,
+                         guessed=guessed) == [("cafeteria", None)]
+    assert guessed == [(0, "cafeteria", "I could do with a bite")]
 
 
 def test_nlu_near_name_is_held_to_the_map(router, model):
-    assert resolve_stops(router, "I want to borrow a book", use_nlu=True) == [("library", None)]
+    assert resolve_stops(router, "somewhere to print my essay", use_nlu=True) == [("library", None)]
 
 
 @pytest.mark.parametrize("said", ["take me to the moon", "go somewhere nice", "garble"])
@@ -194,11 +196,11 @@ def test_nlu_unknown_or_off_map_or_broken_is_a_refusal(router, model, said):
 
 def test_one_stop_by_name_one_by_model(router, model):
     guessed = []
-    stops = resolve_stops(router, "go to the libary, then I need to pee", use_nlu=True,
-                          guessed=guessed)
-    assert stops == [("library", None), ("restroom", None)]
-    assert [c.lower() for c in model] == ["i need to pee"]
-    assert [g[:2] for g in guessed] == [(0, "library"), (1, "restroom")]
+    stops = resolve_stops(router, "go to the libary, then I could do with a bite",
+                          use_nlu=True, guessed=guessed)
+    assert stops == [("library", None), ("cafeteria", None)]
+    assert [c.lower() for c in model] == ["i could do with a bite"]
+    assert [g[:2] for g in guessed] == [(0, "library"), (1, "cafeteria")]
 
 
 # --- movements are not trips ------------------------------------------------------
@@ -256,3 +258,41 @@ def test_stairs_have_no_nicknames(router):
     assert "steps" not in ALIASES and "stairs" not in ALIASES.values()
     with pytest.raises(SystemExit):
         resolve_stops(router, "take a few steps back")
+
+
+# --- needs: "I need to pee" without the model -------------------------------------
+
+@pytest.mark.parametrize("said, place", [(t, p) for t, p in IMPLICIT_SLANG if p != "lift"])
+def test_every_slang_phrase_is_read_without_the_model(router, said, place):
+    # The phrases the Gemma parser is taught (generate_dataset.IMPLICIT_SLANG):
+    # the rules must read each one, so turning --nlu off loses none of them.
+    guessed = []
+    assert resolve_stops(router, said, guessed=guessed) == [(place, None)]
+    assert [g[:2] for g in guessed] == [(0, place)]          # asked before moving
+
+
+def test_a_need_is_read_before_the_model(router, model):
+    guessed = []
+    assert resolve_stops(router, "I need to pee", use_nlu=True,
+                         guessed=guessed) == [("restroom", None)]
+    assert model == [] and guessed == [(0, "restroom", "pee")]
+
+
+def test_needs_need_whole_words(router):
+    assert need_place(router.locations, "are you ready") is None          # "read"
+    assert need_place(router.locations, "check facebook") is None         # "book"
+    assert need_place(router.locations, "speak up please") is None        # "pee"
+
+
+def test_two_needs_for_two_places_are_refused(router):
+    assert need_place(router.locations, "I'm hungry and I need to pee") is None
+    with pytest.raises(SystemExit):
+        resolve_stops(router, "I'm hungry and I need to pee")
+
+
+def test_two_needs_for_one_place_are_fine(router):
+    assert need_place(router.locations, "I'm hungry, let's eat")[0] == "cafeteria"
+
+
+def test_no_need_leads_to_the_stairs_or_the_lift():
+    assert "stairs" not in NEEDS and "lift" not in NEEDS

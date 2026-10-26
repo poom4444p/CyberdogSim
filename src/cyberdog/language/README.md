@@ -96,7 +96,10 @@ canonical name (e.g. `"lib"` → `library`, `"caf"` → `cafeteria`, `"310"` in
 context → `room 310`). A small set of **implicit slang** phrases imply a
 destination without naming any room at all (`"I need to pee"` → `restroom`,
 `"I'm starving"` → `cafeteria`, `"let's hit the books"` → `library`) — see
-`implicit_slang` in `generate_dataset.py` to add more.
+`IMPLICIT_SLANG` in `generate_dataset.py` to add more. The dog reads these
+without the model too: `NEEDS` in `place_match.py` holds their key words, and
+`tests/test_fuzzy_intent.py` fails if a phrase in `IMPLICIT_SLANG` is not read
+by it. Add a phrase to both.
 
 Two task types: `navigation` (go somewhere, `query` is `null`) and
 `visual_qa` (go somewhere and answer a yes/no question about it, `query`

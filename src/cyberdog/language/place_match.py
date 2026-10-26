@@ -144,6 +144,46 @@ def alias_place(names, command):
     return None
 
 
+# --- needs ----------------------------------------------------------------------
+# "I need to pee", "I'm starving": a command that names a need, not a place.
+# These used to be --nlu's job, which means loading the Gemma parser on the
+# dog for a handful of phrases. As rules they need no model, and the GPU stays
+# free for VAMOS. The words are those of generate_dataset.IMPLICIT_SLANG, the
+# phrases the model is taught; a test holds every one of those to this table.
+# Not the lift ("another floor" is floor_parser's) and never the stairs.
+NEEDS = {
+    "restroom": ["pee", "potty", "number 1", "number 2", "nature's calling",
+                 "wash my hands", "freshen up"],
+    "cafeteria": ["hungry", "starving", "eat", "food", "lunch", "lunchtime",
+                  "thirsty", "drink", "coffee"],
+    "library": ["study", "read", "book", "books"],
+    "main entrance": ["leave", "get me out", "out of this building",
+                      "done for the day", "go home"],
+}
+
+
+def need_place(names, command):
+    """The place a need in `command` points to, as (place, need), or None.
+
+    Whole words only ("read" is not in "ready", "book" not in "facebook").
+    Needs that point to two different places ("hungry, and I need to pee")
+    are a question this cannot answer, so None. Like a nickname, a need is a
+    guess: the caller asks before the dog moves.
+    """
+    low = command.lower()
+    found = {}
+    for place, words in NEEDS.items():
+        if place not in names:
+            continue
+        for word in sorted(words, key=len, reverse=True):
+            if re.search(rf"\b{re.escape(word)}\b", low):
+                found.setdefault(place, word)
+                break
+    if len(found) != 1:
+        return None
+    return next(iter(found.items()))
+
+
 # --- movements ----------------------------------------------------------------
 # "turn left" names no place, so it used to reach the Gemma parser, which was
 # fine-tuned on destinations and always answers with one: "turn left" came

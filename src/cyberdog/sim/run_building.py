@@ -40,7 +40,7 @@ import numpy as np
 
 from cyberdog import paths
 from cyberdog.language.place_match import (alias_place, movement, near_place,
-                                           numbers_to_digits)
+                                           need_place, numbers_to_digits)
 from cyberdog.planning import ce_rrt
 from cyberdog.planning.building_router import BuildingRouter, NoAccessibleRoute, Transit
 from cyberdog.planning.checkpoint_projector import (load_camera_config,
@@ -303,9 +303,10 @@ def resolve_stops(router, text, use_nlu=False, guessed=None):
          ...or once number words are digits        -> a guess
       3. a nickname ("toilet"), or a near miss     -> a guess (place_match)
          on spelling or on sound
-      4. --nlu only: the Gemma parser, for         -> a guess, and only if
-         commands that name no place ("I need         its answer is a place
-         to pee")                                     on this map
+      4. a need ("I need to pee", "I'm starving")  -> a guess (place_match)
+      5. --nlu only: the Gemma parser, for         -> a guess, and only if
+         commands no rule reads ("I could do          its answer is a place
+         with a bite")                                on this map
 
     So with --nlu on, a command that names its place never waits for the
     model, and the model's answer is held to the map like everything else.
@@ -351,7 +352,8 @@ def resolve_stops(router, text, use_nlu=False, guessed=None):
             guess = command.strip()            # "room two oh one": said as words
         if not name:
             near = (alias_place(router.locations, heard_as)
-                    or near_place(router.locations, heard_as, hazards))
+                    or near_place(router.locations, heard_as, hazards)
+                    or need_place(router.locations, heard_as))
             if near is not None:
                 name, guess = near
         if not name and movement(command):

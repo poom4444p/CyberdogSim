@@ -86,6 +86,34 @@ HELD_OUT_NAV_TEMPLATES = [
 ]
 HELD_OUT_UNKNOWN_PLACES = ["sports field", "chapel", "pharmacy"]
 
+# Slang phrases that imply a destination without naming any room at all
+# (e.g. "I need to pee" -> restroom). Navigation-only, no query field.
+# Module level so place_match.NEEDS can be tested against it: the rules the
+# dog runs without --nlu must read every one of these as the model is taught.
+IMPLICIT_SLANG = [
+    ("I need to pee.", "restroom"),
+    ("I need to go number 1.", "restroom"),
+    ("I need to go number 2.", "restroom"),
+    ("I gotta go potty.", "restroom"),
+    ("Nature's calling.", "restroom"),
+    ("I need to use the bathroom real quick.", "restroom"),
+    ("I'm starving, let's go eat.", "cafeteria"),
+    ("I need to grab some food.", "cafeteria"),
+    ("I'm hungry, take me somewhere to eat.", "cafeteria"),
+    ("I need to go study.", "library"),
+    ("Let's go hit the books.", "library"),
+    ("I need to wash my hands.", "restroom"),
+    ("I have to freshen up.", "restroom"),
+    ("I'm thirsty, let's get a drink.", "cafeteria"),
+    ("Let's grab a coffee.", "cafeteria"),
+    ("It's lunchtime.", "cafeteria"),
+    ("I need somewhere quiet to read.", "library"),
+    ("I want to borrow a book.", "library"),
+    ("Get me out of this building.", "main entrance"),
+    ("I'm done for the day, let's leave.", "main entrance"),
+    ("I need to get to another floor.", "lift"),
+]
+
 
 def _generate_room_codes():
     codes = []
@@ -167,31 +195,7 @@ def generate_synthetic_dataset(num_samples=1000, held_out=False):
         "there are obstacles on the floor"
     ]
 
-    # Slang phrases that imply a destination without naming any room at all
-    # (e.g. "I need to pee" -> restroom). Navigation-only, no query field.
-    implicit_slang = [
-        ("I need to pee.", "restroom"),
-        ("I need to go number 1.", "restroom"),
-        ("I need to go number 2.", "restroom"),
-        ("I gotta go potty.", "restroom"),
-        ("Nature's calling.", "restroom"),
-        ("I need to use the bathroom real quick.", "restroom"),
-        ("I'm starving, let's go eat.", "cafeteria"),
-        ("I need to grab some food.", "cafeteria"),
-        ("I'm hungry, take me somewhere to eat.", "cafeteria"),
-        ("I need to go study.", "library"),
-        ("Let's go hit the books.", "library"),
-        ("I need to wash my hands.", "restroom"),
-        ("I have to freshen up.", "restroom"),
-        ("I'm thirsty, let's get a drink.", "cafeteria"),
-        ("Let's grab a coffee.", "cafeteria"),
-        ("It's lunchtime.", "cafeteria"),
-        ("I need somewhere quiet to read.", "library"),
-        ("I want to borrow a book.", "library"),
-        ("Get me out of this building.", "main entrance"),
-        ("I'm done for the day, let's leave.", "main entrance"),
-        ("I need to get to another floor.", "lift"),
-    ]
+    implicit_slang = IMPLICIT_SLANG
     SLANG_PROBABILITY = 0.0 if held_out else 0.1  # fraction drawn from implicit_slang
     UNKNOWN_PROBABILITY = 0.08  # fraction naming a place the building lacks
 

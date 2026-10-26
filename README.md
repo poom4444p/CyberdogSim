@@ -73,7 +73,8 @@ echo $MENAGERIE_PATH            # must print the path; if empty, activate again
 
 ### 2. Train the command parser
 
-The command parser turns `"I need to pee"` into `restroom`. It is a LoRA
+The command parser reads free-form requests that name no place and that the
+rules do not know (`"I could do with a bite"` -> `cafeteria`). It is a LoRA
 fine-tune of `unsloth/gemma-2b-it` on synthetic data the repo generates itself,
 so there is nothing to download except the base model (not gated, fetched
 automatically the first time).
@@ -156,19 +157,26 @@ robot is never shown. A run that arrives but reports `CONTACT` is not a pass.
 
 ### 5. Walk the dog from plain English
 
-With the model from step 2, add `--nlu`:
+Everyday needs are rules, so they work without the model; the dog asks
+*"I heard "pee". Did you mean the restroom?"* before it moves:
 
 ```bash
-python -m cyberdog.sim.run_building "I need to pee" --nlu
-python -m cyberdog.sim.run_building "I need to pee on the 2nd floor" --nlu
-python -m cyberdog.sim.run_building "I need to pee, then take me to the cafeteria" --nlu
+python -m cyberdog.sim.run_building "I need to pee"
+python -m cyberdog.sim.run_building "I need to pee on the 2nd floor"
+python -m cyberdog.sim.run_building "I need to pee, then take me to the cafeteria"
+```
+
+With the model from step 2, add `--nlu` for requests no rule reads:
+
+```bash
+python -m cyberdog.sim.run_building "I could do with a bite" --nlu
 python -m cyberdog.sim.run_building "take me upstairs" --nlu
 ```
 
 And with people walking the corridors, which are on no map:
 
 ```bash
-python -m cyberdog.sim.run_building "I need to pee" --nlu --pedestrians 3 --seed 1
+python -m cyberdog.sim.run_building "I need to pee" --pedestrians 3 --seed 1
 ```
 
 ### 6. The VLM server
@@ -328,9 +336,11 @@ Three of these are also on your `PATH` after `pip install -e .`:
 `cyberdog-building`, `cyberdog-demo`, `cyberdog-record`.
 
 Without `--nlu`, the destination must be a name from
-`data/building/locations.json`. Splitting multi-stop commands and reading floor
-phrases ("on the 2nd floor") are rules, so they work with or without `--nlu`;
-only slang like `"I'm starving"` needs the model.
+`data/building/locations.json`, a nickname (`"toilet"`), a near miss
+(`"libary"`) or an everyday need (`"I need to pee"`, `"I'm starving"`,
+`place_match.NEEDS`). Splitting multi-stop commands and reading floor phrases
+("on the 2nd floor") are rules too, so they work with or without `--nlu`; only
+requests none of these rules reads need the model.
 
 ---
 

@@ -43,6 +43,7 @@ class MujocoRobot(RobotInterface):
         # ticks; see gait.py for why it is drawn rather than simulated.
         self._phase, self._amp = 0.0, 0.0
         self.reset(start_xy, start_yaw)
+        self._lidar = None      # built on first get_scan, like the renderer
 
     def reset(self, xy, yaw):
         # The "home" keyframe folds the legs into a standing stance; without it
@@ -203,6 +204,17 @@ class MujocoRobot(RobotInterface):
         x, y, yaw = self.get_pose()
         return (x + self.CAM_FORWARD * math.cos(yaw),
                 y + self.CAM_FORWARD * math.sin(yaw), yaw)
+
+    def get_scan(self):
+        """The virtual Mid-360's returns from where the dog stands now."""
+        if self._lidar is None:
+            from cyberdog.sim.sensing.lidar import Lidar
+            self._lidar = Lidar(self.model, self.data)
+        x, y, yaw = self.get_pose()
+        return self._lidar.scan((x, y), self.z, yaw)
+
+    def now(self):
+        return self.sim_time
 
     def get_image(self):
         """Onboard RGB frame - what VAMOS will be looking at."""

@@ -56,7 +56,7 @@ from cyberdog.sim.robot.mujoco_robot import MujocoRobot
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
-from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
+from cyberdog.sim.sensing.lidar import MOUNT_H
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
@@ -634,7 +634,6 @@ class Run:
         # tick for tick -- which is how a shadow run proves it touched nothing.
         self.commands = hashlib.sha256()
         self.n_commands = 0
-        self.lidar = Lidar(self.robot.model, self.robot.data)
         # The person's override, last before the motors (handle.py). With no
         # handle the mux reads zero force every tick and passes commands on
         # unchanged. With one, its continue is also how the person answers
@@ -901,7 +900,7 @@ class Run:
             self.shadow_n[kind] += 1
         rnd = lambda pts: [[round(a, 3), round(b, 3)] for a, b in pts]
         self.shadow.write(json.dumps({
-            "floor": floor, "tick": n, "t": round(self.robot.sim_time, 2),
+            "floor": floor, "tick": n, "t": round(self.robot.now(), 2),
             "pose": [round(x, 3), round(y, 3), round(yaw, 4)],
             "map_target": [round(target[0], 3), round(target[1], 3)],
             "candidates": [{"path": rnd(p), "factor": None if f is None else round(f, 4),
@@ -963,7 +962,7 @@ class Run:
         Before the command goes out, so a tug stops the dog on the tick it is
         felt: one control tick, 50 ms at 20 Hz, inside the spec's 100 ms.
         """
-        t, dt = self.robot.sim_time, self.robot.CONTROL_DT
+        t, dt = self.robot.now(), self.robot.CONTROL_DT
         event = self.mux.update(self.handle.force(t), self.handle.pressed(t, dt), dt)
         x, y, _ = self.robot.get_pose()
         if event == "tug":
@@ -1321,13 +1320,13 @@ class Run:
         # back to the moment it happened.
         x, y, yaw = self.robot.get_pose()
         if touched and self.handler_hits["since"] is None:
-            self.handler_hits["since"] = self.robot.sim_time
-            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch starts: dog "
+            self.handler_hits["since"] = self.robot.now()
+            print(f"    t={self.robot.now():6.1f}s  HANDLER touch starts: dog "
                   f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
                   f"({px:.2f}, {py:.2f}), touching {', '.join(sorted(touched))}")
         elif not touched and self.handler_hits["since"] is not None:
-            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch ends after "
-                  f"{self.robot.sim_time - self.handler_hits['since']:.1f}s: dog "
+            print(f"    t={self.robot.now():6.1f}s  HANDLER touch ends after "
+                  f"{self.robot.now() - self.handler_hits['since']:.1f}s: dog "
                   f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
                   f"({px:.2f}, {py:.2f})")
             self.handler_hits["since"] = None
@@ -1404,7 +1403,7 @@ class Run:
         truth = self.ground_truth(floor, pose, target, live)
         self.aff_n[(adata.CLASS_NAMES[cls], truth)] += 1
         self.aff_log.write(json.dumps({
-            "t": round(self.robot.sim_time, 2), "floor": floor,
+            "t": round(self.robot.now(), 2), "floor": floor,
             "pose": [round(v, 3) for v in pose], "target": [round(v, 3) for v in target],
             "class": adata.CLASS_NAMES[cls], "probs": [round(float(v), 3) for v in probs],
             "seen": round(seen, 3), "truth": truth}) + "\n")
@@ -1426,15 +1425,15 @@ class Run:
         # back to the moment it happened.
         yaw = self.robot.get_pose()[2]
         if near and self.ped["since"] is None:
-            self.ped["since"] = self.robot.sim_time
+            self.ped["since"] = self.robot.now()
             d, w = min(near, key=lambda n: n[0])
             hx, hy = w.heading()
-            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT starts: dog ({x:.2f}, {y:.2f}) "
+            print(f"    t={self.robot.now():6.1f}s  CONTACT starts: dog ({x:.2f}, {y:.2f}) "
                   f"heading {math.degrees(yaw):.0f} deg, {w.kind} walker ({w.x:.2f}, {w.y:.2f}) "
                   f"heading {math.degrees(math.atan2(hy, hx)):.0f} deg, {d:.2f} m")
         elif not near and self.ped["since"] is not None:
-            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT ends after "
-                  f"{self.robot.sim_time - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
+            print(f"    t={self.robot.now():6.1f}s  CONTACT ends after "
+                  f"{self.robot.now() - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
                   f"heading {math.degrees(yaw):.0f} deg")
             self.ped["since"] = None
 
@@ -1792,7 +1791,7 @@ class Run:
             # on no map reacts because of this one call.
             self.step_crowd()
             live = self.clearance(floor)
-            scan = self.lidar.scan((x, y), self.robot.z, yaw)
+            scan = self.robot.get_scan()
             live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H))
             if self.elev is not None:
                 self.elev.add(scan, (x, y), self.robot.z)
@@ -1808,7 +1807,7 @@ class Run:
                 # planner's chance margin from it. Ground truth -- for the
                 # log only, never read back.
                 self.track_log.write(json.dumps({
-                    "t": round(self.robot.sim_time, 3), "floor": floor,
+                    "t": round(self.robot.now(), 3), "floor": floor,
                     "tracks": [(t.x, t.y, t.vx, t.vy) for t in tracks if t.moving],
                     "walkers": self.crowds[floor].positions()}) + "\n")
             # Somebody standing still ahead who was seen walking is a person,
@@ -1831,7 +1830,7 @@ class Run:
             # waited for; only a crate is gone round. See LiveClearance.exclude.
             live.exclude([(t.x, t.y, t.r) for t in walking])
             live.remember([(t.x, t.y, t.r) for t in tracks if t.walked],
-                          self.robot.sim_time, (x, y))
+                          self.robot.now(), (x, y))
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
             self.score_handler(floor)
@@ -2162,7 +2161,7 @@ class Run:
             self.robot.step()
 
             if verbose and n % 60 == 0:
-                print(f"    t={self.robot.sim_time:6.1f}s  floor {floor}  "
+                print(f"    t={self.robot.now():6.1f}s  floor {floor}  "
                       f"pos=({x:5.1f},{y:5.1f})  wp={i}/{len(waypoints) - 1}  "
                       f"{state['state']}")
         self.gave_up = ("control", f"{MAX_TICKS} ticks on floor {floor} without arriving, "
@@ -2206,7 +2205,7 @@ class Run:
         if self.has_handle:
             dt = self.robot.CONTROL_DT
             while True:
-                t = self.robot.sim_time
+                t = self.robot.now()
                 was_stopped = self.mux.stopped
                 self.handle_tick()
                 if (self.handle.pressed(t, dt) and not was_stopped

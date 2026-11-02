@@ -151,8 +151,30 @@ def test_twin_holds_but_cannot_be_carried(twin):
     robot, board = twin
     x, y, yaw = robot.get_pose()
     robot.set_velocity(0.5, 0.0, 0.0)
+    board.send_state(x=1.0, y=0.5, z=0.35, yaw=math.pi / 2, mode="WALK", tripped=None,
+                     walker=True)
+    settle()
     robot.place((x, y), yaw)                         # a hold: zero velocity out
     settle()
     assert board.poll().vx == 0.0
     with pytest.raises(NotImplementedError, match="lift"):
         robot.place((x + 2.0, y), yaw)
+
+
+def test_twin_start_asks_afresh_after_a_trip(twin):
+    robot, board = twin
+    seen, modes, t = [], iter(["LIMP"] * 8 + ["STAND"] * 2), [0.0]
+
+    def answer(dt):
+        t[0] += dt
+        c = board.poll()
+        seen.append(c.mode)
+        board.send_state(x=1.0, y=0.5, z=0.35, yaw=0.0, mode=next(modes, "WALK"),
+                         tripped=None, walker=True)
+        time.sleep(0.005)
+
+    robot.board.clock, robot.board.sleep = (lambda: t[0]), answer
+    robot.start(timeout=0.12)
+    asked = [m for k, m in enumerate(seen) if k == 0 or m != seen[k - 1]]
+    assert asked == ["stand", "limp", "stand", "walk"]
+    assert seen.count("limp") == robot.LIMP_HOLD          # held, not one datagram

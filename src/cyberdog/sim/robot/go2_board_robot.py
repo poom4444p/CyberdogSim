@@ -136,6 +136,7 @@ class BoardTwinRobot(MujocoRobot):
     """
     MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
     HOLD_M = 0.05             # place() this near the pose is a hold, not a move
+    LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
 
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0)):
         self.board = board or Go2BoardRobot(origin=origin)
@@ -152,9 +153,25 @@ class BoardTwinRobot(MujocoRobot):
                     raise
                 self.board.sleep(self.board.CONTROL_DT)
 
-    def start(self, timeout=10.0):
-        """Stand, then walk in place: what the board needs before velocities."""
-        self.board.stand(timeout=timeout)
+    def start(self, timeout=5.0, tries=3):
+        """Stand, then walk in place: what the board needs before velocities.
+
+        A stand clears the board's safety trip once, when it is asked; if the
+        board trips again straight away (a stale state as it wakes), asking
+        "stand" again is no new request. So go limp and ask afresh. The limp
+        is held for LIMP_HOLD ticks: the board is limp already, and keeps only
+        the newest datagram, so a single one followed at once by a stand
+        would never be seen."""
+        for k in range(tries):
+            try:
+                self.board.stand(timeout=timeout)
+                break
+            except BoardNotReady:
+                if k == tries - 1:
+                    raise
+                for _ in range(self.LIMP_HOLD):
+                    self.board.request("limp")
+                    self.board.sleep(self.board.CONTROL_DT)
         self.board.request("walk", until="WALK", timeout=timeout)
 
     def set_velocity(self, vx, vy=0.0, w=0.0):

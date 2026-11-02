@@ -117,3 +117,68 @@ class Go2BoardRobot(RobotInterface):
 
     def close(self):
         self.link.close()
+
+
+# -- the board in run_building -------------------------------------------------
+
+from cyberdog.sim.robot.mujoco_robot import MujocoRobot  # noqa: E402
+
+
+class BoardTwinRobot(MujocoRobot):
+    """go2_board drives; the twin follows it as a shadow.
+
+    The pose comes from the board (go2_world's physics, or the dog). Every
+    tick the twin is put there, so the camera, the virtual LiDAR, the people
+    and the ground-truth checks run_building reads from model/data see the
+    building from where the dog really is. Floor 1 only: the lift ride and
+    the stairs are scripted moves (place() somewhere else), which a real
+    board cannot do.
+    """
+    MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
+    HOLD_M = 0.05             # place() this near the pose is a hold, not a move
+
+    def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0)):
+        self.board = board or Go2BoardRobot(origin=origin)
+        x, y, yaw = self._wait_for_pose()
+        super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
+
+    def _wait_for_pose(self, timeout=5.0):
+        end = self.board.clock() + timeout
+        while True:
+            try:
+                return self.board.get_pose()
+            except BoardNotReady:
+                if self.board.clock() > end:
+                    raise
+                self.board.sleep(self.board.CONTROL_DT)
+
+    def start(self, timeout=10.0):
+        """Stand, then walk in place: what the board needs before velocities."""
+        self.board.stand(timeout=timeout)
+        self.board.request("walk", until="WALK", timeout=timeout)
+
+    def set_velocity(self, vx, vy=0.0, w=0.0):
+        super().set_velocity(vx, vy, w)
+        self.board.set_velocity(self._vx, self._vy, self._w)
+
+    def step(self):
+        self.board.step()                    # send, then wait for the 20 Hz tick
+        self._follow()
+
+    def place(self, xy, yaw, z=None):
+        x, y, _ = self.get_pose()
+        if math.dist((x, y), xy) > self.HOLD_M or (z is not None and z != self.z):
+            raise NotImplementedError("a scripted move (lift, stairs): the board walks itself")
+        self.board.set_velocity(0.0, 0.0, 0.0)
+        self.board.step()
+        self._follow()
+
+    def _follow(self):
+        x, y, yaw = self.board.get_pose()
+        MujocoRobot.place(self, (x, y), yaw)
+
+    def now(self):
+        return self.board.now()
+
+    def close(self):
+        self.board.close()

@@ -104,3 +104,55 @@ def test_sensors_are_not_wired_yet(pair):
         robot.get_scan()
     with pytest.raises(NotImplementedError):
         robot.get_image()
+
+
+# -- BoardTwinRobot: the twin as the board's shadow ----------------------------
+
+from cyberdog import paths  # noqa: E402
+
+
+@pytest.fixture
+def twin():
+    if not paths.BUILDING_SCENE.exists():
+        pytest.skip("no building scene: python -m cyberdog.sim.scene.build_scene --building")
+    from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
+    board = link.BoardLink(port=BOARD_PORT, brain_port=BRAIN_PORT)
+    brain = Go2BoardRobot(origin=(21.0, 9.5, 0.0), port=BRAIN_PORT, board_port=BOARD_PORT)
+    board.send_state(x=1.0, y=0.5, z=0.35, yaw=math.pi / 2, mode="WALK", tripped=None,
+                     walker=True)
+    settle()
+    robot = BoardTwinRobot(str(paths.BUILDING_SCENE), board=brain)
+    yield robot, board
+    robot.close()
+    board.close()
+
+
+def test_twin_starts_where_the_board_is(twin):
+    robot, _ = twin
+    x, y, yaw = robot.get_pose()
+    assert (x, y, yaw) == pytest.approx((22.0, 10.0, math.pi / 2), abs=1e-6)
+    cx, cy, _ = robot.camera_pose()
+    assert (cx, cy) == pytest.approx((22.0, 10.0 + robot.CAM_FORWARD), abs=1e-6)
+
+
+def test_twin_sends_the_command_and_follows_the_board(twin):
+    robot, board = twin
+    robot.set_velocity(0.5, 0.0, 3.0)
+    board.send_state(x=2.0, y=0.5, z=0.35, yaw=0.0, mode="WALK", tripped=None, walker=True)
+    settle()
+    robot.step()
+    settle()
+    c = board.poll()
+    assert (c.vx, c.w, c.mode) == (0.5, robot.MAX_W, "walk") and robot.MAX_W == 1.0
+    assert robot.get_pose() == pytest.approx((23.0, 10.0, 0.0), abs=1e-6)
+
+
+def test_twin_holds_but_cannot_be_carried(twin):
+    robot, board = twin
+    x, y, yaw = robot.get_pose()
+    robot.set_velocity(0.5, 0.0, 0.0)
+    robot.place((x, y), yaw)                         # a hold: zero velocity out
+    settle()
+    assert board.poll().vx == 0.0
+    with pytest.raises(NotImplementedError, match="lift"):
+        robot.place((x + 2.0, y), yaw)

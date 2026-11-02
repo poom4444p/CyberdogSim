@@ -53,6 +53,7 @@ from cyberdog.sim.handle import HandleScript, SafetyMux
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
+from cyberdog.sim.robot.go2_board_robot import BoardStopped
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
@@ -2619,7 +2620,7 @@ def main():
                 # destination and immediately walks off has not delivered it.
                 run.hold(WAIT_S * 2)
             k += 1
-    except HazardStop as stop:
+    except (HazardStop, BoardStopped) as stop:
         ok, halted = False, stop
     if ok:
         run.behind = True

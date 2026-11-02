@@ -23,6 +23,13 @@ class BoardNotReady(RuntimeError):
     pass
 
 
+class BoardStopped(RuntimeError):
+    """The board left WALK by itself (a safety trip, or a person's limp):
+    whatever the brain sends now, the dog is not walking it. The run ends
+    here and says so, rather than tracking a waypoint the dog never nears."""
+    layer = "go2_board"
+
+
 class Go2BoardRobot(RobotInterface):
     CONTROL_DT  = 0.05         # 20 Hz, the twin's rate: the brain is tuned at it
     MAX_V       = 0.8          # m/s   -- the twin's limits. The Go2 policy is
@@ -193,6 +200,10 @@ class BoardTwinRobot(MujocoRobot):
     def _follow(self):
         x, y, yaw = self.board.get_pose()
         MujocoRobot.place(self, (x, y), yaw)
+        s = self.board.board_state()
+        if s["mode"] != "WALK":
+            why = f": {s['tripped']}" if s.get("tripped") else ""
+            raise BoardStopped(f"the board is {s['mode']}, not walking{why}")
 
     def now(self):
         return self.board.now()

@@ -178,3 +178,13 @@ def test_twin_start_asks_afresh_after_a_trip(twin):
     asked = [m for k, m in enumerate(seen) if k == 0 or m != seen[k - 1]]
     assert asked == ["stand", "limp", "stand", "walk"]
     assert seen.count("limp") == robot.LIMP_HOLD          # held, not one datagram
+
+
+def test_twin_stops_the_run_when_the_board_stops_walking(twin):
+    from cyberdog.sim.robot.go2_board_robot import BoardStopped
+    robot, board = twin
+    board.send_state(x=1.0, y=0.5, z=0.12, yaw=0.0, mode="LIMP",
+                     tripped="stale state (55 ms old)", walker=True)
+    settle()
+    with pytest.raises(BoardStopped, match="LIMP, not walking: stale state"):
+        robot.step()

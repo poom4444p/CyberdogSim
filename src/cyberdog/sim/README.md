@@ -614,6 +614,27 @@ VLM steer down one, give it a floor-1 destination (`room 101`, `cafeteria`).
 `selftest.py` does not use `--vamos`, so `ALL PASS` says nothing about the VLM
 path -- the block above is the only score it has.
 
+## On go2_board
+
+`--robot go2_board` hands the walking to go2_board over its localhost link:
+go2_world's physics (unitree_mujoco's Go2 in this building), the fake
+Mid-360, and the board's own policy, safety and LiDAR guard. The twin stays
+as the board's shadow (`BoardTwinRobot`): put at the board's pose every tick,
+it gives the camera, the LiDAR and the checks their view. Floor 1 only.
+
+```bash
+mjpython ~/Work/unitree/go2_world/scripts/run_world.py              # unitree_sim env
+python ~/Work/unitree/go2_world/scripts/run_lidar.py                # once the world is up
+python ~/Work/unitree/go2_board/scripts/board_main.py --policy ~/Work/unitree/go2_board/policies/go2_flat_v5
+python -m cyberdog.sim.run_building "room 103" --robot go2_board --no-video --no-vamos
+```
+
+Checked: room 103 from the board's start (21.0, 9.5), 23 s, no collisions,
+no safety trips. If the board leaves WALK (a trip), the run ends
+`FAILED BY go2_board` with the reason. Not yet with `--vamos`: the request
+blocks the brain for the whole VLM call (32-45 s on an M5, 5 paths), and in
+real time that is the board told nothing; it needs a worker thread first.
+
 ## Known limits
 
 - The dog is kinematic -- no contacts, and the gait is drawn, not simulated.

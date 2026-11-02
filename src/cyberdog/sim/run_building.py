@@ -64,6 +64,10 @@ from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS
 from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
+# Where go2_board's odometry starts in the map frame, with --robot go2_board:
+# go2_world's building is this map shifted so the Go2 starts at its origin
+# (see go2_world/assets/building.xml). On the dog, FAST-LIO's start instead.
+GO2_WORLD_ORIGIN = (21.0, 9.5, 0.0)
 START_FLOOR = 1
 FPS = 20                  # equals the control rate, so the video is real time
 WAIT_S = 1.5              # held at the lift doors, and while auto-confirming
@@ -591,9 +595,9 @@ class Run:
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
-                 track_log=None):
-        self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
-                                 start_z=levels.floor_z(START_FLOOR))
+                 track_log=None, robot=None):
+        self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
+                                          start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
         self.router = router
         self._doors = {}          # floor -> [(name, door_xy)], for the captions
@@ -2496,6 +2500,9 @@ def main():
     ap.add_argument("--autolabel", default=None, metavar="DIR",
                     help="keep onboard frames labelled with the path the dog then walked, "
                          "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
+    ap.add_argument("--robot", choices=["twin", "go2_board"], default="twin",
+                    help="who walks: the kinematic twin, or go2_board over its link "
+                         "(go2_world's physics or the dog; floor 1 only)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -2530,7 +2537,16 @@ def main():
             print(f"  stop {k}: {name}" + (f" (floor {floor})" if floor else ""))
 
         layer = "planning"
-        start_xy, legs, faces = plan_stops(router, stops)
+        robot = None
+        if args.robot == "go2_board":
+            from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
+            robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN)
+            start_xy, legs, faces = plan_stops(router, stops,
+                                               start=(START_FLOOR, robot.get_pose()[:2]))
+            if any(leg[0] != START_FLOOR for leg in legs):
+                raise SystemExit("--robot go2_board walks floor 1 only: no lift, no stairs")
+        else:
+            start_xy, legs, faces = plan_stops(router, stops)
     except NoAccessibleRoute as refusal:
         raise SystemExit(f"[voice] {refusal}\nREFUSED BY planning: no accessible route")
     except SystemExit as refusal:
@@ -2549,7 +2565,10 @@ def main():
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               handle=handle if args.handle else None,
-              affordance_shadow=args.affordance_shadow, autolabel=args.autolabel)
+              affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
+              robot=robot)
+    if robot is not None:
+        robot.start()
 
     ok, halted = True, None
     try:
@@ -2607,6 +2626,9 @@ def main():
         for _ in range(FPS * 2):      # hold the arrival, seen over its shoulder
             run.frame()
     run.close()
+    if args.robot == "go2_board":
+        run.robot.board.lie()
+        run.robot.close()
 
     x, y, _ = run.robot.get_pose()
     if isinstance(halted, HandleStop):

@@ -2341,6 +2341,16 @@ class Run:
         yaw = math.pi                      # facing the doors for the ride
         self.say(f"Doors closing. Going to floor {to_floor}.")
         ticks = max(int(abs(z1 - z0) / (lift.RIDE_V * self.robot.CONTROL_DT)), 1)
+        if getattr(self.robot, "REAL_TIME", False):
+            # A robot that walks itself (go2_board) is not carried by script:
+            # it stands, the real car lifts it, and it watches its own height.
+            def ride_tick(z):
+                self.robot.move_mocap("lift_car", lift.car_pos(z))
+                self.floor = min(max(round(z / levels.FLOOR_HEIGHT) + 1,
+                                     lift.FLOORS_SERVED[0]), lift.FLOORS_SERVED[-1])
+                self.frame()
+            self.robot.ride_lift(to_floor, z1, ride_tick)
+            ticks = 0
         for k in range(1, ticks + 1):
             z = z0 + (z1 - z0) * k / ticks
             self.robot.place(lift.LIFT_XY, yaw, z=z)
@@ -2414,6 +2424,9 @@ class Run:
         the decision, the questions and what is said; the climb itself
         belongs in Isaac Lab, where the dog has legs.
         """
+        if getattr(self.robot, "REAL_TIME", False):
+            raise HazardStop("the board does not climb stairs (go2_flat_v5 walks the flat): "
+                             "lift only", layer="go2_board")
         up = to_floor > from_floor
         flights = self.flights(from_floor, to_floor)
         steps = stairs.N_STEPS * len(flights)
@@ -2538,6 +2551,8 @@ def main():
     ap.add_argument("--board-host", default=None, metavar="IP",
                     help="with --robot go2_board: the board's address when it is another "
                          "machine (HIL over USB-C: 192.168.55.1); default localhost")
+    ap.add_argument("--lift-host", default="127.0.0.1", metavar="IP",
+                    help="with --robot go2_board: where go2_world's lift takes calls (udp 9880)")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
                     help="this machine's address on the link to the board (192.168.55.100)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
@@ -2577,12 +2592,12 @@ def main():
         robot = None
         if args.robot == "go2_board":
             from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
+            from cyberdog.sim.robot.go2_board_robot import LiftLink
             robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
-                                   board_host=args.board_host, listen=args.brain_listen)
+                                   board_host=args.board_host, listen=args.brain_listen,
+                                   lift=LiftLink(args.lift_host))
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
-            if any(leg[0] != START_FLOOR for leg in legs):
-                raise SystemExit("--robot go2_board walks floor 1 only: no lift, no stairs")
         else:
             start_xy, legs, faces = plan_stops(router, stops)
     except NoAccessibleRoute as refusal:

@@ -147,19 +147,56 @@ def test_twin_sends_the_command_and_follows_the_board(twin):
     assert robot.get_pose() == pytest.approx((23.0, 10.0, 0.0), abs=1e-6)
 
 
-def test_twin_holds_but_cannot_be_carried(twin):
+def test_twin_walks_to_a_placed_pose_but_cannot_be_carried(twin):
     robot, board = twin
-    x, y, yaw = robot.get_pose()
-    robot.set_velocity(0.5, 0.0, 0.0)
+    x, y, yaw = robot.get_pose()                       # (22, 10), facing +y
     board.send_state(x=1.0, y=0.5, z=0.35, yaw=math.pi / 2, mode="WALK", tripped=None,
                      walker=True)
     settle()
-    robot.place((x, y), yaw)                         # a hold: zero velocity out
+    robot.place((x, y + 2.0), yaw)                     # 2 m straight ahead
     settle()
-    assert board.poll().vx == 0.0
+    c = board.poll()
+    assert c.vx == pytest.approx(robot.TRACK_V) and abs(c.vy) < 1e-9 and abs(c.w) < 1e-9
+    robot.place((x, y), yaw)                           # already there: stand still
+    settle()
+    c = board.poll()
+    assert (c.vx, c.vy, c.w) == pytest.approx((0.0, 0.0, 0.0), abs=1e-6)
     with pytest.raises(NotImplementedError, match="lift"):
-        robot.place((x + 2.0, y), yaw)
+        robot.place((x, y), yaw, z=robot.z + 1.0)      # a scripted climb
 
+
+class FakeLift:
+    def __init__(self):
+        self.called = []
+
+    def call(self, floor):
+        self.called.append(floor)
+
+    def close(self):
+        pass
+
+
+def test_ride_stands_waits_for_its_own_height_then_walks(twin):
+    robot, board = twin
+    robot.lift = FakeLift()
+    seen, t = [], [0.0]
+    heights = iter([0.35] * 3 + [0.35 + 0.1 * k for k in range(1, 23)] + [2.55] * 40)
+
+    def answer(dt):
+        t[0] += dt
+        c = board.poll()
+        seen.append(c.mode)
+        mode = "WALK" if seen.count("walk") > 0 else "STAND"
+        board.send_state(x=1.0, y=0.5, z=next(heights, 2.55), yaw=0.0, mode=mode,
+                         tripped=None, walker=True)
+        time.sleep(0.003)
+
+    robot.board.clock, robot.board.sleep = (lambda: t[0]), answer
+    ticks = []
+    robot.ride_lift(2, 2.2, ticks.append)
+    assert robot.lift.called == [2]
+    assert seen.index("walk") > len(seen) - 5 and set(seen[:-3]) <= {"stand", None}
+    assert ticks[-1] == pytest.approx(2.2, abs=0.01) and robot.z == 2.2
 
 def test_twin_start_asks_afresh_after_a_trip(twin):
     robot, board = twin

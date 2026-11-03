@@ -11,7 +11,9 @@ import is inside __init__, so the twin runs without it.
 Not yet: get_scan and get_image. In the sim they come from the physics twin
 of the building (B6); on the dog, from the Mid-360 and the camera.
 """
+import json
 import math
+import socket
 import time
 
 from cyberdog.sim.robot.robot_interface import RobotInterface
@@ -21,6 +23,30 @@ STATE_STALE_S = 0.2       # the board reports at 50 Hz: 10 missed reports
 
 class BoardNotReady(RuntimeError):
     pass
+
+
+class LiftLink:
+    """Calls the lift and reads where it is: go2_world's car over UDP 9880,
+    standing in for the person at the call button (or a building's lift API).
+    The robot never waits on it for its own height: that comes from the board."""
+
+    def __init__(self, host="127.0.0.1", port=9880, timeout=0.5):
+        self.addr = (host, port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(timeout)
+
+    def _ask(self, msg):
+        self.sock.sendto(json.dumps(msg).encode(), self.addr)
+        return json.loads(self.sock.recvfrom(1024)[0])
+
+    def call(self, floor):
+        return self._ask({"call": int(floor)})
+
+    def state(self):
+        return self._ask({})
+
+    def close(self):
+        self.sock.close()
 
 
 class BoardStopped(RuntimeError):
@@ -148,12 +174,20 @@ class BoardTwinRobot(MujocoRobot):
     """
     MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
     REAL_TIME = True          # the board walks on the wall clock: never block the loop
-    HOLD_M = 0.05             # place() this near the pose is a hold, not a move
     LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
+    # place() on the board is a pose to walk to, not one to be put at: the
+    # scripted moves in and out of the lift car become velocity commands that
+    # chase the moving target. Gains and limits for that.
+    TRACK_K, TRACK_KW = 1.5, 2.0
+    TRACK_V, TRACK_VY, TRACK_W = 0.5, 0.2, 0.8
+    # The lift ride: arrived when the board's own height has settled this near
+    # the new floor plus the standing height it rode at, for SETTLE_S.
+    ARRIVED_M, SETTLE_S, RIDE_TIMEOUT_S = 0.05, 1.0, 60.0
 
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
-                 board_host=None, listen=None):
+                 board_host=None, listen=None, lift=None):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
+        self.lift = lift          # LiftLink, for rides; None: no floor but the first
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 
@@ -197,12 +231,65 @@ class BoardTwinRobot(MujocoRobot):
         self._follow()
 
     def place(self, xy, yaw, z=None):
-        x, y, _ = self.get_pose()
-        if math.dist((x, y), xy) > self.HOLD_M or (z is not None and z != self.z):
-            raise NotImplementedError("a scripted move (lift, stairs): the board walks itself")
-        self.board.set_velocity(0.0, 0.0, 0.0)
+        """One tick walking toward (xy, yaw): the board cannot be put anywhere.
+        A height other than the floor's is a scripted climb (stairs), refused;
+        the lift goes through ride_lift()."""
+        if z is not None and abs(z - self.z) > 1e-6:
+            raise NotImplementedError("a scripted climb: the board rides the lift, see ride_lift")
+        x, y, th = self.get_pose()
+        ex, ey = xy[0] - x, xy[1] - y
+        c, s = math.cos(th), math.sin(th)
+        fwd, side = c * ex + s * ey, -s * ex + c * ey
+        turn = math.atan2(math.sin(yaw - th), math.cos(yaw - th))
+        clip = lambda v, m: max(-m, min(m, v))
+        self.board.set_velocity(clip(self.TRACK_K * fwd, self.TRACK_V),
+                                clip(self.TRACK_K * side, self.TRACK_VY),
+                                clip(self.TRACK_KW * turn, self.TRACK_W))
         self.board.step()
         self._follow()
+
+    def ride_lift(self, to_floor, floor_z, on_tick=lambda z: None):
+        """Stand in the car while the lift carries the dog to `to_floor`.
+
+        What the dog does on the real lift: stop walking, stand, and wait
+        until it is on the new floor, judged by its own height (the board's
+        pose; on the dog, FAST-LIO's), then walk again. The call is the
+        person's (here the lift link, standing in for them). `on_tick(z)` is
+        called every tick with the car floor's height, for the video."""
+        if self.lift is None:
+            raise NotImplementedError("no lift link: --robot go2_board needs go2_world's lift")
+        self.board.set_velocity(0.0, 0.0, 0.0)
+        self.board.request("stand", until="STAND", timeout=5.0)
+        s = self.board.board_state()
+        stand_h = s["z"] - self.z              # trunk above the floor, standing
+        self.lift.call(to_floor)
+        goal = floor_z + stand_h
+        start, settled = self.board.clock(), None
+        while True:
+            self.board.request("stand")        # one tick: the board hears from us at 20 Hz
+            s = self.board.board_state()
+            if s is None:
+                raise BoardNotReady("no state from the board during the ride")
+            if s["mode"] != "STAND":
+                raise BoardStopped(f"the board is {s['mode']} in the lift"
+                                   + (f": {s['tripped']}" if s.get("tripped") else ""))
+            floor_now = s["z"] - stand_h
+            x, y, th = self.board.get_pose()
+            MujocoRobot.place(self, (x, y), th, z=floor_now)
+            on_tick(floor_now)
+            now = self.board.clock()
+            if abs(s["z"] - goal) < self.ARRIVED_M:
+                settled = settled or now
+                if now - settled >= self.SETTLE_S:
+                    break
+            else:
+                settled = None
+            if now - start > self.RIDE_TIMEOUT_S:
+                raise BoardStopped(f"the lift did not reach floor {to_floor} in "
+                                   f"{self.RIDE_TIMEOUT_S:.0f} s (board at z {s['z']:.2f})")
+            self.board.sleep(self.CONTROL_DT)
+        self.z = floor_z
+        self.board.request("walk", until="WALK", timeout=5.0)
 
     def _follow(self):
         x, y, yaw = self.board.get_pose()
@@ -217,3 +304,5 @@ class BoardTwinRobot(MujocoRobot):
 
     def close(self):
         self.board.close()
+        if self.lift is not None:
+            self.lift.close()

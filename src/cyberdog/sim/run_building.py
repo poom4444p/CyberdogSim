@@ -126,6 +126,7 @@ BOARD_NEAR_M = 0.45
 BOARD_CLEAR_M = 0.80
 BOARD_TURN_W = 0.4         # rad/s
 BOARD_GIVE_UP_S = 8.0
+BOARD_STALL_S, BOARD_STALL_M = 2.0, 0.05   # asked forward this long, moved less: stuck
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
@@ -648,6 +649,7 @@ class Run:
         # done. The twin keeps the repeatable sim-time release above.
         self.real_time = getattr(self.robot, "REAL_TIME", False)
         self.board_turning, self.board_since, self.board_gave_up = None, 0.0, False
+        self.board_push = None    # (t, x, y) since asking forward, for respect_board's stall
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1145,7 +1147,25 @@ class Run:
         free = self.robot.board_clearance()
         if free is None:
             return (vx, vy, w)                               # blind: the board turns only
-        if self.board_turning is None and vx > 0.05 and free["front"] < BOARD_NEAR_M:
+        # Asked forward and going nowhere: the guard crawls the dog from SLOW_M
+        # down to a speed the gait does not step at (0.52 m from a wall, asked
+        # 0.3 m/s, given 0.09), and that is as stuck as a closed front.
+        now, (x, y, _) = self.robot.now(), pose
+        stalled = False
+        if vx > 0.1:
+            if self.board_push is None:
+                self.board_push = (now, x, y)
+            elif (now - self.board_push[0] > BOARD_STALL_S
+                  and math.dist((x, y), self.board_push[1:]) < BOARD_STALL_M):
+                stalled = True
+                self.board_push = None
+            else:
+                stalled = False
+                if now - self.board_push[0] > BOARD_STALL_S:
+                    self.board_push = (now, x, y)            # moving: start the window again
+        else:
+            self.board_push, stalled = None, False
+        if self.board_turning is None and vx > 0.05 and (free["front"] < BOARD_NEAR_M or stalled):
             self.board_turning = 1.0 if free["left"] >= free["right"] else -1.0
             self.board_since = self.robot.now()
             self.say("Too close to something ahead. Turning "

@@ -652,6 +652,7 @@ class Run:
         self.real_time = getattr(self.robot, "REAL_TIME", False)
         self.board_turning, self.board_since, self.board_gave_up = None, 0.0, False
         self.board_push = None    # (t, x, y) since asking forward, for respect_board's stall
+        self.board_flipped = False
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1169,6 +1170,7 @@ class Run:
             self.board_push, stalled = None, False
         if self.board_turning is None and vx > 0.05 and (free["front"] < BOARD_NEAR_M or stalled):
             self.board_turning = 1.0 if free["left"] >= free["right"] else -1.0
+            self.board_flipped = False
             self.board_since = self.robot.now()
             self.say("Too close to something ahead. Turning "
                      + ("left" if self.board_turning > 0 else "right") + " to find the way.")
@@ -1177,6 +1179,13 @@ class Run:
             if free["front"] >= BOARD_CLEAR_M:
                 self.board_turning = None                    # open again: the plan takes over
                 return (vx, vy, w)
+            if (self.robot.now() - self.board_since > BOARD_GIVE_UP_S / 2
+                    and not self.board_flipped):
+                # Half the time one way and still closed: the other way. In the
+                # gap between the trolley and the wall, turning towards the
+                # wall never opened, and the way on was the other side.
+                self.board_turning, self.board_flipped = -self.board_turning, True
+                self.say("Trying the other way.")
             if self.robot.now() - self.board_since > BOARD_GIVE_UP_S:
                 self.say("I cannot get past this. Please help me find the way.")
                 x, y, _ = pose

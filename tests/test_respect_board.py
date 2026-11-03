@@ -21,7 +21,7 @@ def stub(free):
     robot = Robot()
     robot.free = free
     said = []
-    run = types.SimpleNamespace(robot=robot, board_turning=None, board_since=0.0, board_push=None,
+    run = types.SimpleNamespace(robot=robot, board_turning=None, board_since=0.0, board_push=None, board_flipped=False,
                                 board_gave_up=False, gave_up=None, obs={}, say=said.append)
     run.respect_board = rb.Run.respect_board.__get__(run)
     return run, said
@@ -54,7 +54,10 @@ def test_pushed_against_the_guard_turns_to_the_roomier_side_then_carries_on():
 
 def test_asks_for_help_when_turning_does_not_open_the_way():
     run, said = stub(open_(front=0.05))
-    run.respect_board((0.4, 0.0, 0.0), (3.0, 4.0, 0.0))
+    first = run.respect_board((0.4, 0.0, 0.0), (3.0, 4.0, 0.0))[2]
+    run.robot.t = rb.BOARD_GIVE_UP_S / 2 + 0.1
+    assert run.respect_board((0.4, 0.0, 0.0), (3.0, 4.0, 0.0))[2] == -first   # the other way
+    assert "other way" in said[-1]
     run.robot.t = rb.BOARD_GIVE_UP_S + 0.1
     assert run.respect_board((0.4, 0.0, 0.0), (3.0, 4.0, 0.0)) == (0.0, 0.0, 0.0)
     assert run.board_gave_up and run.gave_up[0] == "go2_board" and "help" in said[-1]

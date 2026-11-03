@@ -2535,6 +2535,11 @@ def main():
     ap.add_argument("--robot", choices=["twin", "go2_board"], default="twin",
                     help="who walks: the kinematic twin, or go2_board over its link "
                          "(go2_world's physics or the dog; floor 1 only)")
+    ap.add_argument("--board-host", default=None, metavar="IP",
+                    help="with --robot go2_board: the board's address when it is another "
+                         "machine (HIL over USB-C: 192.168.55.1); default localhost")
+    ap.add_argument("--brain-listen", default=None, metavar="IP",
+                    help="this machine's address on the link to the board (192.168.55.100)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -2572,7 +2577,8 @@ def main():
         robot = None
         if args.robot == "go2_board":
             from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
-            robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN)
+            robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
+                                   board_host=args.board_host, listen=args.brain_listen)
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
             if any(leg[0] != START_FLOOR for leg in legs):

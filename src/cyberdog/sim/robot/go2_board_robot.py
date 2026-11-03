@@ -37,12 +37,17 @@ class Go2BoardRobot(RobotInterface):
     CAM_FORWARD = 0.34         # m, lens ahead of body centre: measure on the dog
 
     def __init__(self, origin=(0.0, 0.0, 0.0), port=None, board_port=None,
-                 clock=time.monotonic, sleep=time.sleep):
+                 clock=time.monotonic, sleep=time.sleep, board_host=None, listen=None):
         """`origin` is where the board's odometry frame starts, in the map
         frame: (x, y, yaw) of the dog when the board came up. FAST-LIO starts
-        wherever it was switched on; the map is the building's."""
-        from go2_board.link import BOARD_PORT, BRAIN_PORT, BrainLink
-        self.link = BrainLink(port=port or BRAIN_PORT, board_port=board_port or BOARD_PORT)
+        wherever it was switched on; the map is the building's.
+
+        `board_host` / `listen`: the board's address and this machine's on the
+        link between them, when the brain is not on the board (HIL over
+        USB-C: 192.168.55.1 and 192.168.55.100). Localhost otherwise."""
+        from go2_board.link import BOARD_PORT, BRAIN_PORT, HOST, BrainLink
+        self.link = BrainLink(port=port or BRAIN_PORT, board_port=board_port or BOARD_PORT,
+                              listen=listen or HOST, board_host=board_host or HOST)
         self.origin = origin
         self.clock, self.sleep = clock, sleep
         self._t0 = clock()
@@ -146,8 +151,9 @@ class BoardTwinRobot(MujocoRobot):
     HOLD_M = 0.05             # place() this near the pose is a hold, not a move
     LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
 
-    def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0)):
-        self.board = board or Go2BoardRobot(origin=origin)
+    def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
+                 board_host=None, listen=None):
+        self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 

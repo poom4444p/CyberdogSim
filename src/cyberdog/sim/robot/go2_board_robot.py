@@ -142,6 +142,7 @@ class BoardTwinRobot(MujocoRobot):
     board cannot do.
     """
     MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
+    REAL_TIME = True          # the board walks on the wall clock: never block the loop
     HOLD_M = 0.05             # place() this near the pose is a hold, not a move
     LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
 

@@ -26,6 +26,7 @@ keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
 import collections
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -634,6 +635,12 @@ class Run:
         # was asked on, body xy then). One at a time, as a GPU serves them.
         self.pending = None
         self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0}
+        # A robot on the wall clock (go2_board) cannot have the loop paused for
+        # the call: the request runs on a worker thread and lands when it is
+        # done. The twin keeps the repeatable sim-time release above.
+        self.real_time = getattr(self.robot, "REAL_TIME", False)
+        self.vlm_worker = None    # the call still running, dropped answer or not
+        self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
         # route and seed with equal fingerprints commanded the dog identically,
         # tick for tick -- which is how a shadow run proves it touched nothing.
@@ -839,6 +846,8 @@ class Run:
             img[top:top + 16, 14:30] = (250, 205, 90) if lit else (70, 72, 78)
 
     def close(self):
+        if self.vlm_pool is not None:
+            self.vlm_pool.shutdown(wait=False, cancel_futures=True)
         if self.writer is not None:
             self.writer.close()
         if self.track_log is not None:
@@ -933,6 +942,17 @@ class Run:
         The wall-clock time the HTTP call really took is the default latency:
         the sim is paused while it runs, then charged for it afterwards.
         """
+        if self.real_time:
+            # Frame and lens pose now, on this thread (the renderer's); only
+            # the HTTP call and the projection go to the worker.
+            if self.vlm_pool is None:
+                self.vlm_pool = concurrent.futures.ThreadPoolExecutor(1, "vamos")
+            self.vlm_worker = self.vlm_pool.submit(
+                self.policy(floor).request, self.robot.get_image().copy(),
+                vamos_prompt(state), self.robot.camera_pose())
+            self.pending = (self.vlm_worker, None, n, self.robot.get_pose()[:2])
+            self.vlm["asked"] += 1
+            return
         t0 = time.perf_counter()
         cam_pose = self.robot.camera_pose()
         paths = self.policy(floor).request(self.robot.get_image(),
@@ -943,14 +963,25 @@ class Run:
                         n, self.robot.get_pose()[:2])
         self.vlm["asked"] += 1
 
+    def vlm_busy(self):
+        """A call is still running on the worker, even one whose answer was
+        dropped at a leg's end: one at a time, as the GPU serves them."""
+        return self.vlm_worker is not None and not self.vlm_worker.done()
+
     def take_answer(self, floor, n, pose, destination):
         """The pending answer, if it has landed: judged from where the dog is
         now, not from where it was asked. Returns plan()'s triple, or None
         while the answer is still on its way.
         """
-        if self.pending is None or n < self.pending[0]:
+        if self.pending is None:
             return None
-        _, paths, asked_at, xy0 = self.pending
+        lands, paths, asked_at, xy0 = self.pending
+        if isinstance(lands, concurrent.futures.Future):
+            if not lands.done():
+                return None
+            paths = lands.result()
+        elif n < lands:
+            return None
         self.pending = None
         self.vlm["answers"] += 1
         self.vlm["age"] += (n - asked_at) * self.robot.CONTROL_DT
@@ -1939,7 +1970,7 @@ class Run:
             # carries on either way. `asked` is an answer arriving this tick.
             due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
             if ((self.vamos or self.shadow) and state["state"] == "TRACK" and due
-                    and self.pending is None):
+                    and self.pending is None and not self.vlm_busy()):
                 self.ask_vamos(floor, n, state)
             answer = self.take_answer(floor, n, (x, y, yaw),
                                       state.get("destination") or waypoints[-1])

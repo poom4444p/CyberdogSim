@@ -605,6 +605,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
+                 vamos_samples=5,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
                  track_log=None, robot=None):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
@@ -636,6 +637,7 @@ class Run:
         self.shadow = open(shadow, "w") if shadow else None
         self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
         self.vamos_url = vamos_url
+        self.vamos_samples = vamos_samples
         self.vamos_sample = vamos_sample
         # How long a VAMOS answer takes to arrive, in seconds of sim time; None
         # is the call's own wall-clock time. See ask_vamos.
@@ -894,7 +896,7 @@ class Run:
                             dream=Dream(live, self.robot.MAX_V,
                                         person=lambda x, y, yaw: self.handler_room(
                                             live, x, y, yaw)), url=url,
-                            sample=self.vamos_sample)
+                            sample=self.vamos_sample, num_samples=self.vamos_samples)
             if not p.available():
                 raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first, "
@@ -2628,6 +2630,10 @@ def main():
     ap.add_argument("--board-host", default=None, metavar="IP",
                     help="with --robot go2_board: the board's address when it is another "
                          "machine (HIL over USB-C: 192.168.55.1); default localhost")
+    ap.add_argument("--vamos-samples", type=int, default=5, metavar="N",
+                    help="candidate paths per VAMOS call (beams). 5 is the PoC's; on the "
+                         "J4012 at 25 W a call takes 4.6 s for 5, 3.0 s for 2, 2.3 s for 1 "
+                         "(spec: 2-3 s a plan)")
     ap.add_argument("--twin-lidar", action="store_true",
                     help="with --robot go2_board: perceive with the twin's raycast, not the "
                          "board's Mid-360 cloud (sees no real person; for comparison only)")
@@ -2697,6 +2703,7 @@ def main():
               planner=args.planner, track_log=args.track_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
+              vamos_samples=args.vamos_samples,
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot)

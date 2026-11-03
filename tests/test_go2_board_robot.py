@@ -235,3 +235,26 @@ def test_board_host_and_listen_reach_the_link():
         assert robot.link.sock.getsockname() == ("127.0.0.1", 19893)
     finally:
         robot.close()
+
+
+def test_scan_is_the_boards_cloud_in_the_map_frame(twin):
+    import socket
+    import numpy as np
+    from go2_board.lidar import BRAIN_CLOUD_PORT, cloud_datagrams
+    robot, board = twin                                # at map (22, 10), facing +y
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        pts = np.array([[2.0, 0.0, 0.5], [0.0, -1.0, 0.0]], np.float32)   # ahead, and to the right
+        for d in cloud_datagrams(1, pts, 0, 0.0):
+            tx.sendto(d, ("127.0.0.1", BRAIN_CLOUD_PORT))
+        for d in cloud_datagrams(2, pts, 0, 0.0):      # a frame closes when the next begins
+            tx.sendto(d, ("127.0.0.1", BRAIN_CLOUD_PORT))
+        settle()
+        scan = robot.get_scan()
+        assert scan.shape == (2, 3)
+        assert scan[0] == pytest.approx((22.0, 12.0, robot.z + 0.5), abs=1e-5)
+        assert scan[1] == pytest.approx((23.0, 10.0, robot.z), abs=1e-5)
+        robot.board.clock = lambda: robot.board.sleep and 1e9          # long after: stale
+        assert robot.get_scan().shape == (0, 3)
+    finally:
+        tx.close()

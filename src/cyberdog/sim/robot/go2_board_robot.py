@@ -16,6 +16,8 @@ import math
 import socket
 import time
 
+import numpy as np
+
 from cyberdog.sim.robot.robot_interface import RobotInterface
 
 STATE_STALE_S = 0.2       # the board reports at 50 Hz: 10 missed reports
@@ -184,10 +186,20 @@ class BoardTwinRobot(MujocoRobot):
     # the new floor plus the standing height it rode at, for SETTLE_S.
     ARRIVED_M, SETTLE_S, RIDE_TIMEOUT_S = 0.05, 1.0, 60.0
 
+    CLOUD_STALE_S = 0.5       # an older cloud is no cloud: the brain is blind, as the board is
+
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
-                 board_host=None, listen=None, lift=None):
+                 board_host=None, listen=None, lift=None, clouds=True):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
         self.lift = lift          # LiftLink, for rides; None: no floor but the first
+        # The Mid-360 as the board sees it, forwarded on 9872: what the brain
+        # perceives with, as on the dog. clouds=False keeps the twin's own
+        # raycast (it sees only what the twin's scene has, never a real person).
+        self.clouds = None
+        if clouds:
+            from go2_board.lidar import BRAIN_CLOUD_PORT, CloudLink
+            from go2_board.link import HOST
+            self.clouds = CloudLink(port=BRAIN_CLOUD_PORT, host=listen or HOST)
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 
@@ -302,7 +314,34 @@ class BoardTwinRobot(MujocoRobot):
     def now(self):
         return self.board.now()
 
+    def get_scan(self):
+        """The board's newest Mid-360 cloud in the map frame, (N, 3).
+
+        The board sends it levelled, in the trunk frame, the floor at z = 0;
+        turned by the dog's heading and set on the floor it is on. Empty when
+        no cloud has come for CLOUD_STALE_S: blind, which perception treats as
+        seeing nothing, while the board itself stops translation."""
+        if self.clouds is None:
+            return MujocoRobot.get_scan(self)
+        c = self.clouds.poll()
+        if c is None or self.board.clock() - self._cloud_seen(c) > self.CLOUD_STALE_S:
+            return np.empty((0, 3))
+        x, y, th = self.get_pose()
+        cs, sn = math.cos(th), math.sin(th)
+        p = c.xyz.astype(float)
+        return np.column_stack((x + cs * p[:, 0] - sn * p[:, 1],
+                                y + sn * p[:, 0] + cs * p[:, 1],
+                                self.z + p[:, 2]))
+
+    def _cloud_seen(self, c):
+        """When this cloud first arrived here, on this side's clock."""
+        if c.seq != getattr(self, "_cloud_seq", None):
+            self._cloud_seq, self._cloud_at = c.seq, self.board.clock()
+        return self._cloud_at
+
     def close(self):
         self.board.close()
         if self.lift is not None:
             self.lift.close()
+        if self.clouds is not None:
+            self.clouds.sock.close()

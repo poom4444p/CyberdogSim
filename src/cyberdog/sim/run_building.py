@@ -2551,6 +2551,9 @@ def main():
     ap.add_argument("--board-host", default=None, metavar="IP",
                     help="with --robot go2_board: the board's address when it is another "
                          "machine (HIL over USB-C: 192.168.55.1); default localhost")
+    ap.add_argument("--twin-lidar", action="store_true",
+                    help="with --robot go2_board: perceive with the twin's raycast, not the "
+                         "board's Mid-360 cloud (sees no real person; for comparison only)")
     ap.add_argument("--lift-host", default="127.0.0.1", metavar="IP",
                     help="with --robot go2_board: where go2_world's lift takes calls (udp 9880)")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
@@ -2595,7 +2598,7 @@ def main():
             from cyberdog.sim.robot.go2_board_robot import LiftLink
             robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
                                    board_host=args.board_host, listen=args.brain_listen,
-                                   lift=LiftLink(args.lift_host))
+                                   lift=LiftLink(args.lift_host), clouds=not args.twin_lidar)
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
         else:

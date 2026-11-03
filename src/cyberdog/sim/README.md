@@ -623,17 +623,25 @@ as the board's shadow (`BoardTwinRobot`): put at the board's pose every tick,
 it gives the camera, the LiDAR and the checks their view. Floor 1 only.
 
 ```bash
-mjpython ~/Work/unitree/go2_world/scripts/run_world.py              # unitree_sim env
+python ~/Work/unitree/go2_world/scripts/run_world.py --headless    # unitree_sim env
 python ~/Work/unitree/go2_world/scripts/run_lidar.py                # once the world is up
-python ~/Work/unitree/go2_board/scripts/board_main.py --policy ~/Work/unitree/go2_board/policies/go2_flat_v5
-python -m cyberdog.sim.run_building "room 103" --robot go2_board --no-video --no-vamos
+python ~/Work/unitree/go2_board/scripts/board_main.py --stale-ms 200 \
+    --policy ~/Work/unitree/go2_board/policies/go2_flat_v5
+cd vendor/VAMOS/server && bash start_server.sh                      # vamos_mac env
+python -m cyberdog.sim.run_building "room 101" --robot go2_board --no-video --vamos
 ```
 
-Checked: room 103 from the board's start (21.0, 9.5), 23 s, no collisions,
-no safety trips. If the board leaves WALK (a trip), the run ends
-`FAILED BY go2_board` with the reason. Not yet with `--vamos`: the request
-blocks the brain for the whole VLM call (32-45 s on an M5, 5 paths), and in
-real time that is the board told nothing; it needs a worker thread first.
+Checked: room 103 without VAMOS (23 s), and room 101 with it (40 s, 11 of 11
+answers, 2.4 s old on arrival, mean safety 0.99); no collisions, no trips.
+On a real-time robot the VLM call runs on a worker thread, so the brain keeps
+sending at 20 Hz while VAMOS thinks. If the board leaves WALK (a trip), the
+run ends `FAILED BY go2_board` with the reason.
+
+On a 16 GB Mac, close anything else holding GPU memory first (an LLM server):
+swapping took VAMOS from ~2 s to 30-45 s a call and stalled every process.
+`--headless` and `--stale-ms 200` are for the Mac: the viewer held the
+physics 50-130 ms while the GPU was busy, and the desktop still pauses now
+and then. Neither belongs on the dog.
 
 ## Known limits
 

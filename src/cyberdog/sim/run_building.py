@@ -118,6 +118,14 @@ DETOUR = 0.70             # ...and while actually stepping around something
 # What is left is the honest emergency: ROBOT_R, the distance at which the dog
 # is touching something rather than approaching it.
 BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
+# Run.respect_board: a robot with its own LiDAR guard (go2_board). Free
+# distance ahead, as the board measures it, under which pushing on is pointless
+# (the guard stops at 0.30 m and crawls below 1 m), the free distance that ends
+# the turn, how fast to turn with a person on the handle, and how long to try.
+BOARD_NEAR_M = 0.45
+BOARD_CLEAR_M = 0.80
+BOARD_TURN_W = 0.4         # rad/s
+BOARD_GIVE_UP_S = 8.0
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
@@ -639,6 +647,7 @@ class Run:
         # the call: the request runs on a worker thread and lands when it is
         # done. The twin keeps the repeatable sim-time release above.
         self.real_time = getattr(self.robot, "REAL_TIME", False)
+        self.board_turning, self.board_since, self.board_gave_up = None, 0.0, False
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1114,6 +1123,47 @@ class Run:
         if touched:
             self.hits["ticks"] += 1
             self.hits["boxes"].update(f"floor {floor} {what}" for what in touched)
+
+    def respect_board(self, cmd, pose):
+        """Work with the board's LiDAR guard instead of pushing into it.
+
+        The guard slows the dog from SLOW_M and stops it at STOP_M whatever the
+        brain asks, and the brain's own margins (from its plan and its view)
+        can disagree with it by a few centimetres: walking past a trolley it
+        judged 0.33 m clear, the guard saw a corner inside its 0.30 m band and
+        the dog stood there pushing for five minutes. So:
+          - never backwards: the person on the handle is right behind;
+          - pushed against the guard (front under BOARD_NEAR_M, asking to go
+            forward): stop, and turn slowly towards the side the board sees
+            more room on, saying so, until the front opens (BOARD_CLEAR_M);
+          - BOARD_GIVE_UP_S of that without the front opening: stop and ask
+            the person for help, as the brain does when its own plan has no
+            way past.
+        """
+        vx, vy, w = cmd
+        vx = max(vx, 0.0)                                    # never back into the person
+        free = self.robot.board_clearance()
+        if free is None:
+            return (vx, vy, w)                               # blind: the board turns only
+        if self.board_turning is None and vx > 0.05 and free["front"] < BOARD_NEAR_M:
+            self.board_turning = 1.0 if free["left"] >= free["right"] else -1.0
+            self.board_since = self.robot.now()
+            self.say("Too close to something ahead. Turning "
+                     + ("left" if self.board_turning > 0 else "right") + " to find the way.")
+            self.obs["board_turns"] = self.obs.get("board_turns", 0) + 1
+        if self.board_turning is not None:
+            if free["front"] >= BOARD_CLEAR_M:
+                self.board_turning = None                    # open again: the plan takes over
+                return (vx, vy, w)
+            if self.robot.now() - self.board_since > BOARD_GIVE_UP_S:
+                self.say("I cannot get past this. Please help me find the way.")
+                x, y, _ = pose
+                self.gave_up = ("go2_board", f"the board's guard held the front closed for "
+                                f"{BOARD_GIVE_UP_S:.0f} s at ({x:.1f}, {y:.1f}), turning did not open it")
+                self.board_gave_up = True
+                return (0.0, 0.0, 0.0)
+            return (0.0, 0.0, BOARD_TURN_W * self.board_turning)
+        return (vx, vy, w)
 
     def handler_at(self):
         """Where the person on the handle is: straight behind, along the heading."""
@@ -2188,6 +2238,13 @@ class Run:
                     cmd = (0.0, side, 0.0)
             elif self.evading:
                 self.evading = 0.0
+            # The board's guard is the real sensor's word: what the plan wants
+            # it cannot overrule, so it works with it instead (a robot that
+            # walks itself only; the twin has no guard to meet).
+            if getattr(self.robot, "REAL_TIME", False):
+                cmd = self.respect_board(cmd, (x, y, yaw))
+                if self.board_gave_up:
+                    return False, n
             # Last: the person on the handle overrules everything above.
             self.handle_tick()
             cmd = self.mux.apply(cmd, self.robot.MAX_V)

@@ -258,3 +258,14 @@ def test_scan_is_the_boards_cloud_in_the_map_frame(twin):
         assert robot.get_scan().shape == (0, 3)
     finally:
         tx.close()
+
+
+def test_pose_at_interpolates_the_boards_recent_states(pair):
+    robot, board = pair                                 # origin (10, 5) facing +y
+    for t, x in ((1.0, 0.0), (1.1, 1.0)):
+        board.send_state(t=t, x=x, y=0.0, z=0.3, yaw=0.0, mode="WALK", tripped=None, walker=True)
+        settle()
+        robot.board_state()
+    assert robot.pose_at(1.05) == pytest.approx((10.0, 5.5, math.pi / 2), abs=1e-6)
+    assert robot.pose_at(0.5) == pytest.approx((10.0, 5.0, math.pi / 2), abs=1e-6)
+    assert robot.pose_at(9.0) == pytest.approx((10.0, 6.0, math.pi / 2), abs=1e-6)

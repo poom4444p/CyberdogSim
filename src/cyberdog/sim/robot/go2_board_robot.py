@@ -11,6 +11,7 @@ import is inside __init__, so the twin runs without it.
 Not yet: get_scan and get_image. In the sim they come from the physics twin
 of the building (B6); on the dog, from the Mid-360 and the camera.
 """
+import collections
 import json
 import math
 import socket
@@ -82,6 +83,11 @@ class Go2BoardRobot(RobotInterface):
         self._next = self._t0 + self.CONTROL_DT
         self._cmd = (0.0, 0.0, 0.0)
         self._state, self._got = None, None
+        # (board clock, map x, y, yaw) of recent states: a cloud is placed
+        # with the pose the dog had when the board finished it, not the pose
+        # now. Placed with the pose now, a turning dog saw the trolley it was
+        # passing walk across the corridor, and stopped to let it by.
+        self._history = collections.deque(maxlen=60)
 
     # -- from the board ------------------------------------------------------
 
@@ -90,9 +96,32 @@ class Go2BoardRobot(RobotInterface):
         s = self.link.poll()
         if s is not None and s is not self._state:
             self._state, self._got = s, self.clock()
+            if s.get("x") is not None and s.get("t") is not None:
+                self._history.append((s["t"],) + self._to_map(s))
         if self._got is None or self.clock() - self._got > STATE_STALE_S:
             return None
         return self._state
+
+    def pose_at(self, t):
+        """The map pose at board-clock time t, interpolated between the states
+        either side of it (the nearest one outside them), or None."""
+        h = self._history
+        if not h:
+            return None
+        if t <= h[0][0]:
+            return h[0][1:]
+        for a, b in zip(h, list(h)[1:]):
+            if a[0] <= t <= b[0]:
+                f = (t - a[0]) / max(b[0] - a[0], 1e-9)
+                dyaw = math.atan2(math.sin(b[3] - a[3]), math.cos(b[3] - a[3]))
+                return (a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), a[3] + f * dyaw)
+        return h[-1][1:]
+
+    def _to_map(self, s):
+        x0, y0, yaw0 = self.origin
+        c, k = math.cos(yaw0), math.sin(yaw0)
+        return (x0 + c * s["x"] - k * s["y"], y0 + k * s["x"] + c * s["y"],
+                math.atan2(math.sin(yaw0 + s["yaw"]), math.cos(yaw0 + s["yaw"])))
 
     def get_pose(self):
         s = self.board_state()
@@ -314,6 +343,17 @@ class BoardTwinRobot(MujocoRobot):
     def now(self):
         return self.board.now()
 
+    def board_clearance(self):
+        """The board's own LiDAR guard, as it reports it: free distance
+        (m) front, back, left, right, inf where it sees nothing, or None when
+        it has no fresh frame (blind: it walks nowhere, only turns)."""
+        s = self.board.board_state()
+        lid = None if s is None else s.get("lidar")
+        if not lid or lid.get("age") is None or lid["age"] > self.CLOUD_STALE_S:
+            return None
+        return {k: (math.inf if lid.get(k) is None else lid[k])
+                for k in ("front", "back", "left", "right")}
+
     def get_scan(self):
         """The board's newest Mid-360 cloud in the map frame, (N, 3).
 
@@ -326,7 +366,7 @@ class BoardTwinRobot(MujocoRobot):
         c = self.clouds.poll()
         if c is None or self.board.clock() - self._cloud_seen(c) > self.CLOUD_STALE_S:
             return np.empty((0, 3))
-        x, y, th = self.get_pose()
+        x, y, th = self.board.pose_at(c.t) or self.get_pose()
         cs, sn = math.cos(th), math.sin(th)
         p = c.xyz.astype(float)
         return np.column_stack((x + cs * p[:, 0] - sn * p[:, 1],

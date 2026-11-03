@@ -127,40 +127,56 @@ class Plan(NamedTuple):
 
 
 class _Planner:
-    def __init__(self, start, goal, ok, people, handler_behind, v):
+    # Speed (the J4012 at 25 W ran this at 133 ms a plan, spec L6 asks under
+    # REPLAN_S): the point check is the inner loop, ~29 000 times a plan, so it
+    # works on plain tuples and squared distances, the heading's cos and sin
+    # are worked out once an edge, and the tree's points live in arrays grown
+    # in place rather than a list turned into an array every sample. The
+    # plans are the same, point for point.
+    def __init__(self, start, goal, ok, people, handler_behind, v, capacity=1024):
         self.sx, self.sy, self.syaw = start
         self.goal = goal
         self.ok = ok
         self.people = people
+        self._crowd = [(p.x, p.y, p.vx, p.vy) for p in people]
         self.behind = handler_behind
         self.v = v
         fastest = max((math.hypot(p.vx, p.vy) for p in self.people), default=0.0)
         self.check = (min(CHECK, REL_CHECK * v / (v + fastest)) if self.people
                       else CHECK)
         self.xy = [(self.sx, self.sy)]
+        self._px = np.empty(capacity)
+        self._py = np.empty(capacity)
+        self._px[0], self._py[0] = self.sx, self.sy
         self.yaw = [self.syaw]
         self.parent = [-1]
         self.cost = [0.0]
         self.length = [0.0]     # metres walked to the node: its time is length / v
 
     # -- checks -----------------------------------------------------------
-    def _point(self, x, y, yaw, t):
+    def _point(self, x, y, yaw, t, cos_yaw=None, sin_yaw=None):
         """(free, penalty) for the dog at (x, y) heading `yaw` at time `t`."""
         if not self.ok(x, y, yaw):
             return False, 0.0
-        if t > PREDICT_T or not self.people:
+        if t > PREDICT_T or not self._crowd:
             return True, 0.0
-        hx, hy = x - self.behind * math.cos(yaw), y - self.behind * math.sin(yaw)
+        if cos_yaw is None:
+            cos_yaw, sin_yaw = math.cos(yaw), math.sin(yaw)
+        hx, hy = x - self.behind * cos_yaw, y - self.behind * sin_yaw
         sep = need(t)
+        sep2, hsep2 = sep * sep, HANDLER_SEP * HANDLER_SEP
         near = INF
-        for p in self.people:
-            px, py = p.x + p.vx * t, p.y + p.vy * t
-            d = math.hypot(x - px, y - py)
-            if d < sep:
+        for px0, py0, vx, vy in self._crowd:
+            px, py = px0 + vx * t, py0 + vy * t
+            dx, dy = x - px, y - py
+            if dx * dx + dy * dy < sep2:
                 return False, 0.0
-            if math.hypot(hx - px, hy - py) < HANDLER_SEP:
+            ex, ey = hx - px, hy - py
+            if ex * ex + ey * ey < hsep2:
                 return False, 0.0
-            near = min(near, d)
+            d = math.hypot(dx, dy)
+            if d < near:
+                near = d
         return True, max(0.0, COMFORT - near) / COMFORT
 
     def edge(self, a, yaw_a, len_a, b):
@@ -176,10 +192,11 @@ class _Planner:
             return False, 0.0, yaw
         n = max(int(math.ceil(d / self.check)), 1)
         pen = 0.0
+        c, sn = math.cos(yaw), math.sin(yaw)
         for k in range(1, n + 1):
             s = d * k / n
             free, p = self._point(a[0] + dx * k / n, a[1] + dy * k / n, yaw,
-                                  (len_a + s) / self.v)
+                                  (len_a + s) / self.v, c, sn)
             if not free:
                 return False, 0.0, yaw
             pen += p
@@ -188,8 +205,9 @@ class _Planner:
     # -- tree -------------------------------------------------------------
     def add(self, q):
         """Try to grow the tree towards `q`. Index of the new node, or None."""
-        pts = np.asarray(self.xy)
-        dist = np.hypot(pts[:, 0] - q[0], pts[:, 1] - q[1])
+        m = len(self.xy)
+        px, py = self._px[:m], self._py[:m]
+        dist = np.hypot(px - q[0], py - q[1])
         near_i = int(np.argmin(dist))
         nx, ny = self.xy[near_i]
         d = float(dist[near_i])
@@ -197,7 +215,7 @@ class _Planner:
             return None
         if d > STEP:
             q = (nx + (q[0] - nx) * STEP / d, ny + (q[1] - ny) * STEP / d)
-            dist = np.hypot(pts[:, 0] - q[0], pts[:, 1] - q[1])
+            dist = np.hypot(px - q[0], py - q[1])
         # Choose parent: cheapest first, and stop at the first edge that is
         # free -- the expensive part is the check, not the sort.
         hood = np.nonzero(dist <= NEIGHBOUR_R)[0].tolist()
@@ -214,6 +232,10 @@ class _Planner:
             return None
         j, c, yaw, length = best
         k = len(self.xy)
+        if k == len(self._px):                         # full: double, keep what is there
+            self._px = np.concatenate([self._px, np.empty(k)])
+            self._py = np.concatenate([self._py, np.empty(k)])
+        self._px[k], self._py[k] = q
         self.xy.append(q)
         self.yaw.append(yaw)
         self.parent.append(j)

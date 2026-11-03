@@ -189,3 +189,12 @@ def test_twin_stops_the_run_when_the_board_stops_walking(twin):
     settle()
     with pytest.raises(BoardStopped, match="LIMP, not walking: stale state"):
         robot.step()
+
+
+def test_board_host_and_listen_reach_the_link():
+    robot = Go2BoardRobot(port=19893, board_port=19892, board_host="127.0.0.1", listen="127.0.0.1")
+    try:
+        assert robot.link.board == ("127.0.0.1", 19892)
+        assert robot.link.sock.getsockname() == ("127.0.0.1", 19893)
+    finally:
+        robot.close()

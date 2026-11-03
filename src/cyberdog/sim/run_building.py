@@ -26,6 +26,7 @@ keeps torch out of the process; --nlu runs the real Input Treating Layer.
 """
 import argparse
 import collections
+import concurrent.futures
 import hashlib
 import json
 import math
@@ -53,10 +54,11 @@ from cyberdog.sim.handle import HandleScript, SafetyMux
 from cyberdog.sim.overlay import (ChaseCam, draw_marker, draw_path,
                                   draw_points, label_places, safety_bar)
 from cyberdog.sim.robot.mujoco_robot import MujocoRobot
+from cyberdog.sim.robot.go2_board_robot import BoardStopped
 from cyberdog.sim.scene import levels, lift, obstacles, pedestrians, stairs
 from cyberdog.sim.sensing import perception
 from cyberdog.sim.sensing.dreaming import ROBOT_R
-from cyberdog.sim.sensing.lidar import MOUNT_H, Lidar
+from cyberdog.sim.sensing.lidar import MOUNT_H
 from cyberdog.sim.sensing.perception import (INF, LiveClearance, free_destination,
                                              line_clear)
 from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS_R,
@@ -64,6 +66,10 @@ from cyberdog.sim.sensing.tracking import (CLEAR_R, MAX_RADIUS, MIN_RADIUS, MISS
 from cyberdog.sim.vamos_client import ahead
 
 START_LOCATION = "main entrance"
+# Where go2_board's odometry starts in the map frame, with --robot go2_board:
+# go2_world's building is this map shifted so the Go2 starts at its origin
+# (see go2_world/assets/building.xml). On the dog, FAST-LIO's start instead.
+GO2_WORLD_ORIGIN = (21.0, 9.5, 0.0)
 START_FLOOR = 1
 FPS = 20                  # equals the control rate, so the video is real time
 WAIT_S = 1.5              # held at the lift doors, and while auto-confirming
@@ -591,9 +597,9 @@ class Run:
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
-                 track_log=None):
-        self.robot = MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
-                                 start_z=levels.floor_z(START_FLOOR))
+                 track_log=None, robot=None):
+        self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
+                                          start_z=levels.floor_z(START_FLOOR))
         self.cam = load_camera_config()
         self.router = router
         self._doors = {}          # floor -> [(name, door_xy)], for the captions
@@ -629,12 +635,17 @@ class Run:
         # was asked on, body xy then). One at a time, as a GPU serves them.
         self.pending = None
         self.vlm = {"asked": 0, "answers": 0, "dropped": 0, "age": 0.0, "moved": 0.0}
+        # A robot on the wall clock (go2_board) cannot have the loop paused for
+        # the call: the request runs on a worker thread and lands when it is
+        # done. The twin keeps the repeatable sim-time release above.
+        self.real_time = getattr(self.robot, "REAL_TIME", False)
+        self.vlm_worker = None    # the call still running, dropped answer or not
+        self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
         # route and seed with equal fingerprints commanded the dog identically,
         # tick for tick -- which is how a shadow run proves it touched nothing.
         self.commands = hashlib.sha256()
         self.n_commands = 0
-        self.lidar = Lidar(self.robot.model, self.robot.data)
         # The person's override, last before the motors (handle.py). With no
         # handle the mux reads zero force every tick and passes commands on
         # unchanged. With one, its continue is also how the person answers
@@ -835,6 +846,8 @@ class Run:
             img[top:top + 16, 14:30] = (250, 205, 90) if lit else (70, 72, 78)
 
     def close(self):
+        if self.vlm_pool is not None:
+            self.vlm_pool.shutdown(wait=False, cancel_futures=True)
         if self.writer is not None:
             self.writer.close()
         if self.track_log is not None:
@@ -901,7 +914,7 @@ class Run:
             self.shadow_n[kind] += 1
         rnd = lambda pts: [[round(a, 3), round(b, 3)] for a, b in pts]
         self.shadow.write(json.dumps({
-            "floor": floor, "tick": n, "t": round(self.robot.sim_time, 2),
+            "floor": floor, "tick": n, "t": round(self.robot.now(), 2),
             "pose": [round(x, 3), round(y, 3), round(yaw, 4)],
             "map_target": [round(target[0], 3), round(target[1], 3)],
             "candidates": [{"path": rnd(p), "factor": None if f is None else round(f, 4),
@@ -929,6 +942,17 @@ class Run:
         The wall-clock time the HTTP call really took is the default latency:
         the sim is paused while it runs, then charged for it afterwards.
         """
+        if self.real_time:
+            # Frame and lens pose now, on this thread (the renderer's); only
+            # the HTTP call and the projection go to the worker.
+            if self.vlm_pool is None:
+                self.vlm_pool = concurrent.futures.ThreadPoolExecutor(1, "vamos")
+            self.vlm_worker = self.vlm_pool.submit(
+                self.policy(floor).request, self.robot.get_image().copy(),
+                vamos_prompt(state), self.robot.camera_pose())
+            self.pending = (self.vlm_worker, None, n, self.robot.get_pose()[:2])
+            self.vlm["asked"] += 1
+            return
         t0 = time.perf_counter()
         cam_pose = self.robot.camera_pose()
         paths = self.policy(floor).request(self.robot.get_image(),
@@ -939,14 +963,25 @@ class Run:
                         n, self.robot.get_pose()[:2])
         self.vlm["asked"] += 1
 
+    def vlm_busy(self):
+        """A call is still running on the worker, even one whose answer was
+        dropped at a leg's end: one at a time, as the GPU serves them."""
+        return self.vlm_worker is not None and not self.vlm_worker.done()
+
     def take_answer(self, floor, n, pose, destination):
         """The pending answer, if it has landed: judged from where the dog is
         now, not from where it was asked. Returns plan()'s triple, or None
         while the answer is still on its way.
         """
-        if self.pending is None or n < self.pending[0]:
+        if self.pending is None:
             return None
-        _, paths, asked_at, xy0 = self.pending
+        lands, paths, asked_at, xy0 = self.pending
+        if isinstance(lands, concurrent.futures.Future):
+            if not lands.done():
+                return None
+            paths = lands.result()
+        elif n < lands:
+            return None
         self.pending = None
         self.vlm["answers"] += 1
         self.vlm["age"] += (n - asked_at) * self.robot.CONTROL_DT
@@ -963,7 +998,7 @@ class Run:
         Before the command goes out, so a tug stops the dog on the tick it is
         felt: one control tick, 50 ms at 20 Hz, inside the spec's 100 ms.
         """
-        t, dt = self.robot.sim_time, self.robot.CONTROL_DT
+        t, dt = self.robot.now(), self.robot.CONTROL_DT
         event = self.mux.update(self.handle.force(t), self.handle.pressed(t, dt), dt)
         x, y, _ = self.robot.get_pose()
         if event == "tug":
@@ -1321,13 +1356,13 @@ class Run:
         # back to the moment it happened.
         x, y, yaw = self.robot.get_pose()
         if touched and self.handler_hits["since"] is None:
-            self.handler_hits["since"] = self.robot.sim_time
-            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch starts: dog "
+            self.handler_hits["since"] = self.robot.now()
+            print(f"    t={self.robot.now():6.1f}s  HANDLER touch starts: dog "
                   f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
                   f"({px:.2f}, {py:.2f}), touching {', '.join(sorted(touched))}")
         elif not touched and self.handler_hits["since"] is not None:
-            print(f"    t={self.robot.sim_time:6.1f}s  HANDLER touch ends after "
-                  f"{self.robot.sim_time - self.handler_hits['since']:.1f}s: dog "
+            print(f"    t={self.robot.now():6.1f}s  HANDLER touch ends after "
+                  f"{self.robot.now() - self.handler_hits['since']:.1f}s: dog "
                   f"({x:.2f}, {y:.2f}) heading {math.degrees(yaw):.0f} deg, person "
                   f"({px:.2f}, {py:.2f})")
             self.handler_hits["since"] = None
@@ -1404,7 +1439,7 @@ class Run:
         truth = self.ground_truth(floor, pose, target, live)
         self.aff_n[(adata.CLASS_NAMES[cls], truth)] += 1
         self.aff_log.write(json.dumps({
-            "t": round(self.robot.sim_time, 2), "floor": floor,
+            "t": round(self.robot.now(), 2), "floor": floor,
             "pose": [round(v, 3) for v in pose], "target": [round(v, 3) for v in target],
             "class": adata.CLASS_NAMES[cls], "probs": [round(float(v), 3) for v in probs],
             "seen": round(seen, 3), "truth": truth}) + "\n")
@@ -1426,15 +1461,15 @@ class Run:
         # back to the moment it happened.
         yaw = self.robot.get_pose()[2]
         if near and self.ped["since"] is None:
-            self.ped["since"] = self.robot.sim_time
+            self.ped["since"] = self.robot.now()
             d, w = min(near, key=lambda n: n[0])
             hx, hy = w.heading()
-            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT starts: dog ({x:.2f}, {y:.2f}) "
+            print(f"    t={self.robot.now():6.1f}s  CONTACT starts: dog ({x:.2f}, {y:.2f}) "
                   f"heading {math.degrees(yaw):.0f} deg, {w.kind} walker ({w.x:.2f}, {w.y:.2f}) "
                   f"heading {math.degrees(math.atan2(hy, hx)):.0f} deg, {d:.2f} m")
         elif not near and self.ped["since"] is not None:
-            print(f"    t={self.robot.sim_time:6.1f}s  CONTACT ends after "
-                  f"{self.robot.sim_time - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
+            print(f"    t={self.robot.now():6.1f}s  CONTACT ends after "
+                  f"{self.robot.now() - self.ped['since']:.1f}s: dog ({x:.2f}, {y:.2f}) "
                   f"heading {math.degrees(yaw):.0f} deg")
             self.ped["since"] = None
 
@@ -1792,7 +1827,7 @@ class Run:
             # on no map reacts because of this one call.
             self.step_crowd()
             live = self.clearance(floor)
-            scan = self.lidar.scan((x, y), self.robot.z, yaw)
+            scan = self.robot.get_scan()
             live.update(scan, self.robot.z, (x, y), origin=(x, y, self.robot.z + MOUNT_H))
             if self.elev is not None:
                 self.elev.add(scan, (x, y), self.robot.z)
@@ -1808,7 +1843,7 @@ class Run:
                 # planner's chance margin from it. Ground truth -- for the
                 # log only, never read back.
                 self.track_log.write(json.dumps({
-                    "t": round(self.robot.sim_time, 3), "floor": floor,
+                    "t": round(self.robot.now(), 3), "floor": floor,
                     "tracks": [(t.x, t.y, t.vx, t.vy) for t in tracks if t.moving],
                     "walkers": self.crowds[floor].positions()}) + "\n")
             # Somebody standing still ahead who was seen walking is a person,
@@ -1831,7 +1866,7 @@ class Run:
             # waited for; only a crate is gone round. See LiveClearance.exclude.
             live.exclude([(t.x, t.y, t.r) for t in walking])
             live.remember([(t.x, t.y, t.r) for t in tracks if t.walked],
-                          self.robot.sim_time, (x, y))
+                          self.robot.now(), (x, y))
             self.movers = np.array([(t.x, t.y) for t in walking]).reshape(-1, 2)
             self.score_collision(floor, x, y)
             self.score_handler(floor)
@@ -1935,7 +1970,7 @@ class Run:
             # carries on either way. `asked` is an answer arriving this tick.
             due = n % (REPLAN_BLOCKED if proposed is None else REPLAN_EVERY) == 0
             if ((self.vamos or self.shadow) and state["state"] == "TRACK" and due
-                    and self.pending is None):
+                    and self.pending is None and not self.vlm_busy()):
                 self.ask_vamos(floor, n, state)
             answer = self.take_answer(floor, n, (x, y, yaw),
                                       state.get("destination") or waypoints[-1])
@@ -2162,7 +2197,7 @@ class Run:
             self.robot.step()
 
             if verbose and n % 60 == 0:
-                print(f"    t={self.robot.sim_time:6.1f}s  floor {floor}  "
+                print(f"    t={self.robot.now():6.1f}s  floor {floor}  "
                       f"pos=({x:5.1f},{y:5.1f})  wp={i}/{len(waypoints) - 1}  "
                       f"{state['state']}")
         self.gave_up = ("control", f"{MAX_TICKS} ticks on floor {floor} without arriving, "
@@ -2206,7 +2241,7 @@ class Run:
         if self.has_handle:
             dt = self.robot.CONTROL_DT
             while True:
-                t = self.robot.sim_time
+                t = self.robot.now()
                 was_stopped = self.mux.stopped
                 self.handle_tick()
                 if (self.handle.pressed(t, dt) and not was_stopped
@@ -2497,6 +2532,9 @@ def main():
     ap.add_argument("--autolabel", default=None, metavar="DIR",
                     help="keep onboard frames labelled with the path the dog then walked, "
                          "for the VAMOS LoRA (sim/autolabel.py); map-only, not with --vamos")
+    ap.add_argument("--robot", choices=["twin", "go2_board"], default="twin",
+                    help="who walks: the kinematic twin, or go2_board over its link "
+                         "(go2_world's physics or the dog; floor 1 only)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
                     help="play the video back N times faster (control still runs at 20 Hz)")
     args = ap.parse_args()
@@ -2531,7 +2569,16 @@ def main():
             print(f"  stop {k}: {name}" + (f" (floor {floor})" if floor else ""))
 
         layer = "planning"
-        start_xy, legs, faces = plan_stops(router, stops)
+        robot = None
+        if args.robot == "go2_board":
+            from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
+            robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN)
+            start_xy, legs, faces = plan_stops(router, stops,
+                                               start=(START_FLOOR, robot.get_pose()[:2]))
+            if any(leg[0] != START_FLOOR for leg in legs):
+                raise SystemExit("--robot go2_board walks floor 1 only: no lift, no stairs")
+        else:
+            start_xy, legs, faces = plan_stops(router, stops)
     except NoAccessibleRoute as refusal:
         raise SystemExit(f"[voice] {refusal}\nREFUSED BY planning: no accessible route")
     except SystemExit as refusal:
@@ -2550,7 +2597,10 @@ def main():
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
               handle=handle if args.handle else None,
-              affordance_shadow=args.affordance_shadow, autolabel=args.autolabel)
+              affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
+              robot=robot)
+    if robot is not None:
+        robot.start()
 
     ok, halted = True, None
     try:
@@ -2601,13 +2651,16 @@ def main():
                 # destination and immediately walks off has not delivered it.
                 run.hold(WAIT_S * 2)
             k += 1
-    except HazardStop as stop:
+    except (HazardStop, BoardStopped) as stop:
         ok, halted = False, stop
     if ok:
         run.behind = True
         for _ in range(FPS * 2):      # hold the arrival, seen over its shoulder
             run.frame()
     run.close()
+    if args.robot == "go2_board":
+        run.robot.board.lie()
+        run.robot.close()
 
     x, y, _ = run.robot.get_pose()
     if isinstance(halted, HandleStop):

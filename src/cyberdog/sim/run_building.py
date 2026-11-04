@@ -127,6 +127,23 @@ BOARD_CLEAR_M = 0.80
 BOARD_TURN_W = 0.4         # rad/s
 BOARD_GIVE_UP_S = 8.0
 BOARD_STALL_S, BOARD_STALL_M = 2.0, 0.05   # asked forward this long, moved less: stuck
+# Before turning, a sidestep: the guard closes the front for anything within
+# BODY_HALF_W + MARGIN (0.30 m) of the dog's centre line, so a dog 0.25 m from
+# a trolley's side is stopped by its corner however clear the way past it is;
+# turning on the spot swings the nose into the trolley or the wall, and in the
+# 0.90 m gap between them both ways stayed closed (every time, at (23.2, 8.6)).
+# A few centimetres sideways, towards the side the board sees more room on,
+# puts the corner outside the band. Never backwards; slow, with a person on
+# the handle; only towards a side with more than the guard's 0.30 m stop.
+BOARD_SIDE_V = 0.12        # m/s sideways
+BOARD_SIDE_M = 0.25        # m sideways at most, then turn
+BOARD_SIDE_S = 3.0         # s sideways at most, then turn
+BOARD_SIDE_ROOM = 0.35     # m free on that side to step into it at all
+# ...unless the plan is turning: then the turn is the plan's, not the roomier
+# side's. Facing a trolley at 30 deg in that gap, the plan asked -1.0 rad/s
+# (right, round it) and the roomier side was left: stepping left took the nose
+# closer to the corner (front 0.15 -> 0.08 m) until it turned right after all.
+BOARD_PLAN_W = 0.3         # rad/s the plan asks, above which its way is the way
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
@@ -653,6 +670,7 @@ class Run:
         self.board_turning, self.board_since, self.board_gave_up = None, 0.0, False
         self.board_push = None    # (t, x, y) since asking forward, for respect_board's stall
         self.board_flipped = False
+        self.board_side = None    # (sign, t, x, y) while sidestepping, before any turn
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1139,9 +1157,16 @@ class Run:
         the dog stood there pushing for five minutes. So:
           - never backwards: the person on the handle is right behind;
           - pushed against the guard (front under BOARD_NEAR_M, asking to go
-            forward): stop, and turn slowly towards the side the board sees
-            more room on, saying so, until the front opens (BOARD_CLEAR_M);
-          - BOARD_GIVE_UP_S of that without the front opening: stop and ask
+            forward) while the plan is turning (over BOARD_PLAN_W): stop, and
+            turn slowly the plan's way, saying so, until the front opens
+            (BOARD_CLEAR_M);
+          - pushed against it while the plan is going straight: step slowly
+            sideways towards the side the board sees more room on -- at most
+            BOARD_SIDE_M or BOARD_SIDE_S, and only while that side has more
+            than BOARD_SIDE_ROOM;
+          - still closed: turn slowly the plan's way (or the roomier side's),
+            then the other;
+          - BOARD_GIVE_UP_S of turning without the front opening: stop and ask
             the person for help, as the brain does when its own plan has no
             way past.
         """
@@ -1168,13 +1193,44 @@ class Run:
                     self.board_push = (now, x, y)            # moving: start the window again
         else:
             self.board_push, stalled = None, False
-        if self.board_turning is None and vx > 0.05 and (free["front"] < BOARD_NEAR_M or stalled):
-            self.board_turning = 1.0 if free["left"] >= free["right"] else -1.0
-            self.board_flipped = False
-            self.board_since = self.robot.now()
-            self.say("Too close to something ahead. Turning "
-                     + ("left" if self.board_turning > 0 else "right") + " to find the way.")
+        def roomier():
+            return 1.0 if free["left"] >= free["right"] else -1.0
+
+        def planned():
+            """The way the plan is turning, when it is turning; else None."""
+            return math.copysign(1.0, w) if abs(w) > BOARD_PLAN_W else None
+
+        def room(sign):
+            return free["left"] if sign > 0 else free["right"]
+
+        def turn(sign, prefix=""):
+            self.board_turning, self.board_flipped, self.board_since = sign, False, now
+            self.say(prefix + "Turning " + ("left" if sign > 0 else "right") + " to find the way.")
+
+        side = self.board_side
+        if (self.board_turning is None and side is None and vx > 0.05
+                and (free["front"] < BOARD_NEAR_M or stalled)):
             self.obs["board_turns"] = self.obs.get("board_turns", 0) + 1
+            sign = roomier()
+            if planned() is not None:
+                turn(planned(), "Too close to something ahead. ")   # the plan's way round
+            elif room(sign) > BOARD_SIDE_ROOM:
+                side = self.board_side = (sign, now, x, y)
+                self.say("Too close to something ahead. Stepping "
+                         + ("left" if sign > 0 else "right") + " to find the way.")
+                self.obs["board_sidesteps"] = self.obs.get("board_sidesteps", 0) + 1
+            else:
+                turn(sign, "Too close to something ahead. ")
+        if side is not None:
+            sign, t0, x0, y0 = side
+            if free["front"] >= BOARD_CLEAR_M:
+                self.board_side = None                       # open again: the plan takes over
+                return (vx, vy, w)
+            if (now - t0 < BOARD_SIDE_S and math.dist((x, y), (x0, y0)) < BOARD_SIDE_M
+                    and room(sign) > BOARD_SIDE_ROOM):
+                return (0.0, BOARD_SIDE_V * sign, 0.0)
+            self.board_side = None                           # stepped as far as it may: turn
+            turn(planned() or roomier())
         if self.board_turning is not None:
             if free["front"] >= BOARD_CLEAR_M:
                 self.board_turning = None                    # open again: the plan takes over

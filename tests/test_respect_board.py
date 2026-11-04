@@ -22,7 +22,8 @@ def stub(free):
     robot.free = free
     said = []
     run = types.SimpleNamespace(robot=robot, board_turning=None, board_since=0.0, board_push=None, board_flipped=False,
-                                board_side=None, board_gave_up=False, gave_up=None, obs={}, say=said.append)
+                                board_side=None, board_against=0, board_gave_up=False, gave_up=None, obs={},
+                                say=said.append)
     run.respect_board = rb.Run.respect_board.__get__(run)
     return run, said
 
@@ -103,6 +104,39 @@ def test_after_a_sidestep_the_turn_is_the_plans_way():
     run.respect_board((0.4, 0.0, 0.0), (0, 0, 0))                                 # straight: step left
     run.robot.t = rb.BOARD_SIDE_S + 0.1
     assert run.respect_board((0.4, 0.0, -0.8), (0, 0, 0)) == (0.0, 0.0, -rb.BOARD_TURN_W)
+
+
+def test_the_turn_follows_the_plan_when_it_asks_the_other_way():
+    # The J4012 run stuck at (23.2, 8.6), from its trace: both sides tight, the
+    # plan barely turning, so the turn went right (the roomier side) -- then the
+    # plan asked left for 4 s while the dog turned on into the wall.
+    run, said = stub(open_(front=0.32, left=0.14, right=0.22))
+    assert run.respect_board((0.56, 0.0, 0.06), (23.24, 8.75, -0.51))[2] == -rb.BOARD_TURN_W
+    run.robot.free = open_(front=0.25, left=0.15, right=0.20)
+    for k in range(1, rb.BOARD_PLAN_TICKS):
+        run.robot.t = 0.05 * k
+        assert run.respect_board((0.49, 0.0, 0.99), (23.25, 8.73, -0.57))[2] == -rb.BOARD_TURN_W
+    run.robot.t = 0.05 * rb.BOARD_PLAN_TICKS
+    assert run.respect_board((0.49, 0.0, 0.99), (23.25, 8.73, -0.57)) == (0.0, 0.0, rb.BOARD_TURN_W)
+    assert "Turning left, the way on" in said[-1]
+
+
+def test_one_tick_of_the_plan_the_other_way_does_not_turn_it():
+    run, said = stub(open_(front=0.1, left=0.2, right=0.3))
+    run.respect_board((0.4, 0.0, -0.8), (0, 0, 0))                                # right, the plan's way
+    run.robot.t = 0.05
+    assert run.respect_board((0.4, 0.0, 0.9), (0, 0, 0))[2] == -rb.BOARD_TURN_W   # one tick left
+    run.robot.t = 0.10
+    assert run.respect_board((0.4, 0.0, -0.7), (0, 0, 0))[2] == -rb.BOARD_TURN_W  # and back
+    assert run.board_against == 0
+
+
+def test_no_half_time_flip_against_a_plan_still_asking_this_way():
+    run, said = stub(open_(front=0.1, left=0.2, right=0.3))
+    run.respect_board((0.4, 0.0, 0.8), (0, 0, 0))                                 # left, the plan's way
+    run.robot.t = rb.BOARD_GIVE_UP_S / 2 + 0.1
+    assert run.respect_board((0.4, 0.0, 0.8), (0, 0, 0))[2] == rb.BOARD_TURN_W    # still left
+    assert not any("other way" in s for s in said)
 
 
 def test_no_room_either_side_turns_at_once():

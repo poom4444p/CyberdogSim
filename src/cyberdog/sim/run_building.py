@@ -144,6 +144,12 @@ BOARD_SIDE_ROOM = 0.35     # m free on that side to step into it at all
 # (right, round it) and the roomier side was left: stepping left took the nose
 # closer to the corner (front 0.15 -> 0.08 m) until it turned right after all.
 BOARD_PLAN_W = 0.3         # rad/s the plan asks, above which its way is the way
+# ...and while turning, too: the turn started right (the plan barely turning,
+# the roomier side right), then the plan asked left at 0.3-1.2 rad/s for 4 s
+# while the dog turned on into the wall (-0.5 -> -1.16 rad), and the 8 s ran out
+# on the way back, 1.4 s short of facing the way on. So the turn follows the
+# plan once it has asked the other way this many ticks in a row (20 Hz).
+BOARD_PLAN_TICKS = 3
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
@@ -671,6 +677,7 @@ class Run:
         self.board_push = None    # (t, x, y) since asking forward, for respect_board's stall
         self.board_flipped = False
         self.board_side = None    # (sign, t, x, y) while sidestepping, before any turn
+        self.board_against = 0    # ticks in a row the plan has asked the other way round
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1165,7 +1172,9 @@ class Run:
             BOARD_SIDE_M or BOARD_SIDE_S, and only while that side has more
             than BOARD_SIDE_ROOM;
           - still closed: turn slowly the plan's way (or the roomier side's),
-            then the other;
+            and round the other way whenever the plan asks it for
+            BOARD_PLAN_TICKS; with no way from the plan, the other way at
+            half time;
           - BOARD_GIVE_UP_S of turning without the front opening: stop and ask
             the person for help, as the brain does when its own plan has no
             way past.
@@ -1205,6 +1214,7 @@ class Run:
 
         def turn(sign, prefix=""):
             self.board_turning, self.board_flipped, self.board_since = sign, False, now
+            self.board_against = 0
             self.say(prefix + "Turning " + ("left" if sign > 0 else "right") + " to find the way.")
 
         side = self.board_side
@@ -1235,11 +1245,22 @@ class Run:
             if free["front"] >= BOARD_CLEAR_M:
                 self.board_turning = None                    # open again: the plan takes over
                 return (vx, vy, w)
+            want = planned()
+            if want is not None and want != self.board_turning:
+                # The plan wants round the other way: after BOARD_PLAN_TICKS of
+                # it in a row (not one tick of a plan changing its mind), go.
+                self.board_against += 1
+                if self.board_against >= BOARD_PLAN_TICKS:
+                    self.board_turning, self.board_against = want, 0
+                    self.say("Turning " + ("left" if want > 0 else "right") + ", the way on.")
+            else:
+                self.board_against = 0
             if (self.robot.now() - self.board_since > BOARD_GIVE_UP_S / 2
-                    and not self.board_flipped):
-                # Half the time one way and still closed: the other way. In the
-                # gap between the trolley and the wall, turning towards the
-                # wall never opened, and the way on was the other side.
+                    and not self.board_flipped and want is None):
+                # Half the time one way, still closed, and no way from the plan:
+                # the other way. In the gap between the trolley and the wall,
+                # turning towards the wall never opened, and the way on was the
+                # other side.
                 self.board_turning, self.board_flipped = -self.board_turning, True
                 self.say("Trying the other way.")
             if self.robot.now() - self.board_since > BOARD_GIVE_UP_S:

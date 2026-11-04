@@ -19,6 +19,41 @@ on the Mac. They talk over the USB-C link, in the messages a real Go2 speaks.
 | `trace_run_building.py` | J4012 | the brain, printing its commands (`TRACE=1`) |
 | `dds_gaps.py` | either | how regularly states and commands arrive on the link |
 
+## Setting up a fresh J4012
+
+Once, after flashing JetPack 6.2. The board needs the internet for the installs.
+
+```
+# Mac: ssh without a password (the scripts use BatchMode)
+ssh-copy-id jittarin@192.168.55.1
+
+# board: packages, 25W mode (its ID: grep "POWER_MODEL ID" /etc/nvpmodel.conf)
+sudo apt install -y git cmake build-essential python3-venv python3-dev curl
+sudo nvpmodel -m <25W ID>
+
+# board: CycloneDDS 0.10.x, then unitree_sdk2py in ~/go2env
+git clone https://github.com/eclipse-cyclonedds/cyclonedds -b releases/0.10.x ~/cyclonedds
+cd ~/cyclonedds && mkdir -p build && cd build && cmake .. -DCMAKE_INSTALL_PREFIX=../install -DBUILD_TESTING=OFF && cmake --build . --target install -j6
+python3 -m venv ~/go2env && . ~/go2env/bin/activate
+git clone https://github.com/unitreerobotics/unitree_sdk2_python.git ~/unitree_sdk2_python
+CYCLONEDDS_HOME=~/cyclonedds/install pip install -e ~/unitree_sdk2_python
+pip install scipy PyYAML Pillow matplotlib requests mujoco "imageio[ffmpeg]" pytest
+
+# board: VAMOS in ~/vamosenv, torch from NVIDIA's JetPack 6 index
+python3 -m venv ~/vamosenv && . ~/vamosenv/bin/activate
+pip install torch==2.8.0 torchvision==0.23.0 --index-url https://pypi.jetson-ai-lab.io/jp6/cu126
+pip install "numpy<2" transformers==5.17.0 peft==0.20.0 accelerate==1.15.0 fastapi uvicorn python-multipart pillow huggingface_hub
+
+# Mac: the repos (with go2_board's policies/, not in git), VAMOS's server and weights
+bash scripts/hil/run_hil.sh sync
+ssh jittarin@192.168.55.1 '. ~/go2env/bin/activate; pip install -e ~/go2_board[dev] -e ~/Cyberdog; mkdir -p ~/vamos ~/.cache/huggingface/hub'
+rsync -a --exclude __pycache__ vendor/VAMOS/server jittarin@192.168.55.1:~/vamos/
+rsync -a ~/.cache/huggingface/hub/models--mateoguaman--vamos jittarin@192.168.55.1:~/.cache/huggingface/hub/
+```
+
+Then `run_hil.sh clock`, `walk` and `route`, as below. To switch the board off:
+`ssh -t jittarin@192.168.55.1 'sudo shutdown -h now'`, and wait for it to go dark.
+
 ## A run
 
 ```

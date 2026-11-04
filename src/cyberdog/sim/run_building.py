@@ -286,6 +286,8 @@ UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for someb
                           # lab seed 9, --vamos): 7.5 of the arm's 11.2 s of D2.
 SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
+GLIDE_TOL_M, GLIDE_TOL_YAW = 0.15, 0.20   # m, rad: near enough the end of a glide()
+GLIDE_SETTLE_S = 6.0      # s a board may take, after a glide's line, to get there
 HOLD_TURN_S = 3.0         # seconds a turn that would put the person on the handle
                           # into a wall (closer than HANDLER_R) is held, when no
                           # eased or sideways version avoids it, before the
@@ -1468,15 +1470,21 @@ class Run:
                 if best is None or rank(room, aw) > best[0]:
                     best = (rank(room, aw), alt)
         touch = min(HANDLER_R, wall_now)
-        if (w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
-                and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT):
+        pinned = w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
+        if pinned and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT:
             # Every way of making this turn puts them into a wall: hold it.
             # Standing still keeps them where they are; the turn is asked for
             # again next tick, and goes once something has moved.
             self.turn_held += 1
             self.obs["eased"] += 1
             return (0.0, 0.0, 0.0)
-        self.turn_held = 0
+        if not pinned:
+            self.turn_held = 0
+        # Pinned past HOLD_TURN_S, the count stays where it is and the turn goes
+        # on, tick after tick, until it no longer would put them into the wall.
+        # Reset here as well, it went for one tick and was held for 3 s again:
+        # out of the floor-3 lift with its user against the car and the wall,
+        # the dog turned 0.04 rad every 3 s and stood there for 215 s.
         if best is None or best[0] <= rank(worst, walls):
             return cmd
         self.obs["eased"] += 1
@@ -2449,6 +2457,19 @@ class Run:
             t = k / ticks
             self.robot.place((x + (to_xy[0] - x) * t, y + (to_xy[1] - y) * t),
                              yaw0 + dyaw * t, z=z)
+            self.step_crowd()
+            self.frame()
+        # Then get there. The twin is put on each point and already is; a board
+        # walks after the moving point at its own limits, and the line ran out
+        # with it 1.2 m and 1.3 rad short of the floor-3 lift's waiting spot --
+        # its user pinned against the car and the wall, and the leg on from
+        # there never got going. Walk on to the end of the line, for a while.
+        for _ in range(int(GLIDE_SETTLE_S / self.robot.CONTROL_DT)):
+            x, y, th = self.robot.get_pose()
+            if math.dist((x, y), to_xy) <= GLIDE_TOL_M and abs(wrap(yaw - th)) <= GLIDE_TOL_YAW:
+                break
+            self.handle_wait()
+            self.robot.place(to_xy, yaw, z=z)
             self.step_crowd()
             self.frame()
 

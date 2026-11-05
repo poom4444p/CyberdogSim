@@ -49,6 +49,7 @@ random sample, so a plan that is still good is found again at once and the
 dog does not change its mind about which side it is passing on.
 """
 import math
+from itertools import chain
 from typing import NamedTuple
 
 import numpy as np
@@ -72,6 +73,7 @@ REL_CHECK = 0.05        # ...and closer, where people are: metres the gap to a
                         # distance alone, a person closing at 1 m/s moved
                         # 0.25 m between checks and the path slipped inside
                         # the margin between them.
+COARSE = 6              # every this many checks along an edge go first (`edge`)
 ITERS = 600             # samples per plan: 19 of 20 seeds find a head-on pass
                         # (300: 12 of 20), in under 35 ms -- spec L6, >= 10 Hz
 GOAL_BIAS = 0.20        # fraction of samples that are the goal itself
@@ -127,42 +129,34 @@ class Plan(NamedTuple):
 
 
 class _Planner:
-    def __init__(self, start, goal, ok, people, handler_behind, v):
+    # Speed (the J4012 at 25 W ran this at 133 ms a plan, spec L6 asks under
+    # REPLAN_S): the point check is the inner loop, ~29 000 times a plan, so it
+    # works on plain tuples and squared distances, the heading's cos and sin
+    # are worked out once an edge, and the tree's points live in arrays grown
+    # in place rather than a list turned into an array every sample. `edge`
+    # checks coarse-first, and a rewire that cannot win is not checked. The
+    # plans are the same, point for point.
+    def __init__(self, start, goal, ok, people, handler_behind, v, capacity=1024):
         self.sx, self.sy, self.syaw = start
         self.goal = goal
         self.ok = ok
         self.people = people
+        self._crowd = [(p.x, p.y, p.vx, p.vy) for p in people]
         self.behind = handler_behind
         self.v = v
         fastest = max((math.hypot(p.vx, p.vy) for p in self.people), default=0.0)
         self.check = (min(CHECK, REL_CHECK * v / (v + fastest)) if self.people
                       else CHECK)
         self.xy = [(self.sx, self.sy)]
+        self._px = np.empty(capacity)
+        self._py = np.empty(capacity)
+        self._px[0], self._py[0] = self.sx, self.sy
         self.yaw = [self.syaw]
         self.parent = [-1]
         self.cost = [0.0]
         self.length = [0.0]     # metres walked to the node: its time is length / v
 
     # -- checks -----------------------------------------------------------
-    def _point(self, x, y, yaw, t):
-        """(free, penalty) for the dog at (x, y) heading `yaw` at time `t`."""
-        if not self.ok(x, y, yaw):
-            return False, 0.0
-        if t > PREDICT_T or not self.people:
-            return True, 0.0
-        hx, hy = x - self.behind * math.cos(yaw), y - self.behind * math.sin(yaw)
-        sep = need(t)
-        near = INF
-        for p in self.people:
-            px, py = p.x + p.vx * t, p.y + p.vy * t
-            d = math.hypot(x - px, y - py)
-            if d < sep:
-                return False, 0.0
-            if math.hypot(hx - px, hy - py) < HANDLER_SEP:
-                return False, 0.0
-            near = min(near, d)
-        return True, max(0.0, COMFORT - near) / COMFORT
-
     def edge(self, a, yaw_a, len_a, b):
         """Can the dog walk the straight line a -> b, leaving a at metre
         `len_a` of its walk with heading `yaw_a`? (free, cost, heading)."""
@@ -175,21 +169,56 @@ class _Planner:
         if abs(_wrap(yaw - yaw_a)) > limit:
             return False, 0.0, yaw
         n = max(int(math.ceil(d / self.check)), 1)
+        # Speed: nine edges in ten are blocked, nearly always part-way along,
+        # and whatever blocks one (a box, a person's margin) is wider than a
+        # few checks. So every COARSE-th point is checked first and the rest
+        # after: a blocked edge is found blocked sooner, and a free one costs
+        # the same checks as before. Whether an edge is free does not depend
+        # on the order; the penalties are added up in walking order, so the
+        # cost -- and so the plan -- is the same to the last bit.
+        # The point check is written out here, not a method called per point
+        # (~146 000 points a plan): the call and `need` were a third of it.
+        ok, crowd, v = self.ok, self._crowd, self.v
+        ax, ay = a
+        bx, by = self.behind * math.cos(yaw), self.behind * math.sin(yaw)
+        hsep2 = HANDLER_SEP * HANDLER_SEP
+        base = CONTACT + Q0
+        pens = [0.0] * (n + 1)
+        for k in chain(range(COARSE, n + 1, COARSE),
+                       (k for k in range(1, n + 1) if k % COARSE)):
+            x, y = ax + dx * k / n, ay + dy * k / n
+            if not ok(x, y, yaw):
+                return False, 0.0, yaw
+            t = (len_a + d * k / n) / v
+            if t > PREDICT_T or not crowd:
+                continue
+            hx, hy = x - bx, y - by
+            sep = base + Q_RATE * min(t, COMMIT_T)       # need(t)
+            sep2 = sep * sep
+            near = INF
+            for px0, py0, vx, vy in crowd:
+                px, py = px0 + vx * t, py0 + vy * t
+                ex, ey = x - px, y - py
+                if ex * ex + ey * ey < sep2:
+                    return False, 0.0, yaw
+                fx, fy = hx - px, hy - py
+                if fx * fx + fy * fy < hsep2:
+                    return False, 0.0, yaw
+                e = math.hypot(ex, ey)
+                if e < near:
+                    near = e
+            pens[k] = max(0.0, COMFORT - near) / COMFORT
         pen = 0.0
         for k in range(1, n + 1):
-            s = d * k / n
-            free, p = self._point(a[0] + dx * k / n, a[1] + dy * k / n, yaw,
-                                  (len_a + s) / self.v)
-            if not free:
-                return False, 0.0, yaw
-            pen += p
+            pen += pens[k]
         return True, d + W_NEAR * pen * d / n, yaw
 
     # -- tree -------------------------------------------------------------
     def add(self, q):
         """Try to grow the tree towards `q`. Index of the new node, or None."""
-        pts = np.asarray(self.xy)
-        dist = np.hypot(pts[:, 0] - q[0], pts[:, 1] - q[1])
+        m = len(self.xy)
+        px, py = self._px[:m], self._py[:m]
+        dist = np.hypot(px - q[0], py - q[1])
         near_i = int(np.argmin(dist))
         nx, ny = self.xy[near_i]
         d = float(dist[near_i])
@@ -197,7 +226,7 @@ class _Planner:
             return None
         if d > STEP:
             q = (nx + (q[0] - nx) * STEP / d, ny + (q[1] - ny) * STEP / d)
-            dist = np.hypot(pts[:, 0] - q[0], pts[:, 1] - q[1])
+            dist = np.hypot(px - q[0], py - q[1])
         # Choose parent: cheapest first, and stop at the first edge that is
         # free -- the expensive part is the check, not the sort.
         hood = np.nonzero(dist <= NEIGHBOUR_R)[0].tolist()
@@ -214,6 +243,10 @@ class _Planner:
             return None
         j, c, yaw, length = best
         k = len(self.xy)
+        if k == len(self._px):                         # full: double, keep what is there
+            self._px = np.concatenate([self._px, np.empty(k)])
+            self._py = np.concatenate([self._py, np.empty(k)])
+        self._px[k], self._py[k] = q
         self.xy.append(q)
         self.yaw.append(yaw)
         self.parent.append(j)
@@ -222,8 +255,10 @@ class _Planner:
         # Rewire: route a neighbour through the new node where that is cheaper.
         # Its subtree's times shift earlier with it; `extract` checks the
         # whole path again at its real times before anything is returned.
+        # An edge costs at least its length, so a neighbour that the straight
+        # line could not make cheaper is not worth checking the edge for.
         for m in hood:
-            if m == j or m == 0:
+            if m == j or m == 0 or c + float(dist[m]) >= self.cost[m]:
                 continue
             free, cm, yaw_m = self.edge(q, yaw, length, self.xy[m])
             if free and c + cm < self.cost[m] - 1e-9:

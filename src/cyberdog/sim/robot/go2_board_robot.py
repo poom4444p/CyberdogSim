@@ -11,8 +11,13 @@ import is inside __init__, so the twin runs without it.
 Not yet: get_scan and get_image. In the sim they come from the physics twin
 of the building (B6); on the dog, from the Mid-360 and the camera.
 """
+import collections
+import json
 import math
+import socket
 import time
+
+import numpy as np
 
 from cyberdog.sim.robot.robot_interface import RobotInterface
 
@@ -21,6 +26,30 @@ STATE_STALE_S = 0.2       # the board reports at 50 Hz: 10 missed reports
 
 class BoardNotReady(RuntimeError):
     pass
+
+
+class LiftLink:
+    """Calls the lift and reads where it is: go2_world's car over UDP 9880,
+    standing in for the person at the call button (or a building's lift API).
+    The robot never waits on it for its own height: that comes from the board."""
+
+    def __init__(self, host="127.0.0.1", port=9880, timeout=0.5):
+        self.addr = (host, port)
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.settimeout(timeout)
+
+    def _ask(self, msg):
+        self.sock.sendto(json.dumps(msg).encode(), self.addr)
+        return json.loads(self.sock.recvfrom(1024)[0])
+
+    def call(self, floor):
+        return self._ask({"call": int(floor)})
+
+    def state(self):
+        return self._ask({})
+
+    def close(self):
+        self.sock.close()
 
 
 class BoardStopped(RuntimeError):
@@ -54,6 +83,11 @@ class Go2BoardRobot(RobotInterface):
         self._next = self._t0 + self.CONTROL_DT
         self._cmd = (0.0, 0.0, 0.0)
         self._state, self._got = None, None
+        # (board clock, map x, y, yaw) of recent states: a cloud is placed
+        # with the pose the dog had when the board finished it, not the pose
+        # now. Placed with the pose now, a turning dog saw the trolley it was
+        # passing walk across the corridor, and stopped to let it by.
+        self._history = collections.deque(maxlen=60)
 
     # -- from the board ------------------------------------------------------
 
@@ -62,9 +96,32 @@ class Go2BoardRobot(RobotInterface):
         s = self.link.poll()
         if s is not None and s is not self._state:
             self._state, self._got = s, self.clock()
+            if s.get("x") is not None and s.get("t") is not None:
+                self._history.append((s["t"],) + self._to_map(s))
         if self._got is None or self.clock() - self._got > STATE_STALE_S:
             return None
         return self._state
+
+    def pose_at(self, t):
+        """The map pose at board-clock time t, interpolated between the states
+        either side of it (the nearest one outside them), or None."""
+        h = self._history
+        if not h:
+            return None
+        if t <= h[0][0]:
+            return h[0][1:]
+        for a, b in zip(h, list(h)[1:]):
+            if a[0] <= t <= b[0]:
+                f = (t - a[0]) / max(b[0] - a[0], 1e-9)
+                dyaw = math.atan2(math.sin(b[3] - a[3]), math.cos(b[3] - a[3]))
+                return (a[1] + f * (b[1] - a[1]), a[2] + f * (b[2] - a[2]), a[3] + f * dyaw)
+        return h[-1][1:]
+
+    def _to_map(self, s):
+        x0, y0, yaw0 = self.origin
+        c, k = math.cos(yaw0), math.sin(yaw0)
+        return (x0 + c * s["x"] - k * s["y"], y0 + k * s["x"] + c * s["y"],
+                math.atan2(math.sin(yaw0 + s["yaw"]), math.cos(yaw0 + s["yaw"])))
 
     def get_pose(self):
         s = self.board_state()
@@ -148,12 +205,30 @@ class BoardTwinRobot(MujocoRobot):
     """
     MAX_W = 1.0               # rad/s: go2_flat_v5 is trained to +-1
     REAL_TIME = True          # the board walks on the wall clock: never block the loop
-    HOLD_M = 0.05             # place() this near the pose is a hold, not a move
     LIMP_HOLD = 4             # 20 Hz ticks of "limp" between two stands: 0.2 s
+    # place() on the board is a pose to walk to, not one to be put at: the
+    # scripted moves in and out of the lift car become velocity commands that
+    # chase the moving target. Gains and limits for that.
+    TRACK_K, TRACK_KW = 1.5, 2.0
+    TRACK_V, TRACK_VY, TRACK_W = 0.5, 0.2, 0.8
+    # The lift ride: arrived when the board's own height has settled this near
+    # the new floor plus the standing height it rode at, for SETTLE_S.
+    ARRIVED_M, SETTLE_S, RIDE_TIMEOUT_S = 0.05, 1.0, 60.0
+
+    CLOUD_STALE_S = 0.5       # an older cloud is no cloud: the brain is blind, as the board is
 
     def __init__(self, scene_xml, start_z=0.0, board=None, origin=(0.0, 0.0, 0.0),
-                 board_host=None, listen=None):
+                 board_host=None, listen=None, lift=None, clouds=True):
         self.board = board or Go2BoardRobot(origin=origin, board_host=board_host, listen=listen)
+        self.lift = lift          # LiftLink, for rides; None: no floor but the first
+        # The Mid-360 as the board sees it, forwarded on 9872: what the brain
+        # perceives with, as on the dog. clouds=False keeps the twin's own
+        # raycast (it sees only what the twin's scene has, never a real person).
+        self.clouds = None
+        if clouds:
+            from go2_board.lidar import BRAIN_CLOUD_PORT, CloudLink
+            from go2_board.link import HOST
+            self.clouds = CloudLink(port=BRAIN_CLOUD_PORT, host=listen or HOST)
         x, y, yaw = self._wait_for_pose()
         super().__init__(scene_xml, start_xy=(x, y), start_yaw=yaw, start_z=start_z)
 
@@ -197,12 +272,65 @@ class BoardTwinRobot(MujocoRobot):
         self._follow()
 
     def place(self, xy, yaw, z=None):
-        x, y, _ = self.get_pose()
-        if math.dist((x, y), xy) > self.HOLD_M or (z is not None and z != self.z):
-            raise NotImplementedError("a scripted move (lift, stairs): the board walks itself")
-        self.board.set_velocity(0.0, 0.0, 0.0)
+        """One tick walking toward (xy, yaw): the board cannot be put anywhere.
+        A height other than the floor's is a scripted climb (stairs), refused;
+        the lift goes through ride_lift()."""
+        if z is not None and abs(z - self.z) > 1e-6:
+            raise NotImplementedError("a scripted climb: the board rides the lift, see ride_lift")
+        x, y, th = self.get_pose()
+        ex, ey = xy[0] - x, xy[1] - y
+        c, s = math.cos(th), math.sin(th)
+        fwd, side = c * ex + s * ey, -s * ex + c * ey
+        turn = math.atan2(math.sin(yaw - th), math.cos(yaw - th))
+        clip = lambda v, m: max(-m, min(m, v))
+        self.board.set_velocity(clip(self.TRACK_K * fwd, self.TRACK_V),
+                                clip(self.TRACK_K * side, self.TRACK_VY),
+                                clip(self.TRACK_KW * turn, self.TRACK_W))
         self.board.step()
         self._follow()
+
+    def ride_lift(self, to_floor, floor_z, on_tick=lambda z: None):
+        """Stand in the car while the lift carries the dog to `to_floor`.
+
+        What the dog does on the real lift: stop walking, stand, and wait
+        until it is on the new floor, judged by its own height (the board's
+        pose; on the dog, FAST-LIO's), then walk again. The call is the
+        person's (here the lift link, standing in for them). `on_tick(z)` is
+        called every tick with the car floor's height, for the video."""
+        if self.lift is None:
+            raise NotImplementedError("no lift link: --robot go2_board needs go2_world's lift")
+        self.board.set_velocity(0.0, 0.0, 0.0)
+        self.board.request("stand", until="STAND", timeout=5.0)
+        s = self.board.board_state()
+        stand_h = s["z"] - self.z              # trunk above the floor, standing
+        self.lift.call(to_floor)
+        goal = floor_z + stand_h
+        start, settled = self.board.clock(), None
+        while True:
+            self.board.request("stand")        # one tick: the board hears from us at 20 Hz
+            s = self.board.board_state()
+            if s is None:
+                raise BoardNotReady("no state from the board during the ride")
+            if s["mode"] != "STAND":
+                raise BoardStopped(f"the board is {s['mode']} in the lift"
+                                   + (f": {s['tripped']}" if s.get("tripped") else ""))
+            floor_now = s["z"] - stand_h
+            x, y, th = self.board.get_pose()
+            MujocoRobot.place(self, (x, y), th, z=floor_now)
+            on_tick(floor_now)
+            now = self.board.clock()
+            if abs(s["z"] - goal) < self.ARRIVED_M:
+                settled = settled or now
+                if now - settled >= self.SETTLE_S:
+                    break
+            else:
+                settled = None
+            if now - start > self.RIDE_TIMEOUT_S:
+                raise BoardStopped(f"the lift did not reach floor {to_floor} in "
+                                   f"{self.RIDE_TIMEOUT_S:.0f} s (board at z {s['z']:.2f})")
+            self.board.sleep(self.CONTROL_DT)
+        self.z = floor_z
+        self.board.request("walk", until="WALK", timeout=5.0)
 
     def _follow(self):
         x, y, yaw = self.board.get_pose()
@@ -215,5 +343,45 @@ class BoardTwinRobot(MujocoRobot):
     def now(self):
         return self.board.now()
 
+    def board_clearance(self):
+        """The board's own LiDAR guard, as it reports it: free distance
+        (m) front, back, left, right, inf where it sees nothing, or None when
+        it has no fresh frame (blind: it walks nowhere, only turns)."""
+        s = self.board.board_state()
+        lid = None if s is None else s.get("lidar")
+        if not lid or lid.get("age") is None or lid["age"] > self.CLOUD_STALE_S:
+            return None
+        return {k: (math.inf if lid.get(k) is None else lid[k])
+                for k in ("front", "back", "left", "right")}
+
+    def get_scan(self):
+        """The board's newest Mid-360 cloud in the map frame, (N, 3).
+
+        The board sends it levelled, in the trunk frame, the floor at z = 0;
+        turned by the dog's heading and set on the floor it is on. Empty when
+        no cloud has come for CLOUD_STALE_S: blind, which perception treats as
+        seeing nothing, while the board itself stops translation."""
+        if self.clouds is None:
+            return MujocoRobot.get_scan(self)
+        c = self.clouds.poll()
+        if c is None or self.board.clock() - self._cloud_seen(c) > self.CLOUD_STALE_S:
+            return np.empty((0, 3))
+        x, y, th = self.board.pose_at(c.t) or self.get_pose()
+        cs, sn = math.cos(th), math.sin(th)
+        p = c.xyz.astype(float)
+        return np.column_stack((x + cs * p[:, 0] - sn * p[:, 1],
+                                y + sn * p[:, 0] + cs * p[:, 1],
+                                self.z + p[:, 2]))
+
+    def _cloud_seen(self, c):
+        """When this cloud first arrived here, on this side's clock."""
+        if c.seq != getattr(self, "_cloud_seq", None):
+            self._cloud_seq, self._cloud_at = c.seq, self.board.clock()
+        return self._cloud_at
+
     def close(self):
         self.board.close()
+        if self.lift is not None:
+            self.lift.close()
+        if self.clouds is not None:
+            self.clouds.sock.close()

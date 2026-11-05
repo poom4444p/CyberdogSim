@@ -118,6 +118,38 @@ DETOUR = 0.70             # ...and while actually stepping around something
 # What is left is the honest emergency: ROBOT_R, the distance at which the dog
 # is touching something rather than approaching it.
 BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
+# Run.respect_board: a robot with its own LiDAR guard (go2_board). Free
+# distance ahead, as the board measures it, under which pushing on is pointless
+# (the guard stops at 0.30 m and crawls below 1 m), the free distance that ends
+# the turn, how fast to turn with a person on the handle, and how long to try.
+BOARD_NEAR_M = 0.45
+BOARD_CLEAR_M = 0.80
+BOARD_TURN_W = 0.4         # rad/s
+BOARD_GIVE_UP_S = 8.0
+BOARD_STALL_S, BOARD_STALL_M = 2.0, 0.05   # asked forward this long, moved less: stuck
+# Before turning, a sidestep: the guard closes the front for anything within
+# BODY_HALF_W + MARGIN (0.30 m) of the dog's centre line, so a dog 0.25 m from
+# a trolley's side is stopped by its corner however clear the way past it is;
+# turning on the spot swings the nose into the trolley or the wall, and in the
+# 0.90 m gap between them both ways stayed closed (every time, at (23.2, 8.6)).
+# A few centimetres sideways, towards the side the board sees more room on,
+# puts the corner outside the band. Never backwards; slow, with a person on
+# the handle; only towards a side with more than the guard's 0.30 m stop.
+BOARD_SIDE_V = 0.12        # m/s sideways
+BOARD_SIDE_M = 0.25        # m sideways at most, then turn
+BOARD_SIDE_S = 3.0         # s sideways at most, then turn
+BOARD_SIDE_ROOM = 0.35     # m free on that side to step into it at all
+# ...unless the plan is turning: then the turn is the plan's, not the roomier
+# side's. Facing a trolley at 30 deg in that gap, the plan asked -1.0 rad/s
+# (right, round it) and the roomier side was left: stepping left took the nose
+# closer to the corner (front 0.15 -> 0.08 m) until it turned right after all.
+BOARD_PLAN_W = 0.3         # rad/s the plan asks, above which its way is the way
+# ...and while turning, too: the turn started right (the plan barely turning,
+# the roomier side right), then the plan asked left at 0.3-1.2 rad/s for 4 s
+# while the dog turned on into the wall (-0.5 -> -1.16 rad), and the 8 s ran out
+# on the way back, 1.4 s short of facing the way on. So the turn follows the
+# plan once it has asked the other way this many ticks in a row (20 Hz).
+BOARD_PLAN_TICKS = 3
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
@@ -254,6 +286,8 @@ UNPIN_W = 0.4             # rad/s: the only turn allowed while waiting for someb
                           # lab seed 9, --vamos): 7.5 of the arm's 11.2 s of D2.
 SWING_PEOPLE = 0.70       # metres, dog centre to a person's predicted centre,
                           # kept by any step easing adds. PED_NEAR plus a margin.
+GLIDE_TOL_M, GLIDE_TOL_YAW = 0.15, 0.20   # m, rad: near enough the end of a glide()
+GLIDE_SETTLE_S = 6.0      # s a board may take, after a glide's line, to get there
 HOLD_TURN_S = 3.0         # seconds a turn that would put the person on the handle
                           # into a wall (closer than HANDLER_R) is held, when no
                           # eased or sideways version avoids it, before the
@@ -596,6 +630,7 @@ class Run:
     def __init__(self, scene, start_xy, start_yaw, router, out=None, vamos=False,
                  auto_confirm=False, speed=1, crowd=0, seed=0, shadow=None,
                  vamos_url=None, vlm_latency=None, vamos_sample=False, handle=None,
+                 vamos_samples=5,
                  affordance_shadow=None, autolabel=None, aware=False, planner="map",
                  track_log=None, robot=None):
         self.robot = robot or MujocoRobot(scene, start_xy=start_xy, start_yaw=start_yaw,
@@ -627,6 +662,7 @@ class Run:
         self.shadow = open(shadow, "w") if shadow else None
         self.shadow_n = {"calls": 0, "steer": 0, "none": 0}
         self.vamos_url = vamos_url
+        self.vamos_samples = vamos_samples
         self.vamos_sample = vamos_sample
         # How long a VAMOS answer takes to arrive, in seconds of sim time; None
         # is the call's own wall-clock time. See ask_vamos.
@@ -639,6 +675,11 @@ class Run:
         # the call: the request runs on a worker thread and lands when it is
         # done. The twin keeps the repeatable sim-time release above.
         self.real_time = getattr(self.robot, "REAL_TIME", False)
+        self.board_turning, self.board_since, self.board_gave_up = None, 0.0, False
+        self.board_push = None    # (t, x, y) since asking forward, for respect_board's stall
+        self.board_flipped = False
+        self.board_side = None    # (sign, t, x, y) while sidestepping, before any turn
+        self.board_against = 0    # ticks in a row the plan has asked the other way round
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -883,7 +924,7 @@ class Run:
                             dream=Dream(live, self.robot.MAX_V,
                                         person=lambda x, y, yaw: self.handler_room(
                                             live, x, y, yaw)), url=url,
-                            sample=self.vamos_sample)
+                            sample=self.vamos_sample, num_samples=self.vamos_samples)
             if not p.available():
                 raise SystemExit(f"FAILED BY vamos: server is not answering on {url} -- "
                                  "start vendor/VAMOS/server/vlm_server.py first, "
@@ -1115,6 +1156,125 @@ class Run:
             self.hits["ticks"] += 1
             self.hits["boxes"].update(f"floor {floor} {what}" for what in touched)
 
+    def respect_board(self, cmd, pose):
+        """Work with the board's LiDAR guard instead of pushing into it.
+
+        The guard slows the dog from SLOW_M and stops it at STOP_M whatever the
+        brain asks, and the brain's own margins (from its plan and its view)
+        can disagree with it by a few centimetres: walking past a trolley it
+        judged 0.33 m clear, the guard saw a corner inside its 0.30 m band and
+        the dog stood there pushing for five minutes. So:
+          - never backwards: the person on the handle is right behind;
+          - pushed against the guard (front under BOARD_NEAR_M, asking to go
+            forward) while the plan is turning (over BOARD_PLAN_W): stop, and
+            turn slowly the plan's way, saying so, until the front opens
+            (BOARD_CLEAR_M);
+          - pushed against it while the plan is going straight: step slowly
+            sideways towards the side the board sees more room on -- at most
+            BOARD_SIDE_M or BOARD_SIDE_S, and only while that side has more
+            than BOARD_SIDE_ROOM;
+          - still closed: turn slowly the plan's way (or the roomier side's),
+            and round the other way whenever the plan asks it for
+            BOARD_PLAN_TICKS; with no way from the plan, the other way at
+            half time;
+          - BOARD_GIVE_UP_S of turning without the front opening: stop and ask
+            the person for help, as the brain does when its own plan has no
+            way past.
+        """
+        vx, vy, w = cmd
+        vx = max(vx, 0.0)                                    # never back into the person
+        free = self.robot.board_clearance()
+        if free is None:
+            return (vx, vy, w)                               # blind: the board turns only
+        # Asked forward and going nowhere: the guard crawls the dog from SLOW_M
+        # down to a speed the gait does not step at (0.52 m from a wall, asked
+        # 0.3 m/s, given 0.09), and that is as stuck as a closed front.
+        now, (x, y, _) = self.robot.now(), pose
+        stalled = False
+        if vx > 0.1:
+            if self.board_push is None:
+                self.board_push = (now, x, y)
+            elif (now - self.board_push[0] > BOARD_STALL_S
+                  and math.dist((x, y), self.board_push[1:]) < BOARD_STALL_M):
+                stalled = True
+                self.board_push = None
+            else:
+                stalled = False
+                if now - self.board_push[0] > BOARD_STALL_S:
+                    self.board_push = (now, x, y)            # moving: start the window again
+        else:
+            self.board_push, stalled = None, False
+        def roomier():
+            return 1.0 if free["left"] >= free["right"] else -1.0
+
+        def planned():
+            """The way the plan is turning, when it is turning; else None."""
+            return math.copysign(1.0, w) if abs(w) > BOARD_PLAN_W else None
+
+        def room(sign):
+            return free["left"] if sign > 0 else free["right"]
+
+        def turn(sign, prefix=""):
+            self.board_turning, self.board_flipped, self.board_since = sign, False, now
+            self.board_against = 0
+            self.say(prefix + "Turning " + ("left" if sign > 0 else "right") + " to find the way.")
+
+        side = self.board_side
+        if (self.board_turning is None and side is None and vx > 0.05
+                and (free["front"] < BOARD_NEAR_M or stalled)):
+            self.obs["board_turns"] = self.obs.get("board_turns", 0) + 1
+            sign = roomier()
+            if planned() is not None:
+                turn(planned(), "Too close to something ahead. ")   # the plan's way round
+            elif room(sign) > BOARD_SIDE_ROOM:
+                side = self.board_side = (sign, now, x, y)
+                self.say("Too close to something ahead. Stepping "
+                         + ("left" if sign > 0 else "right") + " to find the way.")
+                self.obs["board_sidesteps"] = self.obs.get("board_sidesteps", 0) + 1
+            else:
+                turn(sign, "Too close to something ahead. ")
+        if side is not None:
+            sign, t0, x0, y0 = side
+            if free["front"] >= BOARD_CLEAR_M:
+                self.board_side = None                       # open again: the plan takes over
+                return (vx, vy, w)
+            if (now - t0 < BOARD_SIDE_S and math.dist((x, y), (x0, y0)) < BOARD_SIDE_M
+                    and room(sign) > BOARD_SIDE_ROOM):
+                return (0.0, BOARD_SIDE_V * sign, 0.0)
+            self.board_side = None                           # stepped as far as it may: turn
+            turn(planned() or roomier())
+        if self.board_turning is not None:
+            if free["front"] >= BOARD_CLEAR_M:
+                self.board_turning = None                    # open again: the plan takes over
+                return (vx, vy, w)
+            want = planned()
+            if want is not None and want != self.board_turning:
+                # The plan wants round the other way: after BOARD_PLAN_TICKS of
+                # it in a row (not one tick of a plan changing its mind), go.
+                self.board_against += 1
+                if self.board_against >= BOARD_PLAN_TICKS:
+                    self.board_turning, self.board_against = want, 0
+                    self.say("Turning " + ("left" if want > 0 else "right") + ", the way on.")
+            else:
+                self.board_against = 0
+            if (self.robot.now() - self.board_since > BOARD_GIVE_UP_S / 2
+                    and not self.board_flipped and want is None):
+                # Half the time one way, still closed, and no way from the plan:
+                # the other way. In the gap between the trolley and the wall,
+                # turning towards the wall never opened, and the way on was the
+                # other side.
+                self.board_turning, self.board_flipped = -self.board_turning, True
+                self.say("Trying the other way.")
+            if self.robot.now() - self.board_since > BOARD_GIVE_UP_S:
+                self.say("I cannot get past this. Please help me find the way.")
+                x, y, _ = pose
+                self.gave_up = ("go2_board", f"the board's guard held the front closed for "
+                                f"{BOARD_GIVE_UP_S:.0f} s at ({x:.1f}, {y:.1f}), turning did not open it")
+                self.board_gave_up = True
+                return (0.0, 0.0, 0.0)
+            return (0.0, 0.0, BOARD_TURN_W * self.board_turning)
+        return (vx, vy, w)
+
     def handler_at(self):
         """Where the person on the handle is: straight behind, along the heading."""
         x, y, yaw = self.robot.get_pose()
@@ -1310,15 +1470,21 @@ class Run:
                 if best is None or rank(room, aw) > best[0]:
                     best = (rank(room, aw), alt)
         touch = min(HANDLER_R, wall_now)
-        if (w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
-                and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT):
+        pinned = w != 0.0 and walls < touch and (best is None or best[0][0] < touch)
+        if pinned and self.turn_held < HOLD_TURN_S / self.robot.CONTROL_DT:
             # Every way of making this turn puts them into a wall: hold it.
             # Standing still keeps them where they are; the turn is asked for
             # again next tick, and goes once something has moved.
             self.turn_held += 1
             self.obs["eased"] += 1
             return (0.0, 0.0, 0.0)
-        self.turn_held = 0
+        if not pinned:
+            self.turn_held = 0
+        # Pinned past HOLD_TURN_S, the count stays where it is and the turn goes
+        # on, tick after tick, until it no longer would put them into the wall.
+        # Reset here as well, it went for one tick and was held for 3 s again:
+        # out of the floor-3 lift with its user against the car and the wall,
+        # the dog turned 0.04 rad every 3 s and stood there for 215 s.
         if best is None or best[0] <= rank(worst, walls):
             return cmd
         self.obs["eased"] += 1
@@ -2188,6 +2354,13 @@ class Run:
                     cmd = (0.0, side, 0.0)
             elif self.evading:
                 self.evading = 0.0
+            # The board's guard is the real sensor's word: what the plan wants
+            # it cannot overrule, so it works with it instead (a robot that
+            # walks itself only; the twin has no guard to meet).
+            if getattr(self.robot, "REAL_TIME", False):
+                cmd = self.respect_board(cmd, (x, y, yaw))
+                if self.board_gave_up:
+                    return False, n
             # Last: the person on the handle overrules everything above.
             self.handle_tick()
             cmd = self.mux.apply(cmd, self.robot.MAX_V)
@@ -2286,6 +2459,19 @@ class Run:
                              yaw0 + dyaw * t, z=z)
             self.step_crowd()
             self.frame()
+        # Then get there. The twin is put on each point and already is; a board
+        # walks after the moving point at its own limits, and the line ran out
+        # with it 1.2 m and 1.3 rad short of the floor-3 lift's waiting spot --
+        # its user pinned against the car and the wall, and the leg on from
+        # there never got going. Walk on to the end of the line, for a while.
+        for _ in range(int(GLIDE_SETTLE_S / self.robot.CONTROL_DT)):
+            x, y, th = self.robot.get_pose()
+            if math.dist((x, y), to_xy) <= GLIDE_TOL_M and abs(wrap(yaw - th)) <= GLIDE_TOL_YAW:
+                break
+            self.handle_wait()
+            self.robot.place(to_xy, yaw, z=z)
+            self.step_crowd()
+            self.frame()
 
     def pivot(self, from_yaw, to_yaw, z, seconds=1.0):
         """Turn on the spot, scripted, inside the car."""
@@ -2341,6 +2527,16 @@ class Run:
         yaw = math.pi                      # facing the doors for the ride
         self.say(f"Doors closing. Going to floor {to_floor}.")
         ticks = max(int(abs(z1 - z0) / (lift.RIDE_V * self.robot.CONTROL_DT)), 1)
+        if getattr(self.robot, "REAL_TIME", False):
+            # A robot that walks itself (go2_board) is not carried by script:
+            # it stands, the real car lifts it, and it watches its own height.
+            def ride_tick(z):
+                self.robot.move_mocap("lift_car", lift.car_pos(z))
+                self.floor = min(max(round(z / levels.FLOOR_HEIGHT) + 1,
+                                     lift.FLOORS_SERVED[0]), lift.FLOORS_SERVED[-1])
+                self.frame()
+            self.robot.ride_lift(to_floor, z1, ride_tick)
+            ticks = 0
         for k in range(1, ticks + 1):
             z = z0 + (z1 - z0) * k / ticks
             self.robot.place(lift.LIFT_XY, yaw, z=z)
@@ -2414,6 +2610,9 @@ class Run:
         the decision, the questions and what is said; the climb itself
         belongs in Isaac Lab, where the dog has legs.
         """
+        if getattr(self.robot, "REAL_TIME", False):
+            raise HazardStop("the board does not climb stairs (go2_flat_v5 walks the flat): "
+                             "lift only", layer="go2_board")
         up = to_floor > from_floor
         flights = self.flights(from_floor, to_floor)
         steps = stairs.N_STEPS * len(flights)
@@ -2538,6 +2737,15 @@ def main():
     ap.add_argument("--board-host", default=None, metavar="IP",
                     help="with --robot go2_board: the board's address when it is another "
                          "machine (HIL over USB-C: 192.168.55.1); default localhost")
+    ap.add_argument("--vamos-samples", type=int, default=5, metavar="N",
+                    help="candidate paths per VAMOS call (beams). 5 is the PoC's; on the "
+                         "J4012 at 25 W a call takes 4.6 s for 5, 3.0 s for 2, 2.3 s for 1 "
+                         "(spec: 2-3 s a plan)")
+    ap.add_argument("--twin-lidar", action="store_true",
+                    help="with --robot go2_board: perceive with the twin's raycast, not the "
+                         "board's Mid-360 cloud (sees no real person; for comparison only)")
+    ap.add_argument("--lift-host", default="127.0.0.1", metavar="IP",
+                    help="with --robot go2_board: where go2_world's lift takes calls (udp 9880)")
     ap.add_argument("--brain-listen", default=None, metavar="IP",
                     help="this machine's address on the link to the board (192.168.55.100)")
     ap.add_argument("--speed", type=int, default=1, metavar="N",
@@ -2577,12 +2785,12 @@ def main():
         robot = None
         if args.robot == "go2_board":
             from cyberdog.sim.robot.go2_board_robot import BoardTwinRobot
+            from cyberdog.sim.robot.go2_board_robot import LiftLink
             robot = BoardTwinRobot(scene, origin=GO2_WORLD_ORIGIN,
-                                   board_host=args.board_host, listen=args.brain_listen)
+                                   board_host=args.board_host, listen=args.brain_listen,
+                                   lift=LiftLink(args.lift_host), clouds=not args.twin_lidar)
             start_xy, legs, faces = plan_stops(router, stops,
                                                start=(START_FLOOR, robot.get_pose()[:2]))
-            if any(leg[0] != START_FLOOR for leg in legs):
-                raise SystemExit("--robot go2_board walks floor 1 only: no lift, no stairs")
         else:
             start_xy, legs, faces = plan_stops(router, stops)
     except NoAccessibleRoute as refusal:
@@ -2602,6 +2810,7 @@ def main():
               planner=args.planner, track_log=args.track_log,
               shadow=args.shadow_log if args.shadow else None, vamos_url=args.vamos_url,
               vlm_latency=args.vlm_latency, vamos_sample=args.vamos_sample,
+              vamos_samples=args.vamos_samples,
               handle=handle if args.handle else None,
               affordance_shadow=args.affordance_shadow, autolabel=args.autolabel,
               robot=robot)

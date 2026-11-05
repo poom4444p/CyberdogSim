@@ -12,6 +12,7 @@ And a BOARD line on every tick the guard changes the plan's command
 (Run.respect_board): the phase (side, turn, gave up), what the plan asked, what
 went to the board, and the guard's free distances.
 """
+import math
 import sys
 
 from cyberdog.sim.robot import go2_board_robot as g
@@ -85,6 +86,37 @@ def respect_board(self, cmd, pose):
 
 
 rb.Run.respect_board = respect_board
+
+# Every detour decision that differs from the last one, and every 4th otherwise:
+# the side it was told to prefer, what each side offers at the pinch (offset,
+# room), and the aim it came back with. Why a dog announced "left" and went right.
+from cyberdog.sim.sensing import perception as pc  # noqa: E402
+
+orig_free = rb.free_destination
+last = [None]
+
+
+def free_destination(destination, xy, live, probe=None, **kw):
+    pc.TRACE = {}
+    aim, off = orig_free(destination, xy, live, probe=probe, **kw)
+    r, pc.TRACE = pc.TRACE, None
+    key = (None if aim is None else round(math.copysign(1.0, off)) if off else 0,
+           round(off, 1))
+    n[0] += 1
+    if key != last[0] or n[0] % EVERY == 0:
+        last[0] = key
+        side = lambda s: "-" if not s or s[0] is None else f"{s[1] * s[0]:+.1f}@{s[2]:.2f}"  # noqa: E731
+        pin = r.get("pinch")
+        print(f"  DETOUR at ({xy[0]:.2f},{xy[1]:.2f}) prefer {kw.get('prefer', 0.0):+.0f} "
+              f"dest ({destination[0]:.2f},{destination[1]:.2f})"
+              f"{'' if probe is None else f' probe ({probe[0]:.2f},{probe[1]:.2f})'} | "
+              f"{'pinch (%.2f,%.2f) room %.2f ' % (*pin, r['worst']) if pin else ''}"
+              f"straight {r.get('straight', '-')} L {side(r.get('left'))} R {side(r.get('right'))} | "
+              f"aim {'None' if aim is None else '(%.2f,%.2f)' % aim} off {off:+.2f}", flush=True)
+    return aim, off
+
+
+rb.free_destination = free_destination
 # main() of the module imported above, not runpy's fresh copy of it: in that
 # copy Run is another class, and the patch above would not reach it.
 sys.argv = ["run_building"] + sys.argv[1:]

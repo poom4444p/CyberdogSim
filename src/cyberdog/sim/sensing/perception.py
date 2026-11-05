@@ -108,6 +108,7 @@ MEMORY_S = 6.0          # seconds a standing return is remembered once out of
                         # left to say so (Gate D, --vamos, seeds 1 and 4).
                         # Long enough to cover 1.1 m of handle at a crawl.
 INF = 99.0
+TRACE = None            # a dict to fill with _free_destination's reasons, or None
 
 
 class LiveClearance:
@@ -560,6 +561,11 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
             off += step
         return side, want, best_room
 
+    if TRACE is not None:
+        # What the side was chosen from, for scripts/hil/trace_run_building.py.
+        # Each side judged alone; costs two more sweeps, so only when tracing.
+        TRACE.update(pinch=pinch, worst=worst, straight=straight,
+                     left=roomiest((1.0,)), right=roomiest((-1.0,)))
     side, want, best_room = (roomiest((math.copysign(1.0, prefer),)) if prefer
                              else (None, 0.0, -1.0))
     if side is None:

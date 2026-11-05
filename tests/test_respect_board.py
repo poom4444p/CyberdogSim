@@ -23,6 +23,7 @@ def stub(free):
     said = []
     run = types.SimpleNamespace(robot=robot, board_turning=None, board_since=0.0, board_push=None, board_flipped=False,
                                 board_side=None, board_against=0, board_gave_up=False, gave_up=None, obs={},
+                                board_swept=0.0, board_yaw=None, board_leg=0.0, board_plan_to=None,
                                 say=said.append)
     run.respect_board = rb.Run.respect_board.__get__(run)
     return run, said
@@ -137,6 +138,80 @@ def test_no_half_time_flip_against_a_plan_still_asking_this_way():
     run.robot.t = rb.BOARD_GIVE_UP_S / 2 + 0.1
     assert run.respect_board((0.4, 0.0, 0.8), (0, 0, 0))[2] == rb.BOARD_TURN_W    # still left
     assert not any("other way" in s for s in said)
+
+
+def test_a_plan_pausing_its_turn_does_not_flip_it():
+    # Floor 3 lift lobby, J4012 trace (2026-11-05): turning left the plan's way
+    # at 0.175 rad/s, 61 deg in, the plan stepped aside for somebody for a tick
+    # (w 0, no way) -- and the half-time rule turned the dog back to the right.
+    run, said = stub(open_(front=0.44, left=1.7, right=1.6))
+    yaw, k = -1.84, 0
+    assert run.respect_board((0.3, 0.0, 2.63), (43.6, 9.0, yaw)) == (0.0, 0.0, rb.BOARD_TURN_W)
+    while run.robot.t < 6.0:
+        k += 1
+        run.robot.t, yaw = 0.05 * k, yaw + 0.05 * 0.175
+        assert run.respect_board((0.0, 0.0, 2.0), (43.6, 9.0, yaw))[2] == rb.BOARD_TURN_W
+    run.robot.t += 0.05
+    assert run.respect_board((0.0, -0.2, 0.0), (43.6, 9.0, yaw)) == (0.0, 0.0, rb.BOARD_TURN_W)
+    assert not any("other way" in s for s in said)
+
+
+def sweep(run, yaw, plan_w, ticks=800, rate=0.44):
+    """Drive respect_board at 20 Hz, the dog turning at `rate` of what it is
+    asked (go2_flat_v5: 44 % of BOARD_TURN_W); `plan_w(yaw)` is the plan.
+    Returns the turn's direction each tick until it gives up."""
+    ways, out = [], (0.0, 0.0, 0.0)
+    for k in range(1, ticks):
+        run.robot.t = 0.05 * k
+        yaw += 0.05 * rate * out[2]
+        out = run.respect_board((0.55, 0.0, plan_w(yaw)), (23.2, 10.0, yaw))
+        if run.board_gave_up:
+            break
+        ways.append(math.copysign(1, out[2]))
+    return ways
+
+
+def changes(ways):
+    return sum(a != b for a, b in zip(ways, ways[1:]))
+
+
+def test_a_plan_wanting_the_same_heading_does_not_shake_the_turn():
+    # The trolley gap, floor 1, J4012 trace (2026-11-05): the plan wants the gap
+    # straight ahead, so its w changes sign each time the turn carries the nose
+    # past it. Followed every time, the dog shook its head +-30 deg for 10 s.
+    run, said = stub(open_(front=0.0, left=0.6, right=0.1))
+    run.respect_board((0.55, 0.0, -0.43), (23.2, 10.0, 0.45))       # right, the plan's way
+    ways = sweep(run, 0.45, lambda yaw: 2.0 * (0.1 - yaw))
+    assert ways[0] < 0 and changes(ways) == 1                        # the sweep's one turn back
+    assert not any("the way on" in s for s in said) and run.board_gave_up
+
+
+def test_a_weak_plan_the_other_way_does_not_undo_the_roomier_side():
+    # Live run, same gap: turning left (the roomier side, the plan nearly
+    # straight), the plan's -0.40 for the same heading turned it right, into
+    # the trolley, where it stuck for 20 s while the plan asked left at 1.3.
+    run, said = stub(open_(front=0.0, left=0.58, right=0.09))
+    assert run.respect_board((0.55, 0.0, -0.28), (23.12, 9.97, 0.28)) == (0.0, rb.BOARD_SIDE_V, 0.0)
+    run.robot.t = rb.BOARD_SIDE_S + 0.1                              # stepped nowhere: turn
+    assert run.respect_board((0.55, 0.0, -0.28), (23.12, 9.97, 0.28))[2] == rb.BOARD_TURN_W
+    for k in range(1, 20):
+        run.robot.t = rb.BOARD_SIDE_S + 0.1 + 0.05 * k
+        yaw = 0.28 + 0.05 * k * 0.175
+        assert run.respect_board((0.55, 0.0, 2.0 * (0.14 - yaw)), (23.12, 9.97, yaw))[2] == rb.BOARD_TURN_W
+    assert not any("the way on" in s for s in said)
+
+
+def test_sweeps_a_quarter_turn_each_side_then_asks_for_help():
+    # 8 s of asking was 80 deg at go2_flat_v5's 44 %, and turning back at half
+    # of it only ever came back to where it started: the other side unseen.
+    run, said = stub(open_(front=0.1, left=0.3, right=0.2))
+    assert run.respect_board((0.4, 0.0, 0.0), (0, 0, 0.0)) == (0.0, 0.0, rb.BOARD_TURN_W)
+    ways = sweep(run, 0.0, lambda yaw: 0.0)
+    flip = ways.index(-1.0)
+    assert math.isclose(flip * 0.05 * 0.44 * rb.BOARD_TURN_W, rb.BOARD_SWEEP_RAD, abs_tol=0.02)
+    assert changes(ways) == 1 and run.robot.t < rb.BOARD_GIVE_UP_S and run.robot.t > 8.5
+    assert math.isclose(run.board_swept, 3 * rb.BOARD_SWEEP_RAD, abs_tol=0.02)
+    assert run.gave_up[0] == "go2_board" and "270 deg" in run.gave_up[1]
 
 
 def test_no_room_either_side_turns_at_once():

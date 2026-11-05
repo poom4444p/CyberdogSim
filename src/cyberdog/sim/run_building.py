@@ -163,6 +163,33 @@ BOARD_PLAN_W = 0.3         # rad/s the plan asks, above which its way is the way
 BOARD_PLAN_TICKS = 3
 LOOKAHEAD = 3.0           # metres of the route ahead tested for obstructions
 BLOCKED_TICKS = 5         # consecutive ticks with no clear goal before believing it
+# ...and with the committed side gone before changing sides. One stray Mid-360
+# return beside the floor-1 trolley (board L 9.15 -> 3.60 -> 9.15 in one tick)
+# emptied the left for a tick, free_destination fell back to both sides and
+# said right, and since `lean` followed it the dog was committed to the 0.90 m
+# south gap with the 1.10 m north one open again a tick later -- told "left",
+# led right, and stuck on the trolley's corner (HIL 15:24 and 15:29).
+SIDE_FLIP_TICKS = BLOCKED_TICKS
+
+
+def hold_side(lean, aim, offset, held, against, ticks=SIDE_FLIP_TICKS):
+    """The detour this tick, given the side already committed to.
+
+    `held` is the last (aim, offset) on the committed side and `against` how
+    many ticks free_destination has offered the other side since it last
+    offered this one. Under `ticks` the old aim stands; at `ticks` the new
+    side is believed. A tick with no offset (straight on, or no way past)
+    changes nothing here: that is BLOCKED_TICKS' business.
+    Returns (aim, offset, lean, held, against).
+    """
+    side = math.copysign(1.0, offset) if offset else 0.0
+    if not side:
+        return aim, offset, lean, held, against
+    if lean and side != lean:
+        against += 1
+        if against < ticks and held is not None:
+            return held[0], held[1], lean, held, against
+    return aim, offset, side, (aim, offset), 0
 PROBE_D = 6.0             # metres ahead the blockage is judged at, not the destination's 2-4
 
 # People, who are not crates. A crate is gone round; a person is waited for --
@@ -1995,6 +2022,7 @@ class Run:
         hunting = halted = False
         stalled = no_goal = 0
         lean = 0.0                # the side of a detour once it is committed
+        held, against = None, 0   # its last aim, and ticks the other side was offered
 
         for n in range(MAX_TICKS):
             x, y, yaw = self.robot.get_pose()
@@ -2147,9 +2175,10 @@ class Run:
                 # Which way round it went, kept until the thing is out of
                 # sight: a detour that changes its mind halfway is a swerve,
                 # and the announcement below has already told the person which
-                # way they are about to be led.
-                if offset:
-                    lean = math.copysign(1.0, offset)
+                # way they are about to be led. Nor on one tick's say-so: see
+                # SIDE_FLIP_TICKS.
+                aim, offset, lean, held, against = hold_side(lean, aim, offset,
+                                                             held, against)
                 # One tick with no clear goal is noise -- the scan is rebuilt
                 # from scratch every tick and a single ray landing awkwardly
                 # should not start the stopping sequence.
@@ -2282,7 +2311,8 @@ class Run:
                 # Nothing in sight any more: next time is a new obstacle and
                 # deserves to be announced again, and gets its own side.
                 hunting = halted = False
-                stalled = lean = 0
+                stalled = lean = against = 0
+                held = None
             if offset and not hunting:
                 # Said before the dog leans, not during: the person's arm is
                 # attached to the handle, and which way it is about to go is

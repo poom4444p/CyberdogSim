@@ -2128,8 +2128,15 @@ class Run:
                 dest, corner = state["destination"], waypoints[i]
                 around = (math.dist((x, y), corner) + math.dist(corner, dest)
                           > math.dist((x, y), dest) + 0.1)
-                if (around and line_clear((x, y), corner, live.detected_at, need)
-                        and line_clear(corner, dest, live.detected_at, need, skip=0.0)):
+                # "Clear of everything" means a comfortable pass, not merely an
+                # allowed one: at `need` alone the floor-1 trolley released the
+                # dog level with its west face, 0.38 m off, to steer at a corner
+                # 20 m away on a line back towards it. Tighter than PASS_ROOM,
+                # free_destination decides -- it centres the pass when the gap
+                # has room and otherwise says straight on, as this did.
+                bar = max(need, perception.PASS_ROOM)
+                if (around and line_clear((x, y), corner, live.detected_at, bar)
+                        and line_clear(corner, dest, live.detected_at, bar, skip=0.0)):
                     aim, offset = dest, 0.0
                 else:
                     aim, offset = free_destination(dest, (x, y), live, probe=probe,

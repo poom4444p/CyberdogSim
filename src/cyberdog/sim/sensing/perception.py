@@ -79,6 +79,12 @@ CLUSTER_PAD = 0.25      # margin around a moving thing when taking it out of
                         # the planning field: its track is a centroid and a
                         # radius, and the returns off a coat sleeve are a
                         # little wider than either.
+PASS_ROOM = 0.45        # room a straight pass should keep before it is left
+                        # alone. Under it, and above PERSON_LINE, the pass is
+                        # allowed but centred in the gap when the gap has more.
+                        # The Go2 board's LiDAR guard closes the front at 0.30
+                        # m from the centreline; this is that and a margin.
+CENTRE_GAIN = 0.05      # ...and the extra room the middle must offer to be worth it
 SKIP = 0.30             # metres of the line ignored: where the dog already is
 STATIC_MIN = 0.20       # ...and from the walls the map already knew about
 MAX_OFFSET = 1.6        # how far sideways the goal may be moved, metres.
@@ -488,13 +494,24 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
         """Room for the person on the handle, too -- see PERSON_LINE."""
         return line_clear(xy, p, live.detected_at, PERSON_LINE)
 
-    if reachable(far) and reachable(goal) and roomy(far) and roomy(goal):
+    # Straight on is *allowed* at PERSON_LINE, but a pass that close is not
+    # what to aim for when the gap has more: the dog drives a line, not the
+    # middle of it, and arrives a little short of wherever it was sent. Floor-1
+    # trolley: once the line to the destination cleared it by 0.35 m the
+    # centring stopped, the dog went past at 0.38 m and drifted back towards it,
+    # and the board's own LiDAR guard closes at 0.30 m. So a line with less than
+    # PASS_ROOM goes on to be centred below -- and if nothing better turns up,
+    # straight on is still the answer it always was, never "no way past".
+    straight = reachable(far) and reachable(goal) and roomy(far) and roomy(goal)
+    if straight and (line_clear(xy, far, live.detected_at, PASS_ROOM)
+                     and line_clear(xy, goal, live.detected_at, PASS_ROOM)):
         return destination, 0.0
+    nothing = (destination, 0.0) if straight else (None, 0.0)
 
     dx, dy = far[0] - xy[0], far[1] - xy[1]
     d = math.hypot(dx, dy)
     if d < 1e-6:
-        return None, 0.0
+        return nothing
 
     # Offsets are measured across the ROUTE, not across the dog's current
     # heading. Measured from the dog's own line they shrink as it leans into
@@ -529,7 +546,15 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
                 p = (pinch[0] + nx * off * sign, pinch[1] + ny * off * sign)
                 if not point_ok(p) or not through_no_wall(pinch, p, skip=0.0):
                     continue
-                room = min(live.detected_at(*p), live.static_at(*p))
+                # Room against the real wall face, not the planner's inflated
+                # one: detected_at is a raw distance, and weighing it against
+                # a field that already gave the wall 0.25 m puts "roomiest"
+                # 0.12 m off the true middle, towards the obstacle. Floor-1
+                # trolley: gap centre y 10.30, chosen 10.11-10.20, and the dog
+                # went past 0.29 m from it (0.22 m on the board, whose guard
+                # closes at 0.30). point_ok still keeps STATIC_MIN of the
+                # inflated field, so no-go zones and the walls are respected.
+                room = min(live.detected_at(*p), live.wall_at(*p))
                 if room > best_room + 1e-9:
                     side, want, best_room = sign, off, room
             off += step
@@ -540,7 +565,11 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     if side is None:
         side, want, best_room = roomiest((1.0, -1.0))
     if side is None:
-        return None, 0.0
+        return nothing
+    # Centring a pass that was already allowed is only worth a swerve when the
+    # middle really has more room than the line the dog is on.
+    if straight and best_room < worst + CENTRE_GAIN:
+        return destination, 0.0
 
     # The destination goes as near that crossing as it can be reached from here.
     # Re-optimising "roomiest" at the destination instead is what made earlier
@@ -562,6 +591,26 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     # cartons with 0.24 m in hand against the 0.20 m it insists on, and one
     # tick of noise either way was the difference between squeezing past and
     # reporting no way through. Crossing by the pinch leaves the whole 0.70 m.
+    #
+    # But the pinch is the *tightest* spot, which is not always the *first*:
+    # with the dog's line running along an obstacle it is the far end, and the
+    # straight line to a point beside the far end shaves the near corner. Floor-1
+    # trolley: the aim beside its east end (24.7, 10.3) was a line that passed the
+    # west corner at 0.33 m, which `reachable` accepts (LINE_NEED), and the dog
+    # went by there at 0.38 m with the middle of the gap 0.55 m off. So slide the
+    # aim back along the offset line, towards the dog, to the furthest point the
+    # dog can drive straight at while keeping the room the gap offers -- the
+    # entrance of the gap, as a waypoint. Where the pinch's own line already
+    # keeps it, that is the pinch and nothing changes.
+    keep = max(min(PASS_ROOM, best_room - CENTRE_GAIN), LINE_NEED)
+    ux, uy = rdx / rd, rdy / rd         # along the route, forwards
+    run = (pinch[0] - xy[0]) * ux + (pinch[1] - xy[1]) * uy
+    s = 0.0
+    while s <= run - 2 * SKIP:
+        p = (pinch[0] + nx * want * side - ux * s, pinch[1] + ny * want * side - uy * s)
+        if reachable(p) and line_clear(xy, p, live.detected_at, keep):
+            return p, want * side
+        s += 0.2
     for o in tries:
         p = (pinch[0] + nx * o * side, pinch[1] + ny * o * side)
         if reachable(p):
@@ -578,4 +627,4 @@ def _free_destination(destination, xy, live, probe=None, need=DESTINATION_CLEAR,
     # Nothing on that side fits yet but the destination itself is still reachable:
     # keep going and ask again a metre later, rather than stopping on a
     # geometry that is about to change.
-    return (destination, 0.0) if reachable(goal) else (None, 0.0)
+    return (destination, 0.0) if (straight or reachable(goal)) else (None, 0.0)

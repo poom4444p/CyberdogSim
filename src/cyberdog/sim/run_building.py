@@ -125,7 +125,18 @@ BLOCKED_S = 8.0           # seconds stopped with no way past before giving up
 BOARD_NEAR_M = 0.45
 BOARD_CLEAR_M = 0.80
 BOARD_TURN_W = 0.4         # rad/s
-BOARD_GIVE_UP_S = 8.0
+# How far to look is how far the dog has turned, not how long it was asked:
+# 8 s at BOARD_TURN_W was meant as about half a turn, but go2_flat_v5 turns at
+# 0.175 rad/s when asked 0.4 (44 %; 75 % at 0.8), so 8 s was 80 deg, and the
+# lift lobby on floor 3 gave up facing a wall it had turned only part way
+# from (J4012, 2026-11-05). So a sweep: BOARD_SWEEP_RAD one way, back through
+# the start to as far the other way, then help -- or BOARD_GIVE_UP_S for a dog
+# that is not turning at all.
+BOARD_SWEEP_RAD = math.pi / 2
+BOARD_GIVE_UP_S = 30.0
+# The plan's turn the other way is a new way round only when it wants to face
+# somewhere new, by this much, not the same heading the turn carried past.
+BOARD_PLAN_MOVED = 0.3     # rad
 BOARD_STALL_S, BOARD_STALL_M = 2.0, 0.05   # asked forward this long, moved less: stuck
 # Before turning, a sidestep: the guard closes the front for anything within
 # BODY_HALF_W + MARGIN (0.30 m) of the dog's centre line, so a dog 0.25 m from
@@ -680,6 +691,9 @@ class Run:
         self.board_flipped = False
         self.board_side = None    # (sign, t, x, y) while sidestepping, before any turn
         self.board_against = 0    # ticks in a row the plan has asked the other way round
+        self.board_swept, self.board_yaw = 0.0, None   # rad turned since the turn began, last yaw
+        self.board_leg = 0.0      # rad turned since the turn last changed direction
+        self.board_plan_to = None # the heading the plan wanted when the turn took its way
         self.vlm_worker = None    # the call still running, dropped answer or not
         self.vlm_pool = None
         # Every velocity command sent, fingerprinted. Two runs of the same
@@ -1174,12 +1188,13 @@ class Run:
             BOARD_SIDE_M or BOARD_SIDE_S, and only while that side has more
             than BOARD_SIDE_ROOM;
           - still closed: turn slowly the plan's way (or the roomier side's),
-            and round the other way whenever the plan asks it for
-            BOARD_PLAN_TICKS; with no way from the plan, the other way at
-            half time;
-          - BOARD_GIVE_UP_S of turning without the front opening: stop and ask
-            the person for help, as the brain does when its own plan has no
-            way past.
+            and round the other way when the plan asks it for
+            BOARD_PLAN_TICKS towards a heading it did not want before;
+            BOARD_SWEEP_RAD one way and still closed: back through the start
+            to as far the other side;
+          - the sweep done (or BOARD_GIVE_UP_S, turning or not) without the
+            front opening: stop and ask the person for help, as the brain
+            does when its own plan has no way past.
         """
         vx, vy, w = cmd
         vx = max(vx, 0.0)                                    # never back into the person
@@ -1189,7 +1204,7 @@ class Run:
         # Asked forward and going nowhere: the guard crawls the dog from SLOW_M
         # down to a speed the gait does not step at (0.52 m from a wall, asked
         # 0.3 m/s, given 0.09), and that is as stuck as a closed front.
-        now, (x, y, _) = self.robot.now(), pose
+        now, (x, y, yaw) = self.robot.now(), pose
         stalled = False
         if vx > 0.1:
             if self.board_push is None:
@@ -1217,6 +1232,8 @@ class Run:
         def turn(sign, prefix=""):
             self.board_turning, self.board_flipped, self.board_since = sign, False, now
             self.board_against = 0
+            self.board_swept, self.board_leg, self.board_yaw = 0.0, 0.0, yaw
+            self.board_plan_to = yaw + w / K_W
             self.say(prefix + "Turning " + ("left" if sign > 0 else "right") + " to find the way.")
 
         side = self.board_side
@@ -1248,28 +1265,41 @@ class Run:
                 self.board_turning = None                    # open again: the plan takes over
                 return (vx, vy, w)
             want = planned()
-            if want is not None and want != self.board_turning:
-                # The plan wants round the other way: after BOARD_PLAN_TICKS of
-                # it in a row (not one tick of a plan changing its mind), go.
+            step = abs(wrap(yaw - self.board_yaw))
+            self.board_swept += step
+            self.board_leg += step
+            self.board_yaw = yaw
+            heading = yaw + w / K_W                          # where the plan wants to face
+            if (want is not None and want != self.board_turning
+                    and abs(wrap(heading - self.board_plan_to)) > BOARD_PLAN_MOVED):
+                # The plan wants round the other way, and somewhere new: after
+                # BOARD_PLAN_TICKS of it in a row (not one tick of a plan
+                # changing its mind), go. Only somewhere new: wanting the same
+                # heading, the plan's w changes sign each time the turn carries
+                # the nose past it, and followed it shook the dog's head +-30 deg
+                # at the trolley gap for 10 s (floor 1, J4012, 2026-11-05).
                 self.board_against += 1
                 if self.board_against >= BOARD_PLAN_TICKS:
                     self.board_turning, self.board_against = want, 0
+                    self.board_plan_to, self.board_leg = heading, 0.0
                     self.say("Turning " + ("left" if want > 0 else "right") + ", the way on.")
             else:
                 self.board_against = 0
-            if (self.robot.now() - self.board_since > BOARD_GIVE_UP_S / 2
-                    and not self.board_flipped and want is None):
-                # Half the time one way, still closed, and no way from the plan:
-                # the other way. In the gap between the trolley and the wall,
-                # turning towards the wall never opened, and the way on was the
-                # other side.
+            took = now - self.board_since
+            if not self.board_flipped and (self.board_leg > BOARD_SWEEP_RAD
+                                           or (took > BOARD_GIVE_UP_S / 2 and want is None)):
+                # A quarter turn one way, still closed: sweep back through the
+                # start to as far the other side. In the gap between the trolley
+                # and the wall, turning towards the wall never opened, and the
+                # way on was the other side.
                 self.board_turning, self.board_flipped = -self.board_turning, True
+                self.board_leg = 0.0
                 self.say("Trying the other way.")
-            if self.robot.now() - self.board_since > BOARD_GIVE_UP_S:
+            if self.board_swept > 3 * BOARD_SWEEP_RAD or took > BOARD_GIVE_UP_S:
                 self.say("I cannot get past this. Please help me find the way.")
-                x, y, _ = pose
                 self.gave_up = ("go2_board", f"the board's guard held the front closed for "
-                                f"{BOARD_GIVE_UP_S:.0f} s at ({x:.1f}, {y:.1f}), turning did not open it")
+                                f"{took:.0f} s at ({x:.1f}, {y:.1f}), turning "
+                                f"{math.degrees(self.board_swept):.0f} deg did not open it")
                 self.board_gave_up = True
                 return (0.0, 0.0, 0.0)
             return (0.0, 0.0, BOARD_TURN_W * self.board_turning)

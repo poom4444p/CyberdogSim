@@ -1931,13 +1931,25 @@ class Run:
         must not take the dog -- centre or front -- or the room round the
         person on the handle below its threshold, or below what it is now if
         that is less, nor bring the person on the handle within
-        ce_rrt.HANDLER_SEP of anybody's predicted path."""
+        ce_rrt.HANDLER_SEP of anybody's predicted path.
+
+        On a robot with its own LiDAR guard (go2_board) the board's word on
+        the room sideways goes too, as in respect_board: a step needs more
+        than BOARD_SIDE_ROOM free that way, and a blind board (no fresh
+        frame) gets no step. The brain's own clearance once judged a step
+        towards the trolley fine with 0.09 m free on the board."""
         x, y, yaw = pose
         people = [t for t in tracks
                   if (t.moving or t.walked) and t.speed >= EVADE_V]
         if not people:
             self.evading = 0.0
             return 0.0
+        board = None
+        if getattr(self.robot, "REAL_TIME", False):
+            board = self.robot.board_clearance()
+            if board is None:                            # blind: the board will not step it
+                self.evading = 0.0
+                return 0.0
         lx, ly = -math.sin(yaw), math.cos(yaw)          # the dog's left
         bx, by = -HANDLER_BEHIND * math.cos(yaw), -HANDLER_BEHIND * math.sin(yaw)
 
@@ -1967,6 +1979,8 @@ class Run:
                   min(HANDLER_ROOM, self.handler_room(live, x, y, yaw)))
         best, best_d = 0.0, stay + EVADE_GAIN
         for v in (SIDE_V, -SIDE_V):
+            if board is not None and board["left" if v > 0 else "right"] <= BOARD_SIDE_ROOM:
+                continue                                 # the board sees too little room that way
             s_ = v * EVADE_STEP_T
             ex, ey = x + lx * s_, y + ly * s_
             if (live.static_at(ex, ey) < floors[0] or live.detected_at(ex, ey) < floors[1]
